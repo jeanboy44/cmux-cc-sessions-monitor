@@ -1,9 +1,10 @@
 //! "Pochi" — the monitor's own pixel mascot.
 //!
-//! Pochi is a round mochi-dumpling sprite with a single bent antenna whose tip
-//! glows in the status accent color, two dot eyes, a two-pixel shine on the
-//! upper left and two stubby feet. The silhouette (dome body + antenna, no side
-//! arms, no flat top) is deliberately different from Claude Code's mascot.
+//! Pochi is a small round mochi-dumpling sprite with a single antenna pixel
+//! bent off its top-right corner whose tip glows in the status accent color,
+//! two dot eyes and two stubby feet. The silhouette (dome body + antenna, no
+//! side arms, no flat top) is deliberately different from Claude Code's
+//! mascot. Kept tiny and flat on purpose: no shine, few sparks.
 //!
 //! Sprites are drawn with half-block characters: every terminal cell holds two
 //! vertical pixels (`▀` fg = top pixel, bg = bottom pixel; `▄` for a lone
@@ -13,7 +14,7 @@
 //! Animation is a pure function of the 12 fps `tick`: a status owns a table of
 //! poses with hold durations, and the frame is `tick % loop_len`. Poses follow
 //! the pixelfx-style rules: 12 fps holds, anticipation (squash) before a jump,
-//! small 5-color palettes (shade → body → light, dark, accent).
+//! small 4-color palettes (shade → body, dark, accent).
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -24,9 +25,9 @@ use crate::ui::style;
 /// Sprite sizes in terminal cells (each cell = 1×2 pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpriteSize {
-    /// 8×4 cells (8×8 px) — the view A character card.
+    /// 6×3 cells (6×6 px) — the view A character card.
     Small,
-    /// 12×6 cells (12×12 px) — the view B character card.
+    /// 8×4 cells (8×8 px) — the view B character card and the empty screen.
     Large,
 }
 
@@ -34,8 +35,8 @@ impl SpriteSize {
     /// (columns, rows) in terminal cells.
     pub const fn cells(self) -> (u16, u16) {
         match self {
-            SpriteSize::Small => (8, 4),
-            SpriteSize::Large => (12, 6),
+            SpriteSize::Small => (6, 3),
+            SpriteSize::Large => (8, 4),
         }
     }
 }
@@ -55,7 +56,6 @@ enum Px {
     Body,
     Shade,
     Dark,
-    Light,
     Accent,
 }
 
@@ -229,7 +229,6 @@ struct Palette {
     body: Color,
     shade: Color,
     dark: Color,
-    light: Color,
     accent: Color,
 }
 
@@ -240,35 +239,30 @@ fn palette(status: Status) -> Palette {
             body,
             shade: Color::Rgb(170, 80, 24),
             dark: Color::Rgb(44, 26, 18),
-            light: Color::Rgb(255, 204, 128),
             accent: Color::Rgb(80, 176, 255),
         },
         Status::NeedsInput => Palette {
             body,
             shade: Color::Rgb(186, 134, 16),
             dark: Color::Rgb(48, 34, 10),
-            light: Color::Rgb(255, 246, 176),
             accent: Color::Rgb(255, 84, 60),
         },
         Status::Idle => Palette {
             body,
             shade: Color::Rgb(92, 76, 64),
             dark: Color::Rgb(44, 36, 30),
-            light: Color::Rgb(168, 144, 120),
             accent: Color::Rgb(150, 162, 196),
         },
         Status::Done => Palette {
             body,
             shade: Color::Rgb(40, 128, 70),
             dark: Color::Rgb(16, 44, 26),
-            light: Color::Rgb(176, 240, 186),
             accent: Color::Rgb(255, 232, 110),
         },
         Status::Unknown => Palette {
             body,
             shade: Color::Rgb(96, 96, 96),
             dark: Color::Rgb(44, 44, 44),
-            light: Color::Rgb(188, 188, 188),
             accent: Color::Rgb(210, 210, 210),
         },
     }
@@ -281,7 +275,6 @@ impl Palette {
             Px::Body => Some(self.body),
             Px::Shade => Some(self.shade),
             Px::Dark => Some(self.dark),
-            Px::Light => Some(self.light),
             Px::Accent => Some(self.accent),
         }
     }
@@ -292,41 +285,38 @@ struct Geo {
     w: i16,
     h: i16,
     tip: (i16, i16),
-    stem: Option<(i16, i16)>,
     body_top: i16,
     /// Inclusive x span per body row.
     rows: &'static [(i16, i16)],
-    light: &'static [(i16, i16)],
     /// y of the eye row at dy = 0.
     eye_y: i16,
     feet_y: i16,
     slots: &'static [(i16, i16)],
 }
 
+/// 8×8 px: 6-wide body, antenna tip off the top-right corner.
 const LARGE: Geo = Geo {
-    w: 12,
-    h: 12,
-    tip: (7, 1),
-    stem: Some((6, 2)),
-    body_top: 3,
-    rows: &[(3, 8), (2, 9), (1, 10), (1, 10), (1, 10), (1, 10), (2, 9), (3, 8)],
-    light: &[(3, 4), (2, 5)],
-    eye_y: 6,
-    feet_y: 11,
-    slots: &[(9, 0), (5, 1), (10, 2), (8, 0), (0, 3), (11, 5), (0, 8), (11, 9), (1, 1)],
-};
-
-const SMALL: Geo = Geo {
     w: 8,
     h: 8,
     tip: (6, 1),
-    stem: None,
     body_top: 2,
     rows: &[(2, 5), (1, 6), (1, 6), (1, 6), (2, 5)],
-    light: &[(2, 3)],
     eye_y: 4,
     feet_y: 7,
     slots: &[(7, 0), (5, 0), (7, 2), (7, 3), (0, 2), (7, 5), (0, 6), (7, 7), (0, 0)],
+};
+
+/// 6×6 px: 5-wide body in columns 0..=4; column 5 stays free for glyphs.
+const SMALL: Geo = Geo {
+    w: 6,
+    h: 6,
+    tip: (4, 0),
+    body_top: 1,
+    rows: &[(1, 3), (0, 4), (0, 4), (1, 3)],
+    eye_y: 2,
+    feet_y: 5,
+    // Fewer free pixels: slots 1 and 4 share the top-left corner.
+    slots:&[(5, 1), (0, 0), (5, 4), (5, 2), (0, 0), (5, 3), (0, 5), (5, 5), (2, 0)],
 };
 
 fn geo(size: SpriteSize) -> &'static Geo {
@@ -339,47 +329,44 @@ fn geo(size: SpriteSize) -> &'static Geo {
 /// Eye (and mouth) pixels as (x, offset from eye row).
 fn face(size: SpriteSize, eyes: Eyes) -> &'static [(i16, i16)] {
     match (size, eyes) {
-        (SpriteSize::Large, Open) => &[(3, 0), (3, 1), (8, 0), (8, 1)],
-        (SpriteSize::Large, Glance) => &[(4, 0), (4, 1), (9, 0), (9, 1)],
-        (SpriteSize::Large, Alert) => &[(3, 0), (4, 0), (3, 1), (4, 1), (7, 0), (8, 0), (7, 1), (8, 1), (5, 3), (6, 3)],
-        (SpriteSize::Large, Closed) => &[(2, 1), (3, 1), (8, 1), (9, 1)],
-        (SpriteSize::Large, Happy) => &[(2, 1), (3, 0), (4, 1), (7, 1), (8, 0), (9, 1), (5, 3), (6, 3)],
-        (SpriteSize::Large, Odd) => &[(3, 1), (8, 0), (8, 1)],
-        (SpriteSize::Small, Open) => &[(2, 0), (5, 0)],
-        (SpriteSize::Small, Glance) => &[(3, 0), (6, 0)],
-        (SpriteSize::Small, Alert) => &[(2, -1), (2, 0), (5, -1), (5, 0)],
-        (SpriteSize::Small, Closed) => &[(1, 0), (2, 0), (5, 0), (6, 0)],
-        (SpriteSize::Small, Happy) => &[(2, -1), (5, -1), (3, 1), (4, 1)],
-        (SpriteSize::Small, Odd) => &[(2, 1), (5, 0)],
+        (SpriteSize::Large, Open) => &[(2, 0), (5, 0)],
+        (SpriteSize::Large, Glance) => &[(3, 0), (6, 0)],
+        (SpriteSize::Large, Alert) => &[(2, -1), (2, 0), (5, -1), (5, 0)],
+        (SpriteSize::Large, Closed) => &[(1, 0), (2, 0), (5, 0), (6, 0)],
+        (SpriteSize::Large, Happy) => &[(2, -1), (5, -1), (3, 1), (4, 1)],
+        (SpriteSize::Large, Odd) => &[(2, 1), (5, 0)],
+        (SpriteSize::Small, Open) => &[(1, 0), (3, 0)],
+        (SpriteSize::Small, Glance) => &[(2, 0), (4, 0)],
+        (SpriteSize::Small, Alert) => &[(1, 0), (1, 1), (3, 0), (3, 1)],
+        (SpriteSize::Small, Closed) => &[(0, 1), (1, 1), (3, 1), (4, 1)],
+        (SpriteSize::Small, Happy) => &[(1, -1), (3, -1), (2, 1)],
+        (SpriteSize::Small, Odd) => &[(1, 1), (3, 0)],
     }
 }
 
 fn feet(size: SpriteSize, f: Feet) -> &'static [i16] {
     match (size, f) {
-        (SpriteSize::Large, Both) => &[3, 4, 7, 8],
-        (SpriteSize::Large, Spread) => &[2, 3, 8, 9],
-        (SpriteSize::Large, StepL) => &[4, 7, 8],
-        (SpriteSize::Large, StepR) => &[3, 4, 7],
-        (SpriteSize::Large, Tucked) => &[4, 7],
-        (SpriteSize::Small, Both) => &[2, 5],
-        (SpriteSize::Small, Spread) => &[1, 6],
-        (SpriteSize::Small, StepL) => &[3, 5],
-        (SpriteSize::Small, StepR) => &[2, 4],
-        (SpriteSize::Small, Tucked) => &[3, 4],
+        (SpriteSize::Large, Both) => &[2, 5],
+        (SpriteSize::Large, Spread) => &[1, 6],
+        (SpriteSize::Large, StepL) => &[3, 5],
+        (SpriteSize::Large, StepR) => &[2, 4],
+        (SpriteSize::Large, Tucked) => &[3, 4],
+        (SpriteSize::Small, Both) => &[1, 3],
+        (SpriteSize::Small, Spread) => &[0, 4],
+        (SpriteSize::Small, StepL) => &[2, 3],
+        (SpriteSize::Small, StepR) => &[1, 2],
+        (SpriteSize::Small, Tucked) => &[2],
     }
 }
 
-/// Cell (col, row) and text of an overlay glyph.
+/// Cell (col, row) and text of an overlay glyph, always in the free last
+/// column: `z` one row lower than the rest so it "rises" into `Z`.
 fn glyph_cell(size: SpriteSize, g: Glyph) -> (usize, usize, &'static str) {
     let (w, _) = size.cells();
     let last = w as usize - 1;
     match g {
         Glyph::Bang => (last, 0, "!"),
-        // Small: straight above the shoulder; Large: one column in, rising diagonally.
-        Glyph::ZLow => match size {
-            SpriteSize::Small => (last, 1, "z"),
-            SpriteSize::Large => (last - 1, 1, "z"),
-        },
+        Glyph::ZLow => (last, 1, "z"),
         Glyph::ZHigh => (last, 0, "Z"),
         Glyph::Question => (last, 0, "?"),
         Glyph::Check => (last, 0, "✓"),
@@ -396,16 +383,10 @@ fn pixels(size: SpriteSize, p: &Pose) -> Vec<Vec<Px>> {
     };
     let dy = p.dy;
     put(g.tip.0, g.tip.1 + dy, if p.lit { Px::Accent } else { Px::Shade });
-    if let Some((x, y)) = g.stem {
-        put(x, y + dy, Px::Shade);
-    }
     for (i, (x0, x1)) in g.rows.iter().enumerate() {
         for x in *x0..=*x1 {
             put(x, g.body_top + dy + i as i16, Px::Body);
         }
-    }
-    for (x, y) in g.light {
-        put(*x, y + dy, Px::Light);
     }
     for (x, off) in face(size, p.eyes) {
         put(*x, g.eye_y + dy + off, Px::Dark);
@@ -457,7 +438,7 @@ fn cell(top: Option<Color>, bottom: Option<Color>) -> Span<'static> {
     }
 }
 
-/// Test-only pixel dump: `.` clear, `o` body, `=` shade, `#` dark, `+` light, `*` accent.
+/// Test-only pixel dump: `.` clear, `o` body, `=` shade, `#` dark, `*` accent.
 #[cfg(test)]
 pub fn gallery_pixels(status: Status, size: SpriteSize, tick: u64) -> Vec<String> {
     let table = poses(status);
@@ -471,7 +452,6 @@ pub fn gallery_pixels(status: Status, size: SpriteSize, tick: u64) -> Vec<String
                     Px::Body => 'o',
                     Px::Shade => '=',
                     Px::Dark => '#',
-                    Px::Light => '+',
                     Px::Accent => '*',
                 })
                 .collect()
@@ -497,6 +477,12 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn sprite_sizes_are_compact() {
+        assert_eq!(SpriteSize::Small.cells(), (6, 3));
+        assert_eq!(SpriteSize::Large.cells(), (8, 4));
     }
 
     #[test]

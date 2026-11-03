@@ -1,7 +1,8 @@
-//! Shared game-style look: palette, pixel border, blinking cursor.
+//! Shared game-style look: palette, thin rounded border, blinking cursor.
 //!
-//! Tiles (Task 7) and the settings "game menu" window (Task 9) use the same
-//! border set, cursor glyph and blink rhythm so the whole UI reads as one game.
+//! Tiles and the settings "game menu" window use the same border set, cursor
+//! glyph and blink rhythm so the whole UI reads as one game. The frame is a
+//! thin one-cell line so the mascot and text stay the focus.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
@@ -9,8 +10,8 @@ use ratatui::widgets::Block;
 
 use crate::model::Status;
 
-/// Chunky half-cell pixel frame: `▛▀▜ ▌▐ ▙▄▟`.
-pub const BORDER: border::Set = border::QUADRANT_OUTSIDE;
+/// Thin rounded line frame: `╭─╮ │ │ ╰─╯`.
+pub const BORDER: border::Set = border::ROUNDED;
 
 /// Menu / selection cursor glyph.
 pub const CURSOR: &str = "▶";
@@ -75,8 +76,8 @@ pub fn cursor_visible(tick: u64) -> bool {
     tick % CURSOR_PERIOD < CURSOR_PERIOD / 2
 }
 
-/// Pixel-bordered window in `color`; `selected`/`flash` brighten it.
-pub fn pixel_block(color: Color, selected: bool, flash: bool) -> Block<'static> {
+/// Thin-bordered window in `color`; `selected`/`flash` brighten it.
+pub fn window_block(color: Color, selected: bool, flash: bool) -> Block<'static> {
     let style = if flash {
         Style::new().fg(FLASH).add_modifier(Modifier::BOLD)
     } else if selected {
@@ -96,5 +97,12 @@ mod tests {
         assert!((0..6).all(cursor_visible));
         assert!(!(6..12).any(cursor_visible));
         assert!(cursor_visible(12));
+    }
+
+    #[test]
+    fn border_is_thin_rounded_line() {
+        assert_eq!(BORDER, border::ROUNDED);
+        assert_eq!(BORDER.top_left, "╭");
+        assert_eq!(BORDER.vertical_left, "│");
     }
 }

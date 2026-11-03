@@ -1,8 +1,8 @@
-//! Character-card tiles: pixel border, mascot, name, status badge, extras.
+//! Character-card tiles: thin rounded border, mascot, name, status badge, extras.
 //!
 //! Minimum sizes (borders included), used by the app to compute columns:
-//! - view A (horizontal card): 30×6 — 8×4 mascot left, ≥19 text columns right.
-//! - view B (vertical card): 24×12 — 12×6 mascot on top, ≥4 text rows below.
+//! - view A (horizontal card): 28×6 — 6×3 mascot top-left, ≥19 text columns right.
+//! - view B (vertical card): 24×10 — 8×4 mascot on top, ≥4 text rows below.
 //!
 //! Text rows in priority order: name, badge line, branch, PR, summary (each
 //! extra only when enabled and known). View A always shows at most 4 rows, so
@@ -42,16 +42,16 @@ impl ViewKind {
 
 /// Minimum (width, height) of a full tile in `view`, borders included.
 ///
-/// View A (30×6) shows at most 4 text rows: name, badge line (status +
+/// View A (28×6) shows at most 4 text rows: name, badge line (status +
 /// elapsed + last activity, dropping last activity then elapsed when too
 /// narrow), branch, and ONE of PR / summary — PR first, summary only when the
 /// PR row is absent (disabled or no PR). Rows of disabled extras collapse.
-/// View B (24×12) has 4 text rows at minimum and uses the same priority order;
+/// View B (24×10) has 4 text rows at minimum and uses the same priority order;
 /// taller B tiles show every enabled row.
 pub fn tile_size(view: ViewKind) -> (u16, u16) {
     match view {
-        ViewKind::A => (30, 6),
-        ViewKind::B => (24, 12),
+        ViewKind::A => (28, 6),
+        ViewKind::B => (24, 10),
     }
 }
 
@@ -152,7 +152,7 @@ pub fn render_tile_with_sprite(
     }
     let rect = shake_rect(base, fx.shake, parent);
     let done = s.status == Status::Done;
-    let mut block = style::pixel_block(style::status_color(s.status), selected, fx.flash);
+    let mut block = style::window_block(style::status_color(s.status), selected, fx.flash);
     if done && !selected && !fx.flash {
         block = block.border_style(Style::new().fg(style::DONE).add_modifier(Modifier::DIM));
     }
@@ -163,7 +163,8 @@ pub fn render_tile_with_sprite(
     let (sw, sh) = view.sprite_size().cells();
     let (sprite_area, text_area, align) = match view {
         ViewKind::A => {
-            let sprite_area = Rect::new(inner.x, inner.y + inner.height.saturating_sub(sh) / 2, sw.min(inner.width), sh.min(inner.height));
+            // Top-aligned with the name row.
+            let sprite_area = Rect::new(inner.x, inner.y, sw.min(inner.width), sh.min(inner.height));
             let gap = sw + 1;
             let text = Rect::new(inner.x + gap, inner.y, inner.width.saturating_sub(gap), inner.height);
             (sprite_area, text, Alignment::Left)
@@ -345,8 +346,9 @@ mod tests {
     fn tile_view_a_shows_name_and_status() {
         let rows = tile(40, 8, &session("proj-a", Status::Running), &Config::default(), false, 0, ViewKind::A);
         let text = rows.join("\n");
-        assert!(rows[0].starts_with('▛') && rows[0].ends_with('▜'), "pixel border: {text}");
-        assert!(rows[7].starts_with('▙') && rows[7].ends_with('▟'));
+        assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮'), "thin rounded border: {text}");
+        assert!(rows[7].starts_with('╰') && rows[7].ends_with('╯'));
+        assert!(rows[1..7].iter().all(|r| r.starts_with('│') && r.ends_with('│')), "{text}");
         let name_row = rows.iter().position(|r| r.contains("proj-a")).expect(&text);
         assert_eq!(name_row, 1, "name on the first inner row");
         let name_col = rows[name_row].chars().position(|c| c == 'p').unwrap();
@@ -396,15 +398,15 @@ mod tests {
     #[test]
     fn tile_truncates_wide_korean_name_without_panic() {
         let s = session("프로젝트-아주-아주-긴-이름-입니다-정말로", Status::Running);
-        for w in 30..44 {
+        for w in 28..44 {
             let rows = tile(w, 6, &s, &Config::default(), false, 0, ViewKind::A);
             let row = &rows[1];
             assert!(row.contains("프로젝트"), "{row}");
             assert!(row.contains('…'), "{row}");
-            assert!(row.ends_with('▐'), "border intact: {row:?}");
+            assert!(row.ends_with('│'), "border intact: {row:?}");
         }
         for w in 24..36 {
-            let rows = tile(w, 12, &s, &Config::default(), true, 0, ViewKind::B);
+            let rows = tile(w, 10, &s, &Config::default(), true, 0, ViewKind::B);
             assert!(rows.iter().any(|r| r.contains("프로") && r.contains('…')));
         }
     }
@@ -413,13 +415,13 @@ mod tests {
     fn tile_tiny_area_does_not_panic() {
         let s = session("proj-a", Status::Idle);
         for view in [ViewKind::A, ViewKind::B] {
-            for (w, h) in [(20, 6), (5, 2), (1, 1), (0, 0), (2, 40), (23, 11)] {
+            for (w, h) in [(20, 6), (5, 2), (1, 1), (0, 0), (2, 40), (23, 11), (27, 9)] {
                 let rows = tile(w, h, &s, &Config::default(), true, 0, view);
                 if w == 0 || h == 0 {
                     continue;
                 }
                 // Too small for a card: just the name line, no border.
-                assert!(!rows.join("").contains('▛'), "{view:?} {w}x{h}");
+                assert!(!rows.join("").contains('╭'), "{view:?} {w}x{h}");
                 assert_eq!(rows[0], truncate_to_width("proj-a", w as usize) + &" ".repeat(w as usize - truncate_to_width("proj-a", w as usize).chars().count()));
             }
         }
@@ -445,9 +447,9 @@ mod tests {
         }
     }
 
-    /// Text column of a view A row: after the border, 8 mascot cells and the gap.
+    /// Text column of a view A row: after the border, 6 mascot cells and the gap.
     fn a_text(row: &str) -> String {
-        row.chars().skip(10).collect::<String>().trim_end_matches('▐').to_string()
+        row.chars().skip(8).collect::<String>().trim_end_matches('│').to_string()
     }
 
     #[test]
@@ -481,7 +483,7 @@ mod tests {
         let mut s = session("proj-a", Status::NeedsInput);
         s.started_at = Some(now - Duration::from_secs(400 * 86_400 + 5));
         // " INPUT " (7) + " 400d" (5) + " ·2m ago" (8) = 20 > 19 → last activity dropped.
-        let rows = tile(30, 6, &s, &all_extras(), false, 0, ViewKind::A);
+        let rows = tile(28, 6, &s, &all_extras(), false, 0, ViewKind::A);
         assert_eq!(a_text(&rows[2]), format!("{:<19}", " INPUT  400d"));
         let flat = |w: usize| -> String {
             let lines = text_lines(&s, &all_extras(), w, now);
@@ -555,6 +557,10 @@ mod tests {
             assert!(!off.contains('▶'), "{view:?}: {off}");
             assert!(on_again.contains('▶'));
             assert!(!unselected.contains('▶'));
+            // The cursor takes the thin left border cell of the name row.
+            let name_row = |t: &str| t.lines().find(|r| r.contains("proj-a")).unwrap().to_string();
+            assert!(name_row(&on).starts_with('▶'), "{view:?}: {on}");
+            assert!(name_row(&off).starts_with('│'), "{view:?}: {off}");
         }
     }
 
@@ -599,8 +605,8 @@ mod tests {
 
     #[test]
     fn tile_size_is_documented_minimum() {
-        assert_eq!(tile_size(ViewKind::A), (30, 6));
-        assert_eq!(tile_size(ViewKind::B), (24, 12));
+        assert_eq!(tile_size(ViewKind::A), (28, 6));
+        assert_eq!(tile_size(ViewKind::B), (24, 10));
     }
 
     #[test]
@@ -642,7 +648,7 @@ mod tests {
         let fx = TileFx { shake: (2, 1), flash: false };
         let buf = draw(34, 8, |f| render_tile(f, Rect::new(0, 0, 30, 6), &s, &Config::default(), false, 0, fx, ViewKind::A));
         let rows = rows(&buf);
-        assert!(rows[1].chars().nth(2) == Some('▛'), "{}", rows.join("\n"));
+        assert!(rows[1].chars().nth(2) == Some('╭'), "{}", rows.join("\n"));
     }
 
     /// Plain-text gallery of every sprite and both tile views.
@@ -664,7 +670,7 @@ mod tests {
                         (0..len).step_by((len as usize / 6).max(2)).collect()
                     }
                 };
-                println!("== {st:?} {size:?} ticks {ticks:?} (pixels: o body = shade # dark + light * accent; then half-block cells)");
+                println!("== {st:?} {size:?} ticks {ticks:?} (pixels: o body = shade # dark * accent; then half-block cells)");
                 let pix: Vec<Vec<String>> = ticks.iter().map(|t| gallery_pixels(st, size, *t)).collect();
                 for r in 0..pix[0].len() {
                     println!("{}", pix.iter().map(|p| p[r].clone()).collect::<Vec<_>>().join("   "));

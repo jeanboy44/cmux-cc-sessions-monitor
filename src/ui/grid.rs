@@ -81,13 +81,13 @@ mod tests {
     #[test]
     fn compute_cols_never_zero() {
         for view in [ViewKind::A, ViewKind::B] {
-            for w in [0u16, 1, 5, 23, 29] {
+            for w in [0u16, 1, 5, 23, 27] {
                 assert_eq!(compute_cols(w, view), 1, "{view:?} w={w}");
             }
         }
-        assert_eq!(compute_cols(90, ViewKind::A), 3);
-        assert_eq!(compute_cols(119, ViewKind::A), 3);
-        assert_eq!(compute_cols(120, ViewKind::A), 4);
+        assert_eq!(compute_cols(84, ViewKind::A), 3);
+        assert_eq!(compute_cols(111, ViewKind::A), 3);
+        assert_eq!(compute_cols(112, ViewKind::A), 4);
         assert_eq!(compute_cols(48, ViewKind::B), 2);
         assert_eq!(compute_cols(u16::MAX, ViewKind::B), u16::MAX as usize / 24);
     }
@@ -97,7 +97,8 @@ mod tests {
         assert_eq!(visible_rows(0, ViewKind::A), 1);
         assert_eq!(visible_rows(5, ViewKind::A), 1);
         assert_eq!(visible_rows(18, ViewKind::A), 3);
-        assert_eq!(visible_rows(25, ViewKind::B), 2);
+        assert_eq!(visible_rows(29, ViewKind::B), 2);
+        assert_eq!(visible_rows(30, ViewKind::B), 3);
     }
 
     #[test]
@@ -139,7 +140,7 @@ mod tests {
         let cols = compute_cols(area.width, ViewKind::A); // 3
         let rects: Vec<Rect> = (0..cols).map(|c| cell_rect(area, cols, c, 0, ViewKind::A)).collect();
         assert_eq!(rects.iter().map(|r| r.width).sum::<u16>(), 100);
-        assert!(rects.iter().all(|r| r.width >= 30 && r.height == 6 && r.y == 1));
+        assert!(rects.iter().all(|r| r.width >= 28 && r.height == 6 && r.y == 1));
         assert_eq!(rects[0].x, 2);
         assert_eq!(rects[2].x + rects[2].width, 102);
         assert_eq!(cell_rect(area, cols, 1, 2, ViewKind::A).y, 1 + 12);

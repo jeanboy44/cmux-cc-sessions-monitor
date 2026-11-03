@@ -12,7 +12,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::{Config, ViewMode};
-use crate::ui::style::{self, cursor_visible, pixel_block, CURSOR};
+use crate::ui::style::{self, cursor_visible, window_block, CURSOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsItem {
@@ -119,7 +119,7 @@ pub fn render_settings(f: &mut Frame, area: Rect, cfg: &Config, cursor: usize, t
         return;
     }
     let rect = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
-    let block = pixel_block(style::SELECTED, false, false)
+    let block = window_block(style::SELECTED, false, false)
         .title(Line::styled(TITLE, Style::new().fg(style::SELECTED).add_modifier(Modifier::BOLD)));
     let inner = block.inner(rect);
     f.render_widget(Clear, rect);
@@ -215,7 +215,7 @@ mod tests {
         let row = |label: &str| text.iter().find(|l| l.contains(label)).unwrap().clone();
         assert!(row("경과 시간").contains(CURSOR), "cursor on the selected row");
         assert_eq!(all.matches(CURSOR).count(), 1);
-        assert!(row("경과 시간").contains("[x]") && row("경과 시간").trim_end_matches(['│', '▌', '▐', ' ']).ends_with("켜짐"));
+        assert!(row("경과 시간").contains("[x]") && row("경과 시간").trim_end_matches(['│', ' ']).ends_with("켜짐"));
         assert!(row("마지막 활동").contains("[ ]") && row("마지막 활동").contains("꺼짐"));
         assert!(row("뷰").contains('B'));
         assert!(row("PR 상태").contains("꺼짐"));
