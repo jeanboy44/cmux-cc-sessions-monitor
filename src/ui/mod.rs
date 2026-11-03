@@ -5,6 +5,7 @@ pub mod groups;
 pub mod hud;
 pub mod mascot;
 pub mod preview;
+pub mod scene;
 pub mod screen;
 pub mod settings;
 pub mod style;

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod actor;
 pub mod color;
 pub mod frame;
 pub mod math;
