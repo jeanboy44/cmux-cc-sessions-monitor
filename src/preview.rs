@@ -172,7 +172,6 @@ pub fn spawn_preview(
 mod tests {
     use super::*;
     use crate::source::cmux::{CmuxSessionRef, FakeCmux};
-    use std::collections::HashSet;
     use unicode_width::UnicodeWidthStr;
 
     #[test]
@@ -237,7 +236,7 @@ mod tests {
         f.screens.insert("sf-a".into(), Ok("screen of a".into()));
         f.screens.insert("sf-b".into(), Ok("screen of b".into()));
         f.screens.insert("sf-bad".into(), Err("read failed".into()));
-        f.surfaces_result = Ok(HashSet::new());
+        f.tree_result = Ok(Default::default());
         Arc::new(f)
     }
 
@@ -313,8 +312,8 @@ mod tests {
         fn sessions(&self) -> anyhow::Result<Vec<CmuxSessionRef>> {
             self.0.sessions()
         }
-        fn surfaces(&self) -> anyhow::Result<HashSet<String>> {
-            self.0.surfaces()
+        fn tree(&self) -> anyhow::Result<crate::source::cmux::TreeLayout> {
+            self.0.tree()
         }
         fn focus(&self, w: &str, s: &str) -> anyhow::Result<()> {
             self.0.focus(w, s)

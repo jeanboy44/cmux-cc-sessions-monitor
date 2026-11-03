@@ -45,6 +45,10 @@ pub struct Snapshot {
     /// PR availability note for the footer while PR info is on
     /// (e.g. "PR: az 로그인 필요"); see [`crate::pr::pr_note`].
     pub pr_note: Option<String>,
+    /// cmux windows (uppercase ids) in tree order; empty when the tree is unknown.
+    pub window_order: Vec<String>,
+    /// The window holding the monitor's own surface, if known.
+    pub current_window: Option<String>,
     pub(crate) cmux_refs: Vec<CmuxSessionRef>,
     pub(crate) seq: u64,
 }
@@ -90,6 +94,8 @@ pub struct RefreshDeps<'a> {
     /// Filled by the branch thread; only read here (never blocks).
     pub branches: Option<&'a BranchCache>,
     pub now: SystemTime,
+    /// The monitor's own surface (`$CMUX_SURFACE_ID`), to find its window.
+    pub own_surface: Option<String>,
 }
 
 pub fn default_claude_dir() -> PathBuf {
@@ -112,10 +118,21 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
     };
     // The list keeps closed tabs (stale `active_surface=yes`); the tree is
     // the only live view. A failing tree is "unknown": nothing is dropped.
-    let open_surfaces = deps.cmux.surfaces().ok();
+    let tree = deps.cmux.tree().ok();
     let retention = Duration::from_secs(deps.config.done_retention_minutes.saturating_mul(60));
     let mut sessions =
-        merge_sessions(&claude, &hooks, &cmux_refs, deps.now, retention, &prev.sessions, open_surfaces.as_ref());
+        merge_sessions(&claude, &hooks, &cmux_refs, deps.now, retention, &prev.sessions, tree.as_ref());
+    // Window of every tab, from the same tree call. Unknown tree = no window
+    // info at all (one ungrouped list), never a stale mix from `prev`.
+    for s in sessions.iter_mut() {
+        s.window_id = tree.as_ref().and_then(|t| t.window_of(&s.surface_id)).map(String::from);
+    }
+    let window_order = tree.as_ref().map(|t| t.window_order.clone()).unwrap_or_default();
+    let current_window = tree
+        .as_ref()
+        .zip(deps.own_surface.as_deref())
+        .and_then(|(t, own)| t.window_of(own))
+        .map(String::from);
 
     // Last-resort screen rule for live sessions the files could not classify.
     let alive: HashMap<&str, bool> =
@@ -166,7 +183,7 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
             note = pr_note(&reasons, pending);
         }
     }
-    Snapshot { sessions, message, pr_note: note, cmux_refs, seq }
+    Snapshot { sessions, message, pr_note: note, window_order, current_window, cmux_refs, seq }
 }
 
 /// Starts the refresh thread: a snapshot every [`REFRESH_INTERVAL`] (first one
@@ -185,6 +202,7 @@ pub fn spawn_refresh(
         .name("refresh".into())
         .spawn(move || {
             let cmux = CmuxCli::new();
+            let own_surface = std::env::var("CMUX_SURFACE_ID").ok().filter(|v| !v.is_empty());
             let round = |_first: bool, prev: &Snapshot| {
                 let cfg = config.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let deps = RefreshDeps {
@@ -195,6 +213,7 @@ pub fn spawn_refresh(
                     pr_cache: pr.as_ref().map(|(c, _)| c.as_ref()),
                     branches: branches.as_ref().map(|(c, _)| c.as_ref()),
                     now: SystemTime::now(),
+                    own_surface: own_surface.clone(),
                 };
                 build_snapshot(&deps, prev)
             };
@@ -296,6 +315,7 @@ mod tests {
             pr_cache: None,
             branches: None,
             now: SystemTime::now(),
+            own_surface: None,
         }
     }
 
@@ -303,6 +323,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sessions")).unwrap();
         dir
+    }
+
+    fn tree_of(surfaces: &[(&str, &str)]) -> crate::source::cmux::TreeLayout {
+        let mut t = crate::source::cmux::TreeLayout::default();
+        for (sf, w) in surfaces {
+            t.surfaces.insert(sf.to_string(), w.to_string());
+            if !w.is_empty() && !t.window_order.contains(&w.to_string()) {
+                t.window_order.push(w.to_string());
+            }
+        }
+        t
+    }
+
+    #[test]
+    fn build_snapshot_fills_window_ids_from_tree_and_clears_them_when_unknown() {
+        let dir = setup();
+        let sd = dir.path().join("sessions");
+        write_claude(&sd, 11, "a", "busy");
+        write_claude(&sd, 12, "b", "busy");
+        let mut cmux = FakeCmux::new(vec![cref("a", true), cref("b", true)]);
+        cmux.tree_result = Ok(tree_of(&[("SF-A", "W2"), ("SF-B", "W1"), ("SF-ME", "W1")]));
+        let mut d = deps(dir.path(), &cmux);
+        d.own_surface = Some("sf-me".into());
+        let snap = build_snapshot(&d, &Snapshot::default());
+        let win = |s: &Snapshot, id: &str| s.sessions.iter().find(|x| x.id == id).unwrap().window_id.clone();
+        assert_eq!(win(&snap, "a").as_deref(), Some("W2"));
+        assert_eq!(win(&snap, "b").as_deref(), Some("W1"));
+        assert_eq!(snap.window_order, vec!["W2".to_string(), "W1".to_string()]);
+        assert_eq!(snap.current_window.as_deref(), Some("W1"));
+        // tree fails: no window info, no stale mix from the previous snapshot
+        cmux.tree_result = Err("down".into());
+        let d = deps(dir.path(), &cmux);
+        let next = build_snapshot(&d, &snap);
+        assert!(next.sessions.iter().all(|s| s.window_id.is_none()));
+        assert!(next.window_order.is_empty() && next.current_window.is_none());
     }
 
     fn ids(s: &Snapshot) -> Vec<&str> {
@@ -373,7 +428,7 @@ mod tests {
 
         let mut broken = FakeCmux::new(vec![]);
         broken.sessions_result = Err("socket gone".into());
-        broken.surfaces_result = Err("socket gone".into());
+        broken.tree_result = Err("socket gone".into());
         let second = build_snapshot(&deps(dir.path(), &broken), &first);
         assert_eq!(ids(&second), vec!["live"]);
         assert_eq!(second.sessions[0].status, Status::Idle);
@@ -422,7 +477,7 @@ mod tests {
         write_claude(&dir.path().join("sessions"), 11, "live", "busy");
         let cmux = FakeCmux::new(vec![cref("live", true)]);
         build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
-        assert_eq!(cmux.calls(), vec!["sessions".to_string(), "surfaces".to_string()]);
+        assert_eq!(cmux.calls(), vec!["sessions".to_string(), "tree".to_string()]);
     }
 
     #[test]
@@ -434,25 +489,25 @@ mod tests {
         let mut cmux = FakeCmux::new(vec![cref("a", true), cref("b", true)]);
         let first = build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
         assert_eq!(ids(&first), vec!["a", "b"]);
-        assert!(cmux.calls().contains(&"surfaces".to_string()), "{:?}", cmux.calls());
+        assert!(cmux.calls().contains(&"tree".to_string()), "{:?}", cmux.calls());
 
         // b's tab was closed: claude is gone, cmux still lists the dead record
         std::fs::remove_file(sd.join("12.json")).unwrap();
         cmux.sessions_result = Ok(vec![cref("a", true), cref("b", false)]);
-        cmux.surfaces_result = Ok(["SF-A".to_string()].into_iter().collect());
+        cmux.tree_result = Ok(tree_of(&[("SF-A", "")]));
         let second = build_snapshot(&deps(dir.path(), &cmux), &first);
         assert_eq!(ids(&second), vec!["a"], "dropped at once, no Done tile");
         assert_eq!(second.message, None);
 
         // tree fails: nothing is dropped for that reason, no blank screen
-        cmux.surfaces_result = Err("tree timed out".into());
+        cmux.tree_result = Err("tree timed out".into());
         cmux.sessions_result = Ok(vec![cref("a", true)]);
         let third = build_snapshot(&deps(dir.path(), &cmux), &second);
         assert_eq!(ids(&third), vec!["a"]);
         assert_eq!(third.sessions[0].status, Status::Running);
         // and a normal exit with an open tab still becomes Done
         cmux.sessions_result = Ok(vec![cref("a", false)]);
-        cmux.surfaces_result = Ok(["SF-A".to_string()].into_iter().collect());
+        cmux.tree_result = Ok(tree_of(&[("SF-A", "")]));
         let fourth = build_snapshot(&deps(dir.path(), &cmux), &third);
         assert_eq!(ids(&fourth), vec!["a"]);
         assert_eq!(fourth.sessions[0].status, Status::Done);

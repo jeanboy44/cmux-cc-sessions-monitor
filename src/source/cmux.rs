@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -68,32 +68,79 @@ fn parse_line(line: &str) -> Option<CmuxSessionRef> {
     })
 }
 
-/// Surface ids (uppercased) found in `cmux tree --all --id-format uuids`
-/// output, whose surface lines look like
+/// What `cmux tree --all --id-format uuids` says about the open tabs: every
+/// surface (uppercase id) with the window it sits in, and the windows in
+/// printed order. The output is a `window <UUID> …` line per window followed
+/// by its workspaces / panes / surfaces, e.g.
 /// `│   └── surface <UUID> [terminal] "title" [selected] tty=ttys004`.
-/// Lines that are not surface lines, or whose id looks wrong, are ignored.
-pub fn parse_tree_surfaces(output: &str) -> HashSet<String> {
-    output.lines().filter_map(tree_surface_id).collect()
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeLayout {
+    /// Surface id → window id (empty when no `window` line came before it).
+    pub surfaces: HashMap<String, String>,
+    pub window_order: Vec<String>,
 }
 
-fn tree_surface_id(line: &str) -> Option<String> {
+impl TreeLayout {
+    /// Whether the surface (any case) still exists.
+    pub fn has_surface(&self, surface_id: &str) -> bool {
+        self.surfaces.contains_key(&surface_id.to_ascii_uppercase())
+    }
+
+    /// The window of a surface (any case), if known.
+    pub fn window_of(&self, surface_id: &str) -> Option<&str> {
+        self.surfaces.get(&surface_id.to_ascii_uppercase()).map(String::as_str).filter(|w| !w.is_empty())
+    }
+}
+
+/// Parses `cmux tree --all --id-format uuids` output. Lines that are neither
+/// window nor surface lines, or whose id looks wrong, are ignored.
+pub fn parse_tree(output: &str) -> TreeLayout {
+    let mut out = TreeLayout::default();
+    let mut window = String::new();
+    for line in output.lines() {
+        match tree_item(line) {
+            Some(("window", id)) => {
+                if !out.window_order.contains(&id) {
+                    out.window_order.push(id.clone());
+                }
+                window = id;
+            }
+            Some(("surface", id)) => {
+                out.surfaces.insert(id, window.clone());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Surface ids (uppercased) of a tree output; see [`parse_tree`].
+#[cfg(test)]
+pub fn parse_tree_surfaces(output: &str) -> std::collections::HashSet<String> {
+    parse_tree(output).surfaces.into_keys().collect()
+}
+
+/// (`window` | `surface`, uppercase id) of a tree line.
+fn tree_item(line: &str) -> Option<(&'static str, String)> {
     // Drop the tree drawing (`│ ├── └──`) and indentation in front.
     let rest = line.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '├' | '└' | '─' | '|' | '`'));
     let mut toks = rest.split_whitespace();
-    if toks.next()? != "surface" {
-        return None;
-    }
+    let kind = match toks.next()? {
+        "window" => "window",
+        "surface" => "surface",
+        _ => return None,
+    };
     let id = toks.next()?;
     let ok = id.len() >= 8 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
-    ok.then(|| id.to_ascii_uppercase())
+    ok.then(|| (kind, id.to_ascii_uppercase()))
 }
 
 pub trait Cmux {
     fn sessions(&self) -> Result<Vec<CmuxSessionRef>>;
-    /// Ids (uppercase) of every surface (tab) that currently exists in cmux.
+    /// Every surface (tab) that currently exists in cmux, with its window.
     /// `cmux sessions list` is a saved-record list and keeps closed tabs, so
     /// this is the only source for "is this tab still open".
-    fn surfaces(&self) -> Result<HashSet<String>>;
+    fn tree(&self) -> Result<TreeLayout>;
     fn focus(&self, workspace_id: &str, surface_id: &str) -> Result<()>;
     /// Last lines of a surface's screen. `workspace_id` is required: cmux
     /// otherwise defaults to the caller's own workspace.
@@ -199,12 +246,12 @@ impl Cmux for CmuxCli {
     /// An output without any surface is treated as an error: the monitor's
     /// own tab always exists, so an empty tree means cmux answered oddly and
     /// must not make every tile disappear.
-    fn surfaces(&self) -> Result<HashSet<String>> {
-        let set = parse_tree_surfaces(&self.run(&["tree", "--all", "--id-format", "uuids"])?);
-        if set.is_empty() {
+    fn tree(&self) -> Result<TreeLayout> {
+        let layout = parse_tree(&self.run(&["tree", "--all", "--id-format", "uuids"])?);
+        if layout.surfaces.is_empty() {
             bail!("cmux tree listed no surfaces");
         }
-        Ok(set)
+        Ok(layout)
     }
 
     fn focus(&self, workspace_id: &str, surface_id: &str) -> Result<()> {
@@ -221,8 +268,9 @@ impl Cmux for CmuxCli {
 #[cfg(test)]
 pub struct FakeCmux {
     pub sessions_result: Result<Vec<CmuxSessionRef>, String>,
-    /// Defaults to the surfaces of the sessions passed to [`FakeCmux::new`].
-    pub surfaces_result: Result<HashSet<String>, String>,
+    /// Defaults to the surfaces of the sessions passed to [`FakeCmux::new`]
+    /// (no window info).
+    pub tree_result: Result<TreeLayout, String>,
     pub read_screen_result: Result<String, String>,
     /// Per-surface screens; surfaces not listed get `read_screen_result`.
     pub screens: std::collections::HashMap<String, Result<String, String>>,
@@ -234,10 +282,13 @@ pub struct FakeCmux {
 #[cfg(test)]
 impl FakeCmux {
     pub fn new(sessions: Vec<CmuxSessionRef>) -> Self {
-        let surfaces = sessions.iter().map(|r| r.surface_id.to_ascii_uppercase()).collect();
+        let surfaces = TreeLayout {
+            surfaces: sessions.iter().map(|r| (r.surface_id.to_ascii_uppercase(), String::new())).collect(),
+            window_order: Vec::new(),
+        };
         Self {
             sessions_result: Ok(sessions),
-            surfaces_result: Ok(surfaces),
+            tree_result: Ok(surfaces),
             read_screen_result: Ok(String::new()),
             screens: Default::default(),
             focus_result: Ok(()),
@@ -257,9 +308,9 @@ impl Cmux for FakeCmux {
         self.sessions_result.clone().map_err(|e| anyhow!(e))
     }
 
-    fn surfaces(&self) -> Result<HashSet<String>> {
-        self.calls.lock().unwrap().push("surfaces".into());
-        self.surfaces_result.clone().map_err(|e| anyhow!(e))
+    fn tree(&self) -> Result<TreeLayout> {
+        self.calls.lock().unwrap().push("tree".into());
+        self.tree_result.clone().map_err(|e| anyhow!(e))
     }
 
     fn focus(&self, workspace_id: &str, surface_id: &str) -> Result<()> {
@@ -433,8 +484,8 @@ mod tests {
         f.sessions().unwrap();
         f.focus("w", "s").unwrap();
         f.read_screen("w", "s").unwrap();
-        f.surfaces().unwrap();
-        assert_eq!(f.calls(), vec!["sessions", "focus w s", "read_screen w s", "surfaces"]);
+        f.tree().unwrap();
+        assert_eq!(f.calls(), vec!["sessions", "focus w s", "read_screen w s", "tree"]);
     }
 
     const TREE: &str = "\
@@ -456,7 +507,7 @@ surfaces BBBBBBBB-0000-0000-0000-00000000BEEF
     #[test]
     fn tree_parse_extracts_surface_ids() {
         let got = parse_tree_surfaces(TREE);
-        let want: HashSet<String> = [
+        let want: std::collections::HashSet<String> = [
             "BBBBBBBB-0000-0000-0000-000000000001",
             "BBBBBBBB-0000-0000-0000-000000000002",
             "BBBBBBBB-0000-0000-0000-000000000003",
@@ -477,11 +528,43 @@ surfaces BBBBBBBB-0000-0000-0000-00000000BEEF
         let fx = d.path().join("tree.txt");
         std::fs::write(&fx, TREE).unwrap();
         let ok = script(&d, &format!("echo \"$@\" >> {}; cat {}", log.display(), fx.display()));
-        assert_eq!(CmuxCli::with_bin(ok, TIMEOUT).surfaces().unwrap().len(), 3);
+        assert_eq!(CmuxCli::with_bin(ok, TIMEOUT).tree().unwrap().surfaces.len(), 3);
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "tree --all --id-format uuids\n");
         let empty = script(&d, "echo 'window AAAAAAAA-0000-0000-0000-0000000000F0'");
-        assert!(CmuxCli::with_bin(empty, TIMEOUT).surfaces().is_err(), "no surface at all = unknown");
+        assert!(CmuxCli::with_bin(empty, TIMEOUT).tree().is_err(), "no surface at all = unknown");
         let fail = script(&d, "exit 1");
-        assert!(CmuxCli::with_bin(fail, TIMEOUT).surfaces().is_err());
+        assert!(CmuxCli::with_bin(fail, TIMEOUT).tree().is_err());
+    }
+
+    const TWO_WINDOWS: &str = "\
+window AAAAAAAA-0000-0000-0000-0000000000f1 [current] ◀ active
+├── workspace AAAAAAAA-0000-0000-0000-000000000001 \"a\"
+│   └── pane AAAAAAAA-0000-0000-0000-0000000000A1 [focused]
+│       ├── surface BBBBBBBB-0000-0000-0000-000000000001 [terminal] \"x\" [selected] tty=ttys001
+│       └── surface BBBBBBBB-0000-0000-0000-000000000002 [browser] \"y\"
+window AAAAAAAA-0000-0000-0000-0000000000F2
+└── workspace AAAAAAAA-0000-0000-0000-000000000002 \"b\"
+    └── pane AAAAAAAA-0000-0000-0000-0000000000A2
+        └── surface bbbbbbbb-0000-0000-0000-000000000003 [terminal] \"window z\" tty=ttys002
+window ???
+";
+
+    #[test]
+    fn tree_parse_maps_surfaces_to_windows_in_order() {
+        let t = parse_tree(TWO_WINDOWS);
+        let w1 = "AAAAAAAA-0000-0000-0000-0000000000F1";
+        let w2 = "AAAAAAAA-0000-0000-0000-0000000000F2";
+        assert_eq!(t.window_order, vec![w1.to_string(), w2.to_string()]);
+        assert_eq!(t.surfaces.len(), 3);
+        assert_eq!(t.window_of("bbbbbbbb-0000-0000-0000-000000000001"), Some(w1));
+        assert_eq!(t.window_of("BBBBBBBB-0000-0000-0000-000000000002"), Some(w1));
+        assert_eq!(t.window_of("BBBBBBBB-0000-0000-0000-000000000003"), Some(w2));
+        assert!(t.has_surface("bbbbbbbb-0000-0000-0000-000000000003"));
+        assert!(!t.has_surface("BBBBBBBB-0000-0000-0000-00000000DEAD"));
+        // a surface before any window line: open, window unknown
+        let t = parse_tree("surface BBBBBBBB-0000-0000-0000-000000000009 [terminal]");
+        assert!(t.has_surface("BBBBBBBB-0000-0000-0000-000000000009"));
+        assert_eq!(t.window_of("BBBBBBBB-0000-0000-0000-000000000009"), None);
+        assert!(t.window_order.is_empty());
     }
 }

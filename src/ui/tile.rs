@@ -316,6 +316,7 @@ mod tests {
             pr: Some(Pr { number: 42, title: "Add login".into(), state: PrState::Approved }),
             pr_unavailable: false,
             transcript: None,
+            window_id: None,
         }
     }
 

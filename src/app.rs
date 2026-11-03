@@ -22,6 +22,7 @@ use crate::preview::{spawn_preview, PreviewCache, PreviewSlot, PreviewTarget, PR
 use crate::refresh::{spawn_refresh, Snapshot};
 use crate::source::cmux::{Cmux, CmuxCli};
 use crate::ui::grid::resolve_view;
+use crate::ui::groups::{layout_groups, move_selection, sort_by_window, Row};
 use crate::ui::mascot::{done_oneshot_len, status_transition_fx, TileFx};
 use crate::ui::preview::{PreviewBody, PREVIEW_DONE, PREVIEW_FAILED, PREVIEW_LOADING, PREVIEW_NO_SESSION};
 use crate::ui::style::FPS;
@@ -148,6 +149,10 @@ pub struct App {
     pub grid_rect: Rect,
     /// The preview is on but the last frame had no room for the panel.
     pub preview_too_small: bool,
+    /// cmux windows in tree order (tiles are grouped by window).
+    pub window_order: Vec<String>,
+    /// The window holding the monitor itself, if known.
+    pub current_window: Option<String>,
 }
 
 impl App {
@@ -179,6 +184,8 @@ impl App {
             preview_slot: Arc::new(Mutex::new(None)),
             grid_rect: Rect::default(),
             preview_too_small: false,
+            window_order: Vec::new(),
+            current_window: None,
         }
     }
 
@@ -214,13 +221,17 @@ impl App {
     pub fn apply_snapshot(&mut self, snap: Snapshot, tick: u64) {
         self.source_message = snap.message;
         self.pr_note = snap.pr_note;
+        self.window_order = snap.window_order;
+        self.current_window = snap.current_window;
         self.loaded = true;
         self.set_sessions(snap.sessions, tick);
     }
 
     /// Replaces the list, keeping the selection on the same session id when it
     /// still exists (else the clamped index) and recording status changes.
-    pub fn set_sessions(&mut self, sessions: Vec<Session>, tick: u64) {
+    /// The list is put in window-group order (see [`crate::ui::groups`]).
+    pub fn set_sessions(&mut self, mut sessions: Vec<Session>, tick: u64) {
+        sort_by_window(&mut sessions, &self.window_order);
         let selected_id = self.selected_session().map(|s| s.id.clone());
         let mut transitions = HashMap::with_capacity(sessions.len());
         for s in &sessions {
@@ -297,25 +308,21 @@ impl App {
         self.sessions.get(self.selected)
     }
 
-    /// Grid move by `cols`, stopping at the edges. Down from a row above a
-    /// short last row lands on the last tile.
+    /// Layout rows of the tile grid (window groups, `cols` columns); the
+    /// renderer and the navigation both use it.
+    pub fn grid_rows(&self) -> Vec<Row> {
+        layout_groups(&self.sessions, &self.window_order, self.current_window.as_deref(), self.cols)
+    }
+
+    /// Grid move over [`App::grid_rows`], stopping at the edges. j/k cross
+    /// window groups; a shorter target row clamps the column.
     pub fn apply_move(&mut self, dir: Dir) {
-        let n = self.sessions.len();
-        if n == 0 {
+        if self.sessions.is_empty() {
             self.selected = 0;
             return;
         }
         self.clamp_selection();
-        let cols = self.cols.max(1);
-        let i = self.selected;
-        self.selected = match dir {
-            Dir::Left if i % cols > 0 => i - 1,
-            Dir::Right if i % cols + 1 < cols && i + 1 < n => i + 1,
-            Dir::Up if i >= cols => i - cols,
-            Dir::Down if i + cols < n => i + cols,
-            Dir::Down if i / cols < (n - 1) / cols => n - 1,
-            _ => i,
-        };
+        self.selected = move_selection(&self.grid_rows(), self.selected, dir);
     }
 
     /// Focuses the selected session's workspace and surface in cmux.
@@ -542,6 +549,7 @@ pub(crate) fn fake_session(id: &str, status: Status) -> Session {
         pr: None,
         pr_unavailable: false,
         transcript: None,
+        window_id: None,
     }
 }
 
@@ -574,7 +582,7 @@ mod tests {
         fn sessions(&self) -> Result<Vec<crate::source::cmux::CmuxSessionRef>> {
             Ok(vec![])
         }
-        fn surfaces(&self) -> Result<std::collections::HashSet<String>> {
+        fn tree(&self) -> Result<crate::source::cmux::TreeLayout> {
             Ok(Default::default())
         }
         fn focus(&self, _: &str, _: &str) -> Result<()> {
@@ -774,6 +782,42 @@ mod tests {
         cache.put("s0", PreviewEntry { screen: Err(()), fetched_at: Instant::now() });
         assert_eq!(app.preview_body(), PreviewBody::Note(PREVIEW_FAILED));
         assert_eq!(App::new(Config::default()).preview_body(), PreviewBody::Note(PREVIEW_NO_SESSION));
+    }
+
+    fn in_window(id: &str, w: &str) -> Session {
+        let mut s = fake_session(id, Status::Idle);
+        s.window_id = Some(w.into());
+        s
+    }
+
+    #[test]
+    fn selection_follows_session_id_when_it_changes_window() {
+        let mut app = App::new(Config::default());
+        let snap = |sessions: Vec<Session>| Snapshot {
+            sessions,
+            window_order: vec!["W1".into(), "W2".into()],
+            ..Default::default()
+        };
+        app.apply_snapshot(snap(vec![in_window("a", "W1"), in_window("b", "W2"), in_window("c", "W1")]), 0);
+        assert_eq!(app.sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a", "c", "b"]);
+        app.selected = 2; // b
+        // b moves to window 1 and a new window appears
+        app.apply_snapshot(snap(vec![in_window("a", "W1"), in_window("b", "W1"), in_window("c", "W2")]), 1);
+        assert_eq!(app.sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!(app.selected_session().unwrap().id, "b");
+        // windows info gone (tree failed): one list, still on b
+        app.apply_snapshot(Snapshot { sessions: ids(&["a", "b", "c"]), ..Default::default() }, 2);
+        assert_eq!(app.selected_session().unwrap().id, "b");
+        // j/k cross the group boundary with one column
+        app.apply_snapshot(snap(vec![in_window("a", "W1"), in_window("b", "W2")]), 3);
+        app.cols = 4;
+        app.selected = 0;
+        app.apply_move(Dir::Down);
+        assert_eq!(app.selected_session().unwrap().id, "b");
+        app.apply_move(Dir::Left);
+        assert_eq!(app.selected_session().unwrap().id, "b", "h does not cross groups");
+        app.apply_move(Dir::Up);
+        assert_eq!(app.selected_session().unwrap().id, "a");
     }
 
     #[test]

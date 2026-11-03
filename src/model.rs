@@ -46,4 +46,7 @@ pub struct Session {
     pub pr_unavailable: bool,
     /// The hook's `transcriptPath` (branch guessing reads it).
     pub transcript: Option<PathBuf>,
+    /// cmux window (uppercase id) the session's tab is in, from `cmux tree`;
+    /// `None` when unknown.
+    pub window_id: Option<String>,
 }

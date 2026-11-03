@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::model::{Session, Status};
 use crate::source::claude_sessions::ClaudeSessionRecord;
-use crate::source::cmux::CmuxSessionRef;
+use crate::source::cmux::{CmuxSessionRef, TreeLayout};
 use crate::source::hook_sessions::HookRecord;
 use crate::status::resolve_status;
 
@@ -107,6 +107,7 @@ fn build(c: Option<&ClaudeSessionRecord>, h: Option<&HookRecord>, x: &CmuxSessio
         pr: None,
         pr_unavailable: false,
         transcript: h.and_then(|h| h.transcript_path.clone()),
+        window_id: None,
     }
 }
 
@@ -158,8 +159,7 @@ pub fn select_refs(refs: &[CmuxSessionRef]) -> Vec<&CmuxSessionRef> {
 /// alive are hidden; a session turns `Done` (ended_at recorded once) when it
 /// was live in `prev` and is now dead or gone, and is dropped after `retention`.
 ///
-/// `open_surfaces` is the set of surface ids (uppercase) that still exist in
-/// cmux. When known, a session whose tab was closed is dropped at once (no
+/// `open_surfaces` is the cmux tree (which surfaces still exist). When known, a session whose tab was closed is dropped at once (no
 /// `Done` tile, no retention) whatever its pid or previous state; `None`
 /// (the tree call failed) drops nothing for that reason.
 pub fn merge_sessions(
@@ -169,7 +169,7 @@ pub fn merge_sessions(
     now: SystemTime,
     retention: Duration,
     prev: &[Session],
-    open_surfaces: Option<&HashSet<String>>,
+    open_surfaces: Option<&TreeLayout>,
 ) -> Vec<Session> {
     let claude_by: HashMap<&str, &ClaudeSessionRecord> = claude.iter().map(|c| (c.session_id.as_str(), c)).collect();
     let hook_by: HashMap<&str, &HookRecord> = hooks.iter().map(|h| (h.session_id.as_str(), h)).collect();
@@ -214,7 +214,7 @@ pub fn merge_sessions(
     }
 
     if let Some(open) = open_surfaces {
-        out.retain(|s| open.contains(&s.surface_id.to_ascii_uppercase()));
+        out.retain(|s| open.has_surface(&s.surface_id));
     }
     out.retain(|s| match (s.status, s.ended_at) {
         (Status::Done, Some(e)) => now.duration_since(e).map_or(true, |age| age < retention),
@@ -550,8 +550,8 @@ mod tests {
         assert_eq!(back[0].ended_at, None);
     }
 
-    fn open(ids: &[&str]) -> HashSet<String> {
-        ids.iter().map(|s| s.to_string()).collect()
+    fn open(ids: &[&str]) -> TreeLayout {
+        TreeLayout { surfaces: ids.iter().map(|s| (s.to_string(), String::new())).collect(), window_order: Vec::new() }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Game-style terminal UI: pixel mascot "Pochi", character-card tiles, HUD.
 
 pub mod grid;
+pub mod groups;
 pub mod hud;
 pub mod mascot;
 pub mod preview;

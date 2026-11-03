@@ -44,8 +44,8 @@ impl Cmux for BackgroundFocus {
         self.inner.sessions()
     }
 
-    fn surfaces(&self) -> Result<std::collections::HashSet<String>> {
-        self.inner.surfaces()
+    fn tree(&self) -> Result<crate::source::cmux::TreeLayout> {
+        self.inner.tree()
     }
 
     /// Dispatches the focus to a worker thread; always returns `Ok(())` once

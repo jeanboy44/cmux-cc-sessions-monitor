@@ -12,7 +12,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
 use crate::model::Status;
-use crate::ui::grid::{cell_rect, compute_cols, row_count, scroll_to_show, visible_rows};
+use crate::ui::grid::{cell_rect, compute_cols};
+use crate::ui::groups::{divider_text, place_rows, row_of, scroll_to_show_rows, Row};
 use crate::ui::hud::{render_hud, StatusCounts};
 use crate::ui::mascot::{sprite, sprite_oneshot_done, SpriteSize};
 use crate::ui::preview::{preview_layout, render_preview, PREVIEW_TOO_SMALL};
@@ -56,34 +57,43 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     }
 }
 
-/// Tile grid with vertical scrolling; returns (more above, more below).
+/// Tile grid (grouped by cmux window, see [`crate::ui::groups`]) with
+/// vertical scrolling in layout rows; returns (more above, more below).
 /// Areas smaller than one tile fall back to one name-only row per session.
 fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, tick: u64) -> (bool, bool) {
     if area.is_empty() {
         return (false, false);
     }
     let view = app.view;
-    let n = app.sessions.len();
     let (tile_w, tile_h) = tile_size(view);
     let compact = area.width < tile_w || area.height < tile_h;
-    let (cols, visible) = if compact {
-        (1, usize::from(area.height))
-    } else {
-        (compute_cols(area.width, view), visible_rows(area.height, view))
-    };
+    let cols = if compact { 1 } else { compute_cols(area.width, view) };
     app.cols = cols;
     app.clamp_selection();
-    let total = row_count(n, cols);
-    app.scroll = scroll_to_show(app.scroll, app.selected / cols, visible, total);
+    let rows = app.grid_rows();
+    let tile_row_h = if compact { 1 } else { tile_h };
+    let heights: Vec<u16> =
+        rows.iter().map(|r| if matches!(r, Row::Divider { .. }) { 1 } else { tile_row_h }).collect();
+    let sel_row = row_of(&rows, app.selected).unwrap_or(0);
+    app.scroll = scroll_to_show_rows(&rows, &heights, app.scroll, sel_row, area.height);
+    let placed = place_rows(&heights, app.scroll, area);
+    let dim = Style::new().fg(style::TEXT_DIM);
 
-    for row in 0..visible {
-        for col in 0..cols {
-            let idx = (app.scroll + row) * cols + col;
+    for (ri, row_rect) in &placed {
+        let (start, end) = match &rows[*ri] {
+            Row::Divider { label, count } => {
+                let line = divider_text(label, *count, usize::from(row_rect.width));
+                f.render_widget(Paragraph::new(Line::styled(line, dim)), Rect { height: 1, ..*row_rect });
+                continue;
+            }
+            Row::Tiles { start, end } => (*start, *end),
+        };
+        for (col, idx) in (start..end).enumerate() {
             let Some(s) = app.sessions.get(idx) else { break };
             let rect = if compact {
-                Rect::new(area.x, area.y + row as u16, area.width, 1)
+                Rect { height: 1, ..*row_rect }
             } else {
-                cell_rect(area, cols, col, row, view)
+                cell_rect(*row_rect, cols, col, 0, view)
             };
             let selected = idx == app.selected;
             let fx = app.tile_fx(s, tick);
@@ -96,7 +106,8 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, tick: u64) -> (bool, bool
             }
         }
     }
-    (app.scroll > 0, app.scroll + visible < total)
+    let below = placed.last().is_some_and(|(ri, r)| ri + 1 < rows.len() || r.height < heights[*ri]);
+    (app.scroll > 0, below)
 }
 
 fn draw_empty(f: &mut Frame, area: Rect, loaded: bool, tick: u64) {
@@ -380,6 +391,70 @@ mod tests {
                 assert_eq!(render(&mut app, w, h, 0).len(), h as usize);
             }
         }
+    }
+
+    fn windowed(id: &str, w: &str) -> crate::model::Session {
+        let mut s = fake_session(id, Status::Running);
+        s.window_id = Some(w.into());
+        s
+    }
+
+    #[test]
+    fn two_windows_draw_divider_lines_and_grouped_tiles() {
+        let mut cfg = Config::default();
+        cfg.view = ViewMode::A;
+        let mut app = App::new(cfg);
+        let snap = Snapshot {
+            sessions: vec![windowed("x", "W2"), windowed("y", "W1"), windowed("z", "W2")],
+            window_order: vec!["W1".into(), "W2".into()],
+            current_window: Some("W2".into()),
+            ..Default::default()
+        };
+        app.apply_snapshot(snap, 0);
+        let screen = render(&mut app, 80, 24, 0);
+        assert!(screen[0].contains("SESSIONS 3"), "HUD counts stay global");
+        let w = 80;
+        assert_eq!(screen[1], crate::ui::groups::divider_text("창 1", 1, w));
+        assert!(screen[1].starts_with("── 창 1 · 세션 1 ─") && !screen[1].contains('╭'), "{}", screen[1]);
+        assert!(screen[3].contains("proj-y"), "{}", screen.join("\n"));
+        assert_eq!(screen[8], crate::ui::groups::divider_text("창 2 (현재)", 2, w));
+        assert!(screen[10].contains("proj-x") && screen[10].contains("proj-z"), "{}", screen.join("\n"));
+        // dim, plain line
+        let buf = draw_buf(80, 24, |f| draw(f, &mut app, 0, Instant::now()));
+        assert_eq!(buf[(0, 1)].fg, style::TEXT_DIM);
+        // one window only: no divider at all
+        let one = Snapshot {
+            sessions: vec![windowed("x", "W2"), windowed("z", "W2")],
+            window_order: vec!["W1".into(), "W2".into()],
+            ..Default::default()
+        };
+        app.apply_snapshot(one, 1);
+        let text = render(&mut app, 80, 24, 0).join("\n");
+        assert!(!text.contains("창 "), "{text}");
+    }
+
+    #[test]
+    fn grouped_grid_scrolls_to_selected_with_dividers_and_preview() {
+        let mut cfg = Config::default();
+        cfg.view = ViewMode::A;
+        let mut app = App::new(cfg);
+        let mut sessions: Vec<_> = (0..4).map(|i| windowed(&format!("a{i}"), "W1")).collect();
+        sessions.extend((0..4).map(|i| windowed(&format!("b{i}"), "W2")));
+        app.apply_snapshot(Snapshot { sessions, window_order: vec!["W1".into(), "W2".into()], ..Default::default() }, 0);
+        app.preview = true;
+        // 150x16: middle 150x14, right preview 50 -> grid 100x14 (3 cols)
+        app.selected = 7;
+        let screen = render(&mut app, 150, 16, 0);
+        assert_eq!(app.grid_rect.width, 100);
+        assert_eq!(app.cols, 3);
+        let text = screen.join("\n");
+        assert!(text.contains("proj-b3"), "{text}");
+        assert!(screen.last().unwrap().contains("▲ more"));
+        app.selected = 0;
+        let screen = render(&mut app, 150, 16, 0);
+        assert_eq!(app.scroll, 0);
+        assert!(screen[1].starts_with("── 창 1 · 세션 4"), "{}", screen[1]);
+        assert!(screen.last().unwrap().contains("▼ more"));
     }
 
     #[test]
