@@ -6,7 +6,8 @@
 //! and the panel takes the rest (master/detail). Placement rule
 //! ([`preview_layout`], sizes of the area between HUD and footer):
 //! - width ≥ [`SIDE_MIN_WIDTH`] and height ≥ [`SIDE_MIN_HEIGHT`]: list on the
-//!   LEFT, `clamp(width/4, 28, 40)` wide, preview on the RIGHT (≥ 42 columns);
+//!   LEFT, `clamp(width/5, 26, 34)` wide (26 = the widest tile minimum), preview
+//!   on the RIGHT (≥ 44 columns);
 //! - else height ≥ [`STACK_MIN_HEIGHT`]: list on TOP, `clamp(height*2/5, 8, 14)`
 //!   tall, preview at the BOTTOM (≥ 10 rows);
 //! - else no panel: the normal grid, and the footer says the terminal is too small.
@@ -25,9 +26,12 @@ use crate::ui::tile::truncate_to_width;
 pub const SIDE_MIN_WIDTH: u16 = 70;
 /// Minimum height for the side-by-side layout.
 pub const SIDE_MIN_HEIGHT: u16 = 8;
-/// Side-by-side list width bounds (the minimum is above both tile widths).
-pub const LIST_MIN_WIDTH: u16 = 28;
-pub const LIST_MAX_WIDTH: u16 = 40;
+/// Side-by-side list width bounds (the minimum is the widest tile minimum,
+/// view A's 26; names are cut with `…` inside the tile).
+pub const LIST_MIN_WIDTH: u16 = 26;
+pub const LIST_MAX_WIDTH: u16 = 34;
+/// Side-by-side list width = width / this, clamped to the bounds above.
+pub const LIST_WIDTH_DIVISOR: u16 = 5;
 /// Narrower than [`SIDE_MIN_WIDTH`]: from this height on, list top / preview bottom.
 pub const STACK_MIN_HEIGHT: u16 = 24;
 /// Stacked list height bounds.
@@ -59,7 +63,7 @@ pub fn preview_layout(area: Rect, enabled: bool) -> PreviewLayout {
         return full;
     }
     if area.width >= SIDE_MIN_WIDTH && area.height >= SIDE_MIN_HEIGHT {
-        let w = (area.width / 4).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH);
+        let w = (area.width / LIST_WIDTH_DIVISOR).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH);
         let list = Rect { width: w, ..area };
         let panel = Rect { x: area.x + w, width: area.width - w, ..area };
         PreviewLayout { list, panel: Some(panel), one_column: true }
@@ -144,17 +148,20 @@ mod tests {
     #[test]
     fn preview_layout_left_list_right_preview_when_wide_enough() {
         let l = preview_layout(r(160, 30), true);
-        assert_eq!(l.list, Rect::new(0, 1, 40, 30));
-        assert_eq!(l.panel, Some(Rect::new(40, 1, 120, 30)));
+        assert_eq!(l.list, Rect::new(0, 1, 32, 30));
+        assert_eq!(l.panel, Some(Rect::new(32, 1, 128, 30)));
         assert_split(l, r(160, 30));
-        // list width = clamp(width/4, 28, 40)
-        assert_eq!(preview_layout(r(70, 8), true).list.width, 28);
-        assert_eq!(preview_layout(r(120, 8), true).list.width, 30);
-        assert_eq!(preview_layout(r(400, 8), true).list.width, 40);
-        // the preview always keeps at least 40 columns
-        for w in 70..=300 {
+        // list width = clamp(width/5, 26, 34)
+        assert_eq!(preview_layout(r(70, 8), true).list.width, 26);
+        assert_eq!(preview_layout(r(134, 8), true).list.width, 26);
+        assert_eq!(preview_layout(r(135, 8), true).list.width, 27);
+        assert_eq!(preview_layout(r(170, 8), true).list.width, 34);
+        assert_eq!(preview_layout(r(400, 8), true).list.width, 34);
+        // never below the tile minimum width, the preview keeps at least 44 columns
+        for w in 70..=400 {
             let l = preview_layout(r(w, 10), true);
-            assert!(l.panel.unwrap().width >= 40 && l.list.width >= 28, "w={w}");
+            assert!(l.list.width >= 26 && l.list.width <= 34, "w={w}");
+            assert!(l.panel.unwrap().width >= 44, "w={w}");
             assert_split(l, r(w, 10));
         }
     }
@@ -180,7 +187,7 @@ mod tests {
         assert_eq!(preview_layout(r(69, 24), true).list.width, 69, "69 wide: stacked");
         assert_eq!(preview_layout(r(69, 24), true).panel.map(|p| p.y), Some(1 + 9));
         // height 7/8 when wide
-        assert!(preview_layout(r(70, 8), true).panel.is_some_and(|p| p.x == 28));
+        assert!(preview_layout(r(70, 8), true).panel.is_some_and(|p| p.x == 26 && p.width == 44));
         assert_eq!(preview_layout(r(70, 7), true).panel, None);
         assert_eq!(preview_layout(r(200, 7), true).panel, None);
         // height 23/24 when narrow
@@ -231,6 +238,24 @@ mod tests {
         let screen = rows(&draw(16, 4, |f| render_preview(f, f.area(), Some("아주아주긴세션이름입니다"), &note)));
         assert!(screen[1].contains(PREVIEW_LOADING), "{screen:?}");
         assert!(screen[0].ends_with("╮"), "title stays inside the border: {screen:?}");
+    }
+
+    #[test]
+    fn render_preview_wraps_a_long_line_fully_and_keeps_the_tail_visible() {
+        let long = format!("읽은 화면은 이렇게 보입니다 {} 끝", "x".repeat(40));
+        let body = PreviewBody::Screen(format!("older\n{long}\n❯ newest prompt\n"));
+        // inner 20x6: the long line (28 + 40 + 3 = 71 cols) wraps into 4 rows
+        let screen = rows(&draw(22, 8, |f| render_preview(f, f.area(), Some("p"), &body)));
+        let inner: Vec<String> = screen[1..7].iter().map(|r| r.trim_start_matches('│').trim_end_matches('│').to_string()).collect();
+        assert!(inner.iter().all(|r| !r.contains('…')), "no truncation: {inner:?}");
+        assert_eq!(inner[5].trim_end(), "❯ newest prompt", "{inner:?}");
+        assert!(inner[4].trim_end().ends_with("끝"), "end of the long line: {inner:?}");
+        let joined: String = inner[0..5].iter().map(|r| r.trim_end()).collect();
+        assert!(joined.contains("xxxxxxxx"), "{inner:?}");
+        // tall enough: every character of the long line is shown
+        let screen = rows(&draw(22, 12, |f| render_preview(f, f.area(), Some("p"), &body)));
+        let all: String = screen[1..11].iter().map(|r| r.trim_start_matches('│').trim_end_matches('│').trim_end()).collect();
+        assert!(all.replace(' ', "").contains(&long.replace(' ', "")), "every char shown: {screen:?}");
     }
 
     #[test]

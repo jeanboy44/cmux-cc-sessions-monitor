@@ -341,10 +341,10 @@ mod tests {
     fn preview_turns_the_list_into_one_column_left_with_preview_right() {
         let mut app = preview_app(6);
         let screen = render(&mut app, 150, 30, 0);
-        // middle 150x28: list clamp(150/4, 28, 40) = 37 wide, preview the rest
-        assert_eq!(app.grid_rect, Rect::new(0, 1, 37, 28));
+        // middle 150x28: list clamp(150/5, 26, 34) = 30 wide, preview the rest
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 30, 28));
         assert_eq!(app.cols, 1, "one tile per row");
-        let list = list_part(&screen, 37, 1..29);
+        let list = list_part(&screen, 30, 1..29);
         for row in &list {
             assert!(row.matches("proj-t").count() <= 1, "one tile per row: {row}");
         }
@@ -352,9 +352,9 @@ mod tests {
         for i in 0..4 {
             assert!(text.contains(&format!("proj-t{i}")), "{text}");
         }
-        assert!(screen[1].chars().nth(37) == Some('╭') && screen[1].contains("미리보기 · proj-t0"), "{}", screen[1]);
-        assert!(screen[28].chars().nth(37) == Some('╰') && screen[28].ends_with('╯'), "{}", screen[28]);
-        let right: String = screen[2..28].iter().map(|r| r.chars().skip(38).collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(screen[1].chars().nth(30) == Some('╭') && screen[1].contains("미리보기 · proj-t0"), "{}", screen[1]);
+        assert!(screen[28].chars().nth(30) == Some('╰') && screen[28].ends_with('╯'), "{}", screen[28]);
+        let right: String = screen[2..28].iter().map(|r| r.chars().skip(31).collect::<String>()).collect::<Vec<_>>().join("\n");
         assert!(right.contains("first") && right.contains("❯ last prompt line"), "{right}");
         assert!(screen.last().unwrap().contains("▼ more"), "6 tiles do not fit 28 rows");
         assert!(!app.preview_too_small);
@@ -363,7 +363,7 @@ mod tests {
         // the selection at the bottom is scrolled into view
         app.selected = 5;
         let screen = render(&mut app, 150, 30, 0);
-        assert!(list_part(&screen, 37, 1..29).join("\n").contains("proj-t5"));
+        assert!(list_part(&screen, 30, 1..29).join("\n").contains("proj-t5"));
         assert!(screen.last().unwrap().contains("▲ more"));
         assert!(screen[1].contains("미리보기 · proj-t5"), "{}", screen[1]);
     }
@@ -416,9 +416,9 @@ mod tests {
             assert!(app.preview);
             let screen = render(&mut app, 150, 30, 0);
             assert_eq!(app.cols, 1);
-            assert_eq!(app.grid_rect.width, 37);
+            assert_eq!(app.grid_rect.width, 30);
             assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("t10"), "selection kept by id");
-            assert!(list_part(&screen, 37, 1..29).join("\n").contains("proj-t10"), "still visible");
+            assert!(list_part(&screen, 30, 1..29).join("\n").contains("proj-t10"), "still visible");
             // j/k move one tile, h/l stay
             app.apply_move(Dir::Down);
             assert_eq!(app.selected, 11);
@@ -511,17 +511,17 @@ mod tests {
         sessions.extend((0..4).map(|i| windowed(&format!("b{i}"), "W2")));
         app.apply_snapshot(Snapshot { sessions, window_order: vec!["W1".into(), "W2".into()], ..Default::default() }, 0);
         app.preview = true;
-        // 150x16: middle 150x14 -> list 37x14, one column: D T T T T D T T T T
+        // 150x16: middle 150x14 -> list 30x14, one column: D T T T T D T T T T
         app.selected = 7;
         let screen = render(&mut app, 150, 16, 0);
-        assert_eq!((app.grid_rect.width, app.cols), (37, 1));
-        let list = list_part(&screen, 37, 1..15).join("\n");
+        assert_eq!((app.grid_rect.width, app.cols), (30, 1));
+        let list = list_part(&screen, 30, 1..15).join("\n");
         assert!(list.contains("proj-b3") && list.contains("proj-b2"), "{list}");
         assert!(screen.last().unwrap().contains("▲ more"));
         // first tile of group 2: its divider is shown right above it
         app.selected = 4;
         let screen = render(&mut app, 150, 16, 0);
-        let list = list_part(&screen, 37, 1..15);
+        let list = list_part(&screen, 30, 1..15);
         let d = list.iter().position(|r| r.starts_with("── 창 2 · 세션 4")).expect("divider of group 2");
         assert!(list[d + 2].contains("proj-b0"), "{list:?}");
         // j walks every tile in order, across the divider
@@ -537,7 +537,7 @@ mod tests {
             app.selected = sel;
             let screen = render(&mut app, 150, 16, 0);
             let id = &app.sessions[sel].id;
-            assert!(list_part(&screen, 37, 1..15).join("\n").contains(&format!("proj-{id}")), "sel={sel}");
+            assert!(list_part(&screen, 30, 1..15).join("\n").contains(&format!("proj-{id}")), "sel={sel}");
         }
         assert_eq!(app.scroll, 0);
         assert!(screen_starts_with_divider(&render(&mut app, 150, 16, 0)));

@@ -20,7 +20,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::source::cmux::Cmux;
-use crate::ui::tile::truncate_to_width;
+use unicode_width::UnicodeWidthChar;
 
 /// The selected session is re-read about this often.
 pub const PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
@@ -76,7 +76,7 @@ impl PreviewCache {
 
 /// Removes ANSI escape sequences (CSI `ESC [ … final`, OSC `ESC ] … BEL/ST`,
 /// other two-byte `ESC x`) and turns the remaining control chars except
-/// newlines into spaces (`\r` is dropped).
+/// newlines and tabs into spaces (`\r` is dropped; tabs are expanded later).
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
@@ -112,7 +112,7 @@ pub fn strip_ansi(s: &str) -> String {
                 }
                 _ => {}
             },
-            '\n' => out.push('\n'),
+            '\n' | '\t' => out.push(c),
             '\r' => {}
             c if c.is_control() => out.push(' '),
             c => out.push(c),
@@ -121,17 +121,90 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// The last lines of `screen` that fit a `height`×`width` panel: escapes
-/// stripped, trailing blank lines dropped, each line cut to `width` display
-/// columns (wide chars never split, no wrapping).
+/// Continuation rows keep the line's indentation only while at least this
+/// many columns stay for text.
+pub const WRAP_MIN_TEXT: usize = 20;
+/// Tab stops every this many columns.
+const TAB_WIDTH: usize = 8;
+
+/// `line` with tabs turned into spaces up to the next tab stop.
+fn expand_tabs(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut col = 0;
+    for c in line.chars() {
+        if c == '\t' {
+            let n = TAB_WIDTH - col % TAB_WIDTH;
+            out.extend(std::iter::repeat_n(' ', n));
+            col += n;
+        } else {
+            out.push(c);
+            col += c.width().unwrap_or(0);
+        }
+    }
+    out
+}
+
+/// Soft-wraps `line` (escapes already stripped, no tabs) into rows of at
+/// most `width` display columns. Wide chars are never split (they move to
+/// the next row); zero-width chars (combining marks) stay with the char
+/// before them; a char wider than `width` can never fit and is skipped.
+/// Continuation rows get the line's leading spaces as a hanging indent,
+/// capped so that [`WRAP_MIN_TEXT`] columns stay for text. Nothing is cut
+/// with `…`. An empty line is one empty row; `width == 0` gives no rows.
+pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let indent = line.chars().take_while(|c| *c == ' ').count();
+    let hang = indent.min(width.saturating_sub(WRAP_MIN_TEXT));
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut used = 0;
+    for c in line.chars() {
+        let w = c.width().unwrap_or(0);
+        if w > width {
+            continue;
+        }
+        if used + w > width {
+            rows.push(std::mem::take(&mut row));
+            row.extend(std::iter::repeat_n(' ', hang));
+            used = hang;
+        }
+        row.push(c);
+        used += w;
+    }
+    rows.push(row);
+    rows
+}
+
+/// The last rows of `screen` that fit a `height`×`width` panel: escapes
+/// stripped, tabs expanded, trailing blank lines dropped, every line
+/// soft-wrapped with [`wrap_line`], and of the wrapped rows the last
+/// `height` (the newest content is always at the bottom).
+///
+/// Every source line gives at least one row, so `height` source lines are
+/// always enough to fill the panel: the read size can stay the panel's
+/// inner height (see [`crate::ui::preview::preview_read_lines`]).
 pub fn preview_lines(screen: &str, height: usize, width: usize) -> Vec<String> {
+    if height == 0 || width == 0 {
+        return Vec::new();
+    }
     let clean = strip_ansi(screen);
-    let mut lines: Vec<&str> = clean.lines().map(str::trim_end).collect();
+    let mut lines: Vec<String> = clean.lines().map(|l| expand_tabs(l).trim_end().to_string()).collect();
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
-    let skip = lines.len().saturating_sub(height);
-    lines[skip..].iter().map(|l| truncate_to_width(l, width)).collect()
+    let mut out = Vec::with_capacity(height);
+    'lines: for line in lines.iter().rev() {
+        for row in wrap_line(line, width).into_iter().rev() {
+            out.push(row);
+            if out.len() == height {
+                break 'lines;
+            }
+        }
+    }
+    out.reverse();
+    out
 }
 
 /// Starts the preview thread reading through `cmux`. `interval` is the
@@ -187,7 +260,7 @@ mod tests {
         assert_eq!(strip_ansi("\x1b]0;title\x07after"), "after");
         assert_eq!(strip_ansi("\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\"), "link");
         assert_eq!(strip_ansi("\x1b(Bx\x1b=y"), "xy");
-        assert_eq!(strip_ansi("tab\there\r\nnext\x07\x00"), "tab here\nnext  ");
+        assert_eq!(strip_ansi("tab\there\r\nnext\x07\x00"), "tab\there\nnext  ", "tabs are kept for expansion");
         // a lone or cut-off escape at the end never panics
         assert_eq!(strip_ansi("end\x1b"), "end");
         assert_eq!(strip_ansi("end\x1b[12"), "end");
@@ -210,16 +283,101 @@ mod tests {
     }
 
     #[test]
-    fn preview_truncates_wide_chars_without_panic() {
-        let screen = "프로젝트 미리보기 테스트\nabcdefghijklmnop\n✳ 작업 중…";
-        for w in 0..30 {
-            for line in preview_lines(screen, 5, w) {
-                assert!(line.width() <= w, "w={w} line={line:?}");
+    fn wrap_line_ascii_and_exact_fit() {
+        assert_eq!(wrap_line("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrap_line("abcd", 4), vec!["abcd"]);
+        assert_eq!(wrap_line("abc", 10), vec!["abc"]);
+        assert_eq!(wrap_line("", 10), vec![""], "an empty line is one empty row");
+        // a long unbroken token is cut by width, nothing is lost
+        let token = "x".repeat(95);
+        let rows = wrap_line(&token, 40);
+        assert_eq!(rows.iter().map(|r| r.len()).collect::<Vec<_>>(), vec![40, 40, 15]);
+        assert_eq!(rows.concat(), token);
+    }
+
+    #[test]
+    fn wrap_line_never_splits_wide_chars() {
+        // 5 columns: "가나" (4) then "다" does not fit in the last column
+        assert_eq!(wrap_line("가나다라", 5), vec!["가나", "다라"]);
+        assert_eq!(wrap_line("a가나", 4), vec!["a가", "나"]);
+        assert_eq!(wrap_line("ab가", 3), vec!["ab", "가"]);
+        let text = "프로젝트 미리보기 테스트 ✳ 작업 중… 읽은 화면은 이렇게 보입니다";
+        for w in 2..40 {
+            let rows = wrap_line(text, w);
+            assert!(rows.iter().all(|r| r.width() <= w), "w={w} {rows:?}");
+            assert_eq!(rows.concat(), text, "w={w}: nothing dropped, no …");
+        }
+    }
+
+    #[test]
+    fn wrap_line_keeps_combining_marks_with_their_base() {
+        // e + combining acute (zero width) stays on the row of the 'e'
+        let s = "abcde\u{301}fg";
+        assert_eq!(wrap_line(s, 5), vec!["abcde\u{301}", "fg"]);
+        assert_eq!(wrap_line("\u{301}x", 1), vec!["\u{301}x"], "a leading zero-width char is kept");
+    }
+
+    #[test]
+    fn wrap_line_hanging_indent_kept_and_capped() {
+        assert_eq!(wrap_line("    abcdefghij", 8), vec!["    abcd", "efghij"], "too narrow for a hanging indent");
+        // width 30: indent 4 kept on continuation rows
+        let rows = wrap_line(&format!("    {}", "y".repeat(40)), 30);
+        assert_eq!(rows, vec![format!("    {}", "y".repeat(26)), format!("    {}", "y".repeat(14))]);
+        // the indent is capped so at least 20 columns stay for text
+        let rows = wrap_line(&format!("{}{}", " ".repeat(16), "z".repeat(30)), 30);
+        assert_eq!(rows[0], format!("{}{}", " ".repeat(16), "z".repeat(14)));
+        assert_eq!(rows[1], format!("{}{}", " ".repeat(10), "z".repeat(16)), "indent capped at 30 - 20");
+        // narrower than 20 columns: no hanging indent at all
+        assert_eq!(wrap_line("  abcdef", 4), vec!["  ab", "cdef"]);
+        // a line of only spaces is one row
+        assert_eq!(wrap_line("     ", 3).len(), 2);
+    }
+
+    #[test]
+    fn wrap_line_tiny_widths_terminate() {
+        for w in 0..3 {
+            for s in ["", "a", "abc", "가나다", "  가 b", "\u{301}"] {
+                let rows = wrap_line(s, w);
+                assert!(rows.len() <= s.chars().count() + 1, "w={w} {s:?} {rows:?}");
+                assert!(rows.iter().all(|r| r.width() <= w), "w={w} {s:?} {rows:?}");
             }
         }
-        assert_eq!(preview_lines(screen, 5, 7)[0], "프로젝…");
-        assert_eq!(preview_lines(screen, 5, 6)[1], "abcde…");
-        assert_eq!(preview_lines("짧음", 1, 4), vec!["짧음"]);
+        assert!(wrap_line("abc", 0).is_empty(), "nothing fits zero columns");
+        assert_eq!(wrap_line("가a", 1), vec!["a"], "a wide char can never fit 1 column");
+        assert_eq!(wrap_line("abc", 1), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn preview_lines_wrap_and_keep_the_newest_rows_at_the_bottom() {
+        let long = format!("start {} end", "w".repeat(30));
+        let screen = format!("old line\n{long}\n❯ prompt\n\n");
+        // width 10: the long line takes 5 rows (6+30+4 = 40 cols)
+        let rows = preview_lines(&screen, 100, 10);
+        assert_eq!(rows.len(), 1 + 4 + 1, "{rows:?}");
+        assert_eq!(rows.last().unwrap(), "❯ prompt");
+        assert!(rows.iter().all(|r| !r.contains('…')), "no truncation: {rows:?}");
+        assert_eq!(rows[1..5].concat(), long);
+        // only 3 rows: the tail of the wrapped line, then the prompt
+        let rows = preview_lines(&screen, 3, 10);
+        assert_eq!(rows, vec!["wwwwwwwwww", "wwwwww end", "❯ prompt"]);
+        assert!(preview_lines(&screen, 0, 10).is_empty());
+        assert!(preview_lines(&screen, 5, 0).is_empty());
+        // tabs become spaces up to the next multiple of 8
+        assert_eq!(preview_lines("a\tb", 5, 40), vec!["a       b"]);
+        assert_eq!(preview_lines("\x1b[31mred\x1b[0m\tx", 5, 40), vec!["red     x"], "escapes do not count");
+    }
+
+    #[test]
+    fn requesting_inner_height_source_lines_always_fills_the_panel() {
+        // every source line is at least one row, so `height` source lines
+        // (the read size) always fill a `height`-row panel, wrapped or not
+        let src: Vec<String> = (0..30).map(|i| if i % 3 == 0 { "q".repeat(i * 7) } else { format!("line {i}") }).collect();
+        for height in 1..20 {
+            for width in [1, 5, 20, 80] {
+                let tail = src[src.len() - height..].join("\n");
+                assert_eq!(preview_lines(&tail, height, width).len(), height, "h={height} w={width}");
+            }
+        }
     }
 
     #[test]
