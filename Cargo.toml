@@ -1,0 +1,24 @@
+[package]
+name = "cmux-cc-monitor"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.89"
+description = "A ratatui TUI that shows Claude Code sessions running in cmux"
+license = "MIT"
+readme = "README.md"
+keywords = ["tui", "cmux", "claude", "monitor"]
+categories = ["command-line-utilities"]
+repository = "https://github.com/jeanboy44/cmux-cc-sessions-monitor"
+
+[dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+anyhow = "1"
+dirs = "6"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

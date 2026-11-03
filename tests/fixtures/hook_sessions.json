@@ -1,0 +1,5 @@
+{"activeSessionsBySurface":{},"activeSessionsByWorkspace":{},"agentHookFailureReportTimestamps":{},"pendingCursorApprovalIndexInitialized":true,
+"sessions":{
+"k1":{"agentLifecycle":"running","cwd":"/home/user/proj","hadPendingBackgroundWorkAtStop":false,"hookEventName":"PreToolUse","isRestorable":true,"lastBody":"Running tests","lastPermissionMode":"default","launchCommand":"claude","pid":4242,"pidStartMicroseconds":0,"pidStartSeconds":1700000000,"priorProcessGenerations":[],"runtimeStatus":"running","sessionId":"00000000-0000-0000-0000-000000000001","startedAt":1700000000.5,"surfaceId":"00000000-0000-0000-0000-0000000000a1","transcriptPath":"/home/user/.claude/projects/proj/t.jsonl","updatedAt":"2026-11-03T10:00:00Z","workspaceId":"00000000-0000-0000-0000-0000000000b1"},
+"k2":{"agentLifecycle":"idle","cwd":"/home/user/other","hookEventName":"Stop","sessionId":"00000000-0000-0000-0000-000000000002","surfaceId":"s2","workspaceId":"w2","updatedAt":1700000009}
+}}
