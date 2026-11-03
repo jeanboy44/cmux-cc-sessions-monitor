@@ -159,6 +159,19 @@ impl<'a> Painter<'a> {
         self
     }
 
+    /// Where the painter is placed: (x, y) of the effect's origin in frame space.
+    pub fn origin(&self) -> (f64, f64) {
+        (self.tx, self.ty)
+    }
+    /// -1 when the painter is mirrored, 1 otherwise.
+    pub fn sign(&self) -> f64 {
+        self.fx
+    }
+    /// The placement rotation as (cos, sin).
+    pub fn rotation(&self) -> (f64, f64) {
+        (self.cs, self.sn)
+    }
+
     // ---- transforms: local (effect) space <-> screen (frame) space
     pub fn to_x(&self, x: f64, y: f64) -> f64 {
         self.tx + x * self.fx * self.cs - y * self.sn

@@ -1,11 +1,16 @@
 #![allow(dead_code)]
 
+pub mod act;
 pub mod actor;
+pub mod chain;
 pub mod color;
+pub mod effect;
 pub mod frame;
 pub mod math;
 pub mod painter;
 pub mod particles;
+pub mod poses;
+pub mod rig;
 pub mod shapes;
 pub mod sim;
 pub mod theme;
