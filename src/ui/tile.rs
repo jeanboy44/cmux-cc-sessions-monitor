@@ -1,8 +1,8 @@
 //! Character-card tiles: thin rounded border, mascot, name, status badge, extras.
 //!
 //! Minimum sizes (borders included), used by the app to compute columns:
-//! - view A (horizontal card): 28×6 — 6×3 mascot top-left, ≥19 text columns right.
-//! - view B (vertical card): 24×10 — 8×4 mascot on top, ≥4 text rows below.
+//! - view A (horizontal card): 26×6 — 4×2 mascot top-left, ≥19 text columns right.
+//! - view B (vertical card): 24×9 — 6×3 mascot on top, ≥4 text rows below.
 //!
 //! Text rows in priority order: name, badge line, branch, PR, summary (each
 //! extra only when enabled and known). View A always shows at most 4 rows, so
@@ -42,16 +42,16 @@ impl ViewKind {
 
 /// Minimum (width, height) of a full tile in `view`, borders included.
 ///
-/// View A (28×6) shows at most 4 text rows: name, badge line (status +
+/// View A (26×6) shows at most 4 text rows: name, badge line (status +
 /// elapsed + last activity, dropping last activity then elapsed when too
 /// narrow), branch, and ONE of PR / summary — PR first, summary only when the
 /// PR row is absent (disabled or no PR). Rows of disabled extras collapse.
-/// View B (24×10) has 4 text rows at minimum and uses the same priority order;
+/// View B (24×9) has 4 text rows at minimum and uses the same priority order;
 /// taller B tiles show every enabled row.
 pub fn tile_size(view: ViewKind) -> (u16, u16) {
     match view {
-        ViewKind::A => (28, 6),
-        ViewKind::B => (24, 10),
+        ViewKind::A => (26, 6),
+        ViewKind::B => (24, 9),
     }
 }
 
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn tile_truncates_wide_korean_name_without_panic() {
         let s = session("프로젝트-아주-아주-긴-이름-입니다-정말로", Status::Running);
-        for w in 28..44 {
+        for w in 26..44 {
             let rows = tile(w, 6, &s, &Config::default(), false, 0, ViewKind::A);
             let row = &rows[1];
             assert!(row.contains("프로젝트"), "{row}");
@@ -406,7 +406,7 @@ mod tests {
             assert!(row.ends_with('│'), "border intact: {row:?}");
         }
         for w in 24..36 {
-            let rows = tile(w, 10, &s, &Config::default(), true, 0, ViewKind::B);
+            let rows = tile(w, 9, &s, &Config::default(), true, 0, ViewKind::B);
             assert!(rows.iter().any(|r| r.contains("프로") && r.contains('…')));
         }
     }
@@ -415,7 +415,7 @@ mod tests {
     fn tile_tiny_area_does_not_panic() {
         let s = session("proj-a", Status::Idle);
         for view in [ViewKind::A, ViewKind::B] {
-            for (w, h) in [(20, 6), (5, 2), (1, 1), (0, 0), (2, 40), (23, 11), (27, 9)] {
+            for (w, h) in [(20, 6), (5, 2), (1, 1), (0, 0), (2, 40), (23, 11), (25, 5), (60, 5)] {
                 let rows = tile(w, h, &s, &Config::default(), true, 0, view);
                 if w == 0 || h == 0 {
                     continue;
@@ -447,9 +447,9 @@ mod tests {
         }
     }
 
-    /// Text column of a view A row: after the border, 6 mascot cells and the gap.
+    /// Text column of a view A row: after the border, 4 mascot cells and the gap.
     fn a_text(row: &str) -> String {
-        row.chars().skip(8).collect::<String>().trim_end_matches('│').to_string()
+        row.chars().skip(6).collect::<String>().trim_end_matches('│').to_string()
     }
 
     #[test]
@@ -483,7 +483,7 @@ mod tests {
         let mut s = session("proj-a", Status::NeedsInput);
         s.started_at = Some(now - Duration::from_secs(400 * 86_400 + 5));
         // " INPUT " (7) + " 400d" (5) + " ·2m ago" (8) = 20 > 19 → last activity dropped.
-        let rows = tile(28, 6, &s, &all_extras(), false, 0, ViewKind::A);
+        let rows = tile(26, 6, &s, &all_extras(), false, 0, ViewKind::A);
         assert_eq!(a_text(&rows[2]), format!("{:<19}", " INPUT  400d"));
         let flat = |w: usize| -> String {
             let lines = text_lines(&s, &all_extras(), w, now);
@@ -605,8 +605,8 @@ mod tests {
 
     #[test]
     fn tile_size_is_documented_minimum() {
-        assert_eq!(tile_size(ViewKind::A), (28, 6));
-        assert_eq!(tile_size(ViewKind::B), (24, 10));
+        assert_eq!(tile_size(ViewKind::A), (26, 6));
+        assert_eq!(tile_size(ViewKind::B), (24, 9));
     }
 
     #[test]

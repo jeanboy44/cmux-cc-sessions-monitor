@@ -1,10 +1,11 @@
 //! "Pochi" — the monitor's own pixel mascot.
 //!
-//! Pochi is a small round mochi-dumpling sprite with a single antenna pixel
-//! bent off its top-right corner whose tip glows in the status accent color,
-//! two dot eyes and two stubby feet. The silhouette (dome body + antenna, no
-//! side arms, no flat top) is deliberately different from Claude Code's
-//! mascot. Kept tiny and flat on purpose: no shine, few sparks.
+//! Pochi is a tiny round mochi-dumpling sprite with a single antenna pixel
+//! off its top-right corner whose tip glows in the status accent color, two
+//! dot eyes and two stubby feet. The silhouette (body + antenna, no side
+//! arms) is deliberately different from Claude Code's mascot. Kept as small
+//! and flat as still reads: 4×4 px in view A, 6×6 px in view B; the status
+//! shows through color, eyes, the bob/jump and the `! z ? ✓` glyph.
 //!
 //! Sprites are drawn with half-block characters: every terminal cell holds two
 //! vertical pixels (`▀` fg = top pixel, bg = bottom pixel; `▄` for a lone
@@ -25,9 +26,9 @@ use crate::ui::style;
 /// Sprite sizes in terminal cells (each cell = 1×2 pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpriteSize {
-    /// 6×3 cells (6×6 px) — the view A character card.
+    /// 4×2 cells (4×4 px) — the view A character card.
     Small,
-    /// 8×4 cells (8×8 px) — the view B character card and the empty screen.
+    /// 6×3 cells (6×6 px) — the view B character card and the empty screen.
     Large,
 }
 
@@ -35,8 +36,8 @@ impl SpriteSize {
     /// (columns, rows) in terminal cells.
     pub const fn cells(self) -> (u16, u16) {
         match self {
-            SpriteSize::Small => (6, 3),
-            SpriteSize::Large => (8, 4),
+            SpriteSize::Small => (4, 2),
+            SpriteSize::Large => (6, 3),
         }
     }
 }
@@ -294,20 +295,8 @@ struct Geo {
     slots: &'static [(i16, i16)],
 }
 
-/// 8×8 px: 6-wide body, antenna tip off the top-right corner.
+/// 6×6 px: 5-wide round body in columns 0..=4; column 5 stays free for glyphs.
 const LARGE: Geo = Geo {
-    w: 8,
-    h: 8,
-    tip: (6, 1),
-    body_top: 2,
-    rows: &[(2, 5), (1, 6), (1, 6), (1, 6), (2, 5)],
-    eye_y: 4,
-    feet_y: 7,
-    slots: &[(7, 0), (5, 0), (7, 2), (7, 3), (0, 2), (7, 5), (0, 6), (7, 7), (0, 0)],
-};
-
-/// 6×6 px: 5-wide body in columns 0..=4; column 5 stays free for glyphs.
-const SMALL: Geo = Geo {
     w: 6,
     h: 6,
     tip: (4, 0),
@@ -316,7 +305,21 @@ const SMALL: Geo = Geo {
     eye_y: 2,
     feet_y: 5,
     // Fewer free pixels: slots 1 and 4 share the top-left corner.
-    slots:&[(5, 1), (0, 0), (5, 4), (5, 2), (0, 0), (5, 3), (0, 5), (5, 5), (2, 0)],
+    slots: &[(5, 1), (0, 0), (5, 4), (5, 2), (0, 0), (5, 3), (0, 5), (5, 5), (2, 0)],
+};
+
+/// 4×4 px: 3×2 body in columns 0..=2 (eyes on its top row), antenna tip
+/// above the right edge, feet below; column 3 stays free for glyphs/sparks.
+const SMALL: Geo = Geo {
+    w: 4,
+    h: 4,
+    tip: (2, 0),
+    body_top: 1,
+    rows: &[(0, 2), (0, 2)],
+    eye_y: 1,
+    feet_y: 3,
+    // Slots used together with a glyph (1, 3, 4, 5, 6, 7) avoid the glyph cell.
+    slots: &[(3, 1), (0, 0), (3, 3), (1, 0), (0, 0), (3, 2), (3, 3), (3, 2), (1, 0)],
 };
 
 fn geo(size: SpriteSize) -> &'static Geo {
@@ -329,33 +332,32 @@ fn geo(size: SpriteSize) -> &'static Geo {
 /// Eye (and mouth) pixels as (x, offset from eye row).
 fn face(size: SpriteSize, eyes: Eyes) -> &'static [(i16, i16)] {
     match (size, eyes) {
-        (SpriteSize::Large, Open) => &[(2, 0), (5, 0)],
-        (SpriteSize::Large, Glance) => &[(3, 0), (6, 0)],
-        (SpriteSize::Large, Alert) => &[(2, -1), (2, 0), (5, -1), (5, 0)],
-        (SpriteSize::Large, Closed) => &[(1, 0), (2, 0), (5, 0), (6, 0)],
-        (SpriteSize::Large, Happy) => &[(2, -1), (5, -1), (3, 1), (4, 1)],
-        (SpriteSize::Large, Odd) => &[(2, 1), (5, 0)],
-        (SpriteSize::Small, Open) => &[(1, 0), (3, 0)],
-        (SpriteSize::Small, Glance) => &[(2, 0), (4, 0)],
-        (SpriteSize::Small, Alert) => &[(1, 0), (1, 1), (3, 0), (3, 1)],
-        (SpriteSize::Small, Closed) => &[(0, 1), (1, 1), (3, 1), (4, 1)],
-        (SpriteSize::Small, Happy) => &[(1, -1), (3, -1), (2, 1)],
-        (SpriteSize::Small, Odd) => &[(1, 1), (3, 0)],
+        (SpriteSize::Large, Open) => &[(1, 0), (3, 0)],
+        (SpriteSize::Large, Glance) => &[(2, 0), (4, 0)],
+        (SpriteSize::Large, Alert) => &[(1, 0), (1, 1), (3, 0), (3, 1)],
+        (SpriteSize::Large, Closed) => &[(0, 1), (1, 1), (3, 1), (4, 1)],
+        (SpriteSize::Large, Happy) => &[(1, -1), (3, -1), (2, 1)],
+        (SpriteSize::Large, Odd) => &[(1, 1), (3, 0)],
+        (SpriteSize::Small, Open) => &[(0, 0), (2, 0)],
+        (SpriteSize::Small, Glance) => &[(1, 0), (2, 0)],
+        (SpriteSize::Small, Alert) => &[(0, 0), (0, 1), (2, 0), (2, 1)],
+        (SpriteSize::Small, Closed) => &[(0, 1), (2, 1)],
+        (SpriteSize::Small, Happy) => &[(0, 0), (2, 0), (1, 1)],
+        (SpriteSize::Small, Odd) => &[(0, 1), (2, 0)],
     }
 }
 
 fn feet(size: SpriteSize, f: Feet) -> &'static [i16] {
     match (size, f) {
-        (SpriteSize::Large, Both) => &[2, 5],
-        (SpriteSize::Large, Spread) => &[1, 6],
-        (SpriteSize::Large, StepL) => &[3, 5],
-        (SpriteSize::Large, StepR) => &[2, 4],
-        (SpriteSize::Large, Tucked) => &[3, 4],
-        (SpriteSize::Small, Both) => &[1, 3],
-        (SpriteSize::Small, Spread) => &[0, 4],
-        (SpriteSize::Small, StepL) => &[2, 3],
-        (SpriteSize::Small, StepR) => &[1, 2],
-        (SpriteSize::Small, Tucked) => &[2],
+        (SpriteSize::Large, Both) => &[1, 3],
+        (SpriteSize::Large, Spread) => &[0, 4],
+        (SpriteSize::Large, StepL) => &[2, 3],
+        (SpriteSize::Large, StepR) => &[1, 2],
+        (SpriteSize::Large, Tucked) => &[2],
+        (SpriteSize::Small, Both | Spread) => &[0, 2],
+        (SpriteSize::Small, StepL) => &[1, 2],
+        (SpriteSize::Small, StepR) => &[0, 1],
+        (SpriteSize::Small, Tucked) => &[1],
     }
 }
 
@@ -388,14 +390,15 @@ fn pixels(size: SpriteSize, p: &Pose) -> Vec<Vec<Px>> {
             put(x, g.body_top + dy + i as i16, Px::Body);
         }
     }
-    for (x, off) in face(size, p.eyes) {
-        put(*x, g.eye_y + dy + off, Px::Dark);
-    }
     // Grounded feet stay put (a squash hides the body over them);
     // airborne feet hang right under the body.
     let fy = if p.feet == Tucked { g.feet_y + dy } else { g.feet_y };
     for x in feet(size, p.feet) {
         put(*x, fy, Px::Shade);
+    }
+    // The face goes last so a squashed 4 px Pochi keeps its eyes.
+    for (x, off) in face(size, p.eyes) {
+        put(*x, g.eye_y + dy + off, Px::Dark);
     }
     for i in p.sparks {
         if let Some((x, y)) = g.slots.get(*i) {
@@ -481,8 +484,8 @@ mod tests {
 
     #[test]
     fn sprite_sizes_are_compact() {
-        assert_eq!(SpriteSize::Small.cells(), (6, 3));
-        assert_eq!(SpriteSize::Large.cells(), (8, 4));
+        assert_eq!(SpriteSize::Small.cells(), (4, 2));
+        assert_eq!(SpriteSize::Large.cells(), (6, 3));
     }
 
     #[test]
@@ -538,14 +541,28 @@ mod tests {
     #[test]
     fn sprite_running_loop_has_at_least_four_frames() {
         let len = loop_len(Status::Running);
-        let mut distinct: Vec<Vec<Line>> = Vec::new();
-        for t in 0..len {
-            let f = sprite(Status::Running, SpriteSize::Large, t);
-            if !distinct.contains(&f) {
-                distinct.push(f);
+        for (size, want) in [(SpriteSize::Large, 4), (SpriteSize::Small, 2)] {
+            let mut distinct: Vec<Vec<Line>> = Vec::new();
+            for t in 0..len {
+                let f = sprite(Status::Running, size, t);
+                if !distinct.contains(&f) {
+                    distinct.push(f);
+                }
             }
+            assert!(distinct.len() >= want, "{size:?}: {}", distinct.len());
         }
-        assert!(distinct.len() >= 4);
+    }
+
+    #[test]
+    fn small_sprite_keeps_body_eyes_and_a_free_glyph_column() {
+        // 4x4 px: body + dark eyes in columns 0..=2, column 3 free for glyphs.
+        for st in ALL {
+            let px = gallery_pixels(st, SpriteSize::Small, 0);
+            assert_eq!(px.len(), 4);
+            assert!(px.iter().all(|r| r.chars().count() == 4));
+            let joined = px.join("");
+            assert!(joined.contains('o') && joined.contains('#'), "{st:?}: {px:?}");
+        }
     }
 
     #[test]
