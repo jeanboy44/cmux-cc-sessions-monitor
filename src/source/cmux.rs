@@ -224,6 +224,8 @@ pub struct FakeCmux {
     /// Defaults to the surfaces of the sessions passed to [`FakeCmux::new`].
     pub surfaces_result: Result<HashSet<String>, String>,
     pub read_screen_result: Result<String, String>,
+    /// Per-surface screens; surfaces not listed get `read_screen_result`.
+    pub screens: std::collections::HashMap<String, Result<String, String>>,
     pub focus_result: Result<(), String>,
     /// Recorded calls, e.g. `sessions`, `focus ws surface`, `read_screen ws surface`.
     pub calls: std::sync::Mutex<Vec<String>>,
@@ -237,6 +239,7 @@ impl FakeCmux {
             sessions_result: Ok(sessions),
             surfaces_result: Ok(surfaces),
             read_screen_result: Ok(String::new()),
+            screens: Default::default(),
             focus_result: Ok(()),
             calls: Default::default(),
         }
@@ -266,7 +269,8 @@ impl Cmux for FakeCmux {
 
     fn read_screen(&self, workspace_id: &str, surface_id: &str) -> Result<String> {
         self.calls.lock().unwrap().push(format!("read_screen {workspace_id} {surface_id}"));
-        self.read_screen_result.clone().map_err(|e| anyhow!(e))
+        let result = self.screens.get(surface_id).unwrap_or(&self.read_screen_result);
+        result.clone().map_err(|e| anyhow!(e))
     }
 }
 

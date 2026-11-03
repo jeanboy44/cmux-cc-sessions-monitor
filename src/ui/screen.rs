@@ -15,20 +15,31 @@ use crate::model::Status;
 use crate::ui::grid::{cell_rect, compute_cols, row_count, scroll_to_show, visible_rows};
 use crate::ui::hud::{render_hud, StatusCounts};
 use crate::ui::mascot::{sprite, sprite_oneshot_done, SpriteSize};
+use crate::ui::preview::{preview_layout, render_preview, PREVIEW_TOO_SMALL};
 use crate::ui::settings::render_settings;
 use crate::ui::style;
 use crate::ui::tile::{render_tile, render_tile_with_sprite, tile_size};
 
 pub const EMPTY_MESSAGE: &str = "cmux에서 실행 중인 Claude 세션이 없습니다";
 pub const LOADING_MESSAGE: &str = "세션을 불러오는 중…";
-pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter 포커스 · i 설정 · q 종료 ";
+pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter 포커스 · p 미리보기 · i 설정 · q 종료 ";
 
-/// Draws the full frame. Updates `app.cols` and `app.scroll` from the layout.
+/// Draws the full frame. Updates `app.cols`, `app.scroll`, `app.grid_rect`
+/// and `app.preview_too_small` from the layout.
 pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
-    let [hud, grid, footer] =
+    let [hud, middle, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
     let counts = StatusCounts::from_statuses(app.sessions.iter().map(|s| s.status));
     render_hud(f, hud, &counts);
+
+    let layout = preview_layout(middle, app.preview);
+    let grid = layout.grid;
+    app.grid_rect = grid;
+    app.preview_too_small = app.preview && layout.panel.is_none();
+    if let Some(panel) = layout.panel {
+        let name = app.selected_session().map(|s| s.name.clone());
+        render_preview(f, panel, name.as_deref(), &app.preview_body());
+    }
 
     let (above, below) = if app.sessions.is_empty() {
         app.cols = 1;
@@ -41,7 +52,7 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     draw_footer(f, footer, app, above, below, now);
 
     if app.mode == Mode::Settings {
-        render_settings(f, grid, &app.config, app.settings_cursor, tick, app.pr_tools_note.as_deref());
+        render_settings(f, middle, &app.config, app.settings_cursor, tick, app.pr_tools_note.as_deref());
     }
 }
 
@@ -120,6 +131,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, above: bool, below: bool, n
             Style::new().fg(style::BADGE_FG).bg(style::FLASH_ALERT).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(" "));
+    }
+    if app.preview_too_small {
+        spans.push(Span::styled(format!("{PREVIEW_TOO_SMALL} · "), dim));
     }
     let mut tail = Vec::new();
     if above {
@@ -287,6 +301,85 @@ mod tests {
         app.selected = 0;
         app.apply_snapshot(Snapshot { sessions: three[1..2].to_vec(), ..Default::default() }, 6);
         assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("b"));
+    }
+
+    fn preview_app(n: usize) -> App {
+        let mut cfg = Config::default();
+        cfg.view = ViewMode::A;
+        let mut app = App::new(cfg);
+        let sessions = (0..n).map(|i| fake_session(&format!("t{i}"), Status::Running)).collect();
+        app.apply_snapshot(Snapshot { sessions, ..Default::default() }, 0);
+        app.preview = true;
+        let (cache, _) = app.preview_shared();
+        cache.put(
+            "t0",
+            crate::preview::PreviewEntry { screen: Ok("first\n❯ last prompt line\n\n".into()), fetched_at: Instant::now() },
+        );
+        app
+    }
+
+    #[test]
+    fn preview_panel_draws_on_the_right_when_wide() {
+        let mut app = preview_app(4);
+        let screen = render(&mut app, 150, 30, 0);
+        // middle area 150x28: panel 50 wide on the right
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 100, 28));
+        assert!(screen[1][..].contains("미리보기 · proj-t0"), "{}", screen[1]);
+        let text = screen.join("\n");
+        assert!(text.contains("❯ last prompt line") && text.contains("first"), "{text}");
+        assert!(screen.last().unwrap().contains("p 미리보기"));
+        assert!(app.cols >= 3, "grid uses the narrowed rect: cols={}", app.cols);
+        assert!(!app.preview_too_small);
+    }
+
+    #[test]
+    fn preview_panel_draws_at_the_bottom_when_narrow_but_tall() {
+        let mut app = preview_app(10);
+        app.selected = 9;
+        let screen = render(&mut app, 100, 32, 0);
+        // middle 100x30: bottom panel 10 tall, grid 100x20
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 100, 20));
+        assert!(screen[21].contains("미리보기 · proj-t9"), "{}", screen[21]);
+        assert!(screen.join("\n").contains(crate::ui::preview::PREVIEW_LOADING), "t9 not read yet");
+        // the selection stays visible inside the shrunken grid (3 rows of 6)
+        assert_eq!(app.cols, 3);
+        assert_eq!(app.scroll, 1);
+        assert!(screen[1..21].join("\n").contains("proj-t9"));
+    }
+
+    #[test]
+    fn toggling_preview_changes_the_grid_rect() {
+        let mut app = preview_app(4);
+        app.preview = false;
+        render(&mut app, 150, 30, 0);
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 150, 28));
+        app.toggle_preview();
+        assert!(app.preview);
+        render(&mut app, 150, 30, 0);
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 100, 28));
+        app.toggle_preview();
+        render(&mut app, 150, 30, 0);
+        assert_eq!(app.grid_rect.width, 150);
+    }
+
+    #[test]
+    fn preview_too_small_shows_footer_note_and_no_panel() {
+        let mut app = preview_app(4);
+        let screen = render(&mut app, 110, 20, 0);
+        assert!(app.preview_too_small);
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 110, 18));
+        assert!(screen.last().unwrap().contains(PREVIEW_TOO_SMALL), "{}", screen.last().unwrap());
+        assert!(!screen[..19].join("\n").contains("미리보기 · "), "no panel title above the footer");
+    }
+
+    #[test]
+    fn preview_on_tiny_terminals_does_not_panic() {
+        for n in [0, 1, 10] {
+            let mut app = preview_app(n);
+            for (w, h) in [(0, 0), (1, 1), (10, 3), (40, 26), (121, 3), (200, 5)] {
+                assert_eq!(render(&mut app, w, h, 0).len(), h as usize);
+            }
+        }
     }
 
     #[test]

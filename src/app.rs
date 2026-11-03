@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use crate::branch::{spawn_branch_resolver, BranchCache};
@@ -17,10 +18,12 @@ use crate::config::Config;
 use crate::focus::{BackgroundFocus, FocusResult};
 use crate::model::{Session, Status};
 use crate::pr::{default_providers, spawn_poller, PrCache};
+use crate::preview::{spawn_preview, PreviewCache, PreviewSlot, PreviewTarget, PREVIEW_INTERVAL};
 use crate::refresh::{spawn_refresh, Snapshot};
 use crate::source::cmux::{Cmux, CmuxCli};
 use crate::ui::grid::resolve_view;
 use crate::ui::mascot::{done_oneshot_len, status_transition_fx, TileFx};
+use crate::ui::preview::{PreviewBody, PREVIEW_DONE, PREVIEW_FAILED, PREVIEW_LOADING, PREVIEW_NO_SESSION};
 use crate::ui::style::FPS;
 use crate::ui::tile::ViewKind;
 use crate::ui::screen;
@@ -53,6 +56,7 @@ pub enum Dir {
 pub enum Action {
     Move(Dir),
     Focus,
+    TogglePreview,
     OpenSettings,
     Quit,
     None,
@@ -65,7 +69,7 @@ pub enum Mode {
     Settings,
 }
 
-/// Maps a key press to an action: `h j k l` / arrows, Enter, `i`, `q`/`Q`, Ctrl-C.
+/// Maps a key press to an action: `h j k l` / arrows, Enter, `p`/`P`, `i`, `q`/`Q`, Ctrl-C.
 /// Release and repeat events map to [`Action::None`].
 pub fn key_to_action(key: KeyEvent) -> Action {
     if key.kind != KeyEventKind::Press {
@@ -83,6 +87,7 @@ pub fn key_to_action(key: KeyEvent) -> Action {
         KeyCode::Char('k') | KeyCode::Up => Action::Move(Dir::Up),
         KeyCode::Char('l') | KeyCode::Right => Action::Move(Dir::Right),
         KeyCode::Enter => Action::Focus,
+        KeyCode::Char('p' | 'P') => Action::TogglePreview,
         KeyCode::Char('i') => Action::OpenSettings,
         KeyCode::Char('q' | 'Q') => Action::Quit,
         _ => Action::None,
@@ -133,6 +138,16 @@ pub struct App {
     /// Config shared with the refresh thread; kept in sync on every change.
     shared_config: Option<Arc<Mutex<Config>>>,
     pr_poller: Option<PrPoller>,
+    /// The preview panel is toggled on (`p`); runtime only, off at launch.
+    pub preview: bool,
+    /// Filled by the preview thread; the UI only reads it.
+    preview_cache: Arc<PreviewCache>,
+    /// What the preview thread should read (`None` = nothing).
+    preview_slot: PreviewSlot,
+    /// Tile grid area of the last drawn frame.
+    pub grid_rect: Rect,
+    /// The preview is on but the last frame had no room for the panel.
+    pub preview_too_small: bool,
 }
 
 impl App {
@@ -159,6 +174,11 @@ impl App {
             backup_pending: false,
             shared_config: None,
             pr_poller: None,
+            preview: false,
+            preview_cache: Arc::new(PreviewCache::new()),
+            preview_slot: Arc::new(Mutex::new(None)),
+            grid_rect: Rect::default(),
+            preview_too_small: false,
         }
     }
 
@@ -217,6 +237,55 @@ impl App {
         match selected_id.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
             Some(i) => self.selected = i,
             None => self.clamp_selection(),
+        }
+        self.sync_preview_target();
+    }
+
+    /// The preview thread's cache and target slot.
+    pub fn preview_shared(&self) -> (Arc<PreviewCache>, PreviewSlot) {
+        (self.preview_cache.clone(), self.preview_slot.clone())
+    }
+
+    /// `p`: shows or hides the preview panel.
+    pub fn toggle_preview(&mut self) {
+        self.preview = !self.preview;
+        self.sync_preview_target();
+    }
+
+    /// What the preview thread should read now: the selected session while
+    /// the preview is on, unless it is done or has no cmux ids.
+    pub fn preview_target(&self) -> Option<PreviewTarget> {
+        let s = self.selected_session().filter(|_| self.preview)?;
+        if s.status == Status::Done || s.workspace_id.is_empty() || s.surface_id.is_empty() {
+            return None;
+        }
+        Some(PreviewTarget { session_id: s.id.clone(), workspace_id: s.workspace_id.clone(), surface_id: s.surface_id.clone() })
+    }
+
+    /// Publishes [`App::preview_target`] to the preview thread (only on change).
+    fn sync_preview_target(&mut self) {
+        let want = self.preview_target();
+        let mut slot = self.preview_slot.lock().unwrap_or_else(|e| e.into_inner());
+        if *slot != want {
+            *slot = want;
+        }
+    }
+
+    /// What the panel should show for the selected session (cache read only).
+    pub fn preview_body(&self) -> PreviewBody {
+        let Some(s) = self.selected_session() else {
+            return PreviewBody::Note(PREVIEW_NO_SESSION);
+        };
+        if s.status == Status::Done {
+            return PreviewBody::Note(PREVIEW_DONE);
+        }
+        if s.workspace_id.is_empty() || s.surface_id.is_empty() {
+            return PreviewBody::Note(NO_TARGET);
+        }
+        match self.preview_cache.get(&s.id).map(|e| e.screen) {
+            Some(Ok(text)) => PreviewBody::Screen(text),
+            Some(Err(())) => PreviewBody::Note(PREVIEW_FAILED),
+            None => PreviewBody::Note(PREVIEW_LOADING),
         }
     }
 
@@ -310,7 +379,11 @@ impl App {
         }
         let action = key_to_action(key);
         match action {
-            Action::Move(d) => self.apply_move(d),
+            Action::Move(d) => {
+                self.apply_move(d);
+                self.sync_preview_target();
+            }
+            Action::TogglePreview => self.toggle_preview(),
             // While a focus is in flight further Enter presses are ignored.
             Action::Focus if self.focus_pending => {}
             Action::Focus => match self.focus_selected(cmux) {
@@ -414,6 +487,9 @@ pub fn run(
     let cmux = BackgroundFocus::new(Arc::new(CmuxCli::new()));
     let mut app = App::with_settings(config, crate::config::default_path(), shared_config, poller, cache);
     app.start_pr_poller_if_enabled();
+    // Screen reads for the preview never run on the UI or refresh thread.
+    let (preview_cache, preview_slot) = app.preview_shared();
+    drop(spawn_preview(preview_cache, preview_slot, Arc::new(CmuxCli::new()), PREVIEW_INTERVAL, stop.clone()));
     if let Some(msg) = load_error {
         app.report_config_load_error(msg, Instant::now());
     }
@@ -642,6 +718,62 @@ mod tests {
         }
         assert_eq!(key_to_action(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), Action::Quit);
         assert_eq!(key_to_action(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL)), Action::None);
+    }
+
+    #[test]
+    fn key_p_toggles_preview_and_ctrl_p_is_ignored() {
+        assert_eq!(key_to_action(key(KeyCode::Char('p'))), Action::TogglePreview);
+        assert_eq!(key_to_action(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT)), Action::TogglePreview);
+        assert_eq!(key_to_action(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)), Action::None);
+    }
+
+    #[test]
+    fn toggle_preview_flips_state_and_publishes_target() {
+        let mut app = app_with(3, 3);
+        let (cmux, _) = bg(FakeCmux::new(vec![]));
+        let (_, slot) = app.preview_shared();
+        assert!(!app.preview, "off at launch");
+        assert_eq!(*slot.lock().unwrap(), None);
+        app.handle_key(key(KeyCode::Char('p')), &cmux, Instant::now());
+        assert!(app.preview);
+        assert_eq!(slot.lock().unwrap().as_ref().map(|t| t.surface_id.clone()), Some("sf-s0".into()));
+        // moving the selection retargets at once
+        app.handle_key(key(KeyCode::Char('l')), &cmux, Instant::now());
+        assert_eq!(slot.lock().unwrap().as_ref().map(|t| t.session_id.clone()), Some("s1".into()));
+        // a Done or id-less selection reads nothing and shows a note
+        app.sessions[1].status = Status::Done;
+        app.set_sessions(app.sessions.clone(), 1);
+        assert_eq!(*slot.lock().unwrap(), None);
+        assert_eq!(app.preview_body(), PreviewBody::Note(PREVIEW_DONE));
+        app.sessions[1].status = Status::Idle;
+        app.sessions[1].surface_id.clear();
+        app.set_sessions(app.sessions.clone(), 2);
+        assert_eq!(*slot.lock().unwrap(), None);
+        assert_eq!(app.preview_body(), PreviewBody::Note(NO_TARGET));
+        app.handle_key(key(KeyCode::Char('h')), &cmux, Instant::now());
+        assert_eq!(app.preview_body(), PreviewBody::Note(PREVIEW_LOADING), "nothing read yet");
+        // off again: the thread gets no target
+        app.handle_key(key(KeyCode::Char('P')), &cmux, Instant::now());
+        assert!(!app.preview);
+        assert_eq!(*slot.lock().unwrap(), None);
+        // p in the settings window does nothing special
+        app.handle_key(key(KeyCode::Char('i')), &cmux, Instant::now());
+        app.handle_key(key(KeyCode::Char('p')), &cmux, Instant::now());
+        assert!(!app.preview);
+        assert_eq!(app.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn preview_body_reads_the_cache() {
+        use crate::preview::PreviewEntry;
+        let mut app = app_with(2, 3);
+        app.preview = true;
+        let (cache, _) = app.preview_shared();
+        cache.put("s0", PreviewEntry { screen: Ok("hello".into()), fetched_at: Instant::now() });
+        assert_eq!(app.preview_body(), PreviewBody::Screen("hello".into()));
+        cache.put("s0", PreviewEntry { screen: Err(()), fetched_at: Instant::now() });
+        assert_eq!(app.preview_body(), PreviewBody::Note(PREVIEW_FAILED));
+        assert_eq!(App::new(Config::default()).preview_body(), PreviewBody::Note(PREVIEW_NO_SESSION));
     }
 
     #[test]

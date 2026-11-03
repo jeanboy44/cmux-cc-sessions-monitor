@@ -3,6 +3,7 @@
 pub mod grid;
 pub mod hud;
 pub mod mascot;
+pub mod preview;
 pub mod screen;
 pub mod settings;
 pub mod style;

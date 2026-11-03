@@ -6,6 +6,7 @@ mod focus;
 mod merge;
 mod model;
 mod pr;
+mod preview;
 mod refresh;
 mod source;
 mod status;
@@ -13,7 +14,7 @@ mod term;
 mod ui;
 mod worktree;
 
-const USAGE: &str = "cmux-cc-monitor — Claude Code sessions in cmux as tiles (hjkl move, Enter focus, i settings, q quit)";
+const USAGE: &str = "cmux-cc-monitor — Claude Code sessions in cmux as tiles (hjkl move, Enter focus, p preview, i settings, q quit)";
 
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
