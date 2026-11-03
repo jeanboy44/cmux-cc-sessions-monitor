@@ -1,54 +1,27 @@
-//! Grid layout math for the tile view: columns and per-tile rectangles.
+//! Grid layout math for the card view: columns and per-card rectangles.
 //! Rows, window groups and scrolling live in [`crate::ui::groups`]. Pure
 //! functions; no drawing.
 
 use ratatui::layout::Rect;
 
-use crate::config::ViewMode;
-use crate::ui::tile::{tile_size, ViewKind};
+use crate::ui::card::{CARD_H, CARD_W};
 
-/// `ViewMode::Auto` picks view A (compact) from this many sessions on, B below.
-pub const AUTO_VIEW_A_FROM: usize = 7;
-
-/// Concrete tile layout for the configured mode and current session count.
-pub fn resolve_view(cfg_view: ViewMode, session_count: usize) -> ViewKind {
-    match cfg_view {
-        ViewMode::A => ViewKind::A,
-        ViewMode::B => ViewKind::B,
-        ViewMode::Auto if session_count >= AUTO_VIEW_A_FROM => ViewKind::A,
-        ViewMode::Auto => ViewKind::B,
-    }
+/// Card columns that fit in `width` (each card at least [`CARD_W`] wide); never 0.
+pub fn card_cols(width: u16) -> usize {
+    (usize::from(width) / usize::from(CARD_W)).max(1)
 }
 
-/// Tile columns that fit in `width` (each tile at least its minimum width); never 0.
-pub fn compute_cols(width: u16, view: ViewKind) -> usize {
-    let (w, _) = tile_size(view);
-    (usize::from(width) / usize::from(w.max(1))).max(1)
-}
-
-/// Tile columns of the session list: [`compute_cols`], or exactly 1 while
-/// the preview turns the list into one column. The renderer stores the
-/// result in `App::cols`, which the navigation reads, so both always agree.
-pub fn grid_cols(width: u16, view: ViewKind, one_column: bool) -> usize {
-    if one_column {
-        1
-    } else {
-        compute_cols(width, view)
-    }
-}
-
-/// Rectangle of the tile at (`col`, `row` within the visible window) inside
-/// `area`. Leftover width is spread across columns; heights are the minimum
-/// tile height, cut at the bottom of `area`.
-pub fn cell_rect(area: Rect, cols: usize, col: usize, row: usize, view: ViewKind) -> Rect {
+/// Rectangle of the card at (`col`, `row` within the visible window) inside
+/// `area`. Leftover width is spread across columns; heights are [`CARD_H`],
+/// cut at the bottom of `area`.
+pub fn cell_rect(area: Rect, cols: usize, col: usize, row: usize) -> Rect {
     let cols = cols.max(1) as u32;
     let col = (col as u32).min(cols - 1);
     let width = u32::from(area.width);
     let x0 = (col * width / cols) as u16;
     let x1 = ((col + 1) * width / cols) as u16;
-    let (_, tile_h) = tile_size(view);
-    let y_off = (row as u64 * u64::from(tile_h)).min(u64::from(area.height)) as u16;
-    let height = tile_h.min(area.height - y_off);
+    let y_off = (row as u64 * u64::from(CARD_H)).min(u64::from(area.height)) as u16;
+    let height = CARD_H.min(area.height - y_off);
     Rect::new(area.x + x0, area.y + y_off, x1 - x0, height)
 }
 
@@ -57,59 +30,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_view_auto_thresholds() {
-        assert_eq!(resolve_view(ViewMode::Auto, 0), ViewKind::B);
-        assert_eq!(resolve_view(ViewMode::Auto, 6), ViewKind::B);
-        assert_eq!(resolve_view(ViewMode::Auto, 7), ViewKind::A);
-        assert_eq!(resolve_view(ViewMode::Auto, 30), ViewKind::A);
-        assert_eq!(resolve_view(ViewMode::A, 1), ViewKind::A);
-        assert_eq!(resolve_view(ViewMode::B, 30), ViewKind::B);
-    }
-
-    #[test]
-    fn compute_cols_never_zero() {
-        for view in [ViewKind::A, ViewKind::B] {
-            for w in [0u16, 1, 5, 23, 25] {
-                assert_eq!(compute_cols(w, view), 1, "{view:?} w={w}");
-            }
+    fn card_cols_scales_with_width() {
+        assert_eq!(card_cols(100), 2);
+        assert_eq!(card_cols(60), 1);
+        assert_eq!(card_cols(150), 3);
+        for w in [0u16, 1, 10, 49] {
+            assert_eq!(card_cols(w), 1, "never 0: w={w}");
         }
-        assert_eq!(compute_cols(77, ViewKind::A), 2);
-        assert_eq!(compute_cols(78, ViewKind::A), 3);
-        assert_eq!(compute_cols(103, ViewKind::A), 3);
-        assert_eq!(compute_cols(104, ViewKind::A), 4);
-        assert_eq!(compute_cols(48, ViewKind::B), 2);
-        assert_eq!(compute_cols(u16::MAX, ViewKind::B), u16::MAX as usize / 24);
-    }
-
-    #[test]
-    fn grid_cols_forced_to_one_for_the_preview_list() {
-        for view in [ViewKind::A, ViewKind::B] {
-            for w in [0u16, 30, 80, 200, u16::MAX] {
-                assert_eq!(grid_cols(w, view, true), 1, "{view:?} w={w}");
-                assert_eq!(grid_cols(w, view, false), compute_cols(w, view), "{view:?} w={w}");
-            }
-        }
-        assert_eq!(grid_cols(104, ViewKind::A, false), 4);
+        assert_eq!(card_cols(u16::MAX), u16::MAX as usize / CARD_W as usize);
     }
 
     #[test]
     fn cell_rect_spreads_leftover_width() {
-        let area = Rect::new(2, 1, 100, 40);
-        let cols = compute_cols(area.width, ViewKind::A); // 3
-        let rects: Vec<Rect> = (0..cols).map(|c| cell_rect(area, cols, c, 0, ViewKind::A)).collect();
-        assert_eq!(rects.iter().map(|r| r.width).sum::<u16>(), 100);
-        assert!(rects.iter().all(|r| r.width >= 26 && r.height == 6 && r.y == 1));
+        let area = Rect::new(2, 1, 160, 60);
+        let cols = card_cols(area.width); // 3
+        let rects: Vec<Rect> = (0..cols).map(|c| cell_rect(area, cols, c, 0)).collect();
+        assert_eq!(rects.iter().map(|r| r.width).sum::<u16>(), 160);
+        assert!(rects.iter().all(|r| r.width >= CARD_W && r.height == CARD_H && r.y == 1));
         assert_eq!(rects[0].x, 2);
-        assert_eq!(rects[2].x + rects[2].width, 102);
-        assert_eq!(cell_rect(area, cols, 1, 2, ViewKind::A).y, 1 + 12);
+        assert_eq!(rects[2].x + rects[2].width, 162);
+        assert_eq!(cell_rect(area, cols, 1, 2).y, 1 + 2 * CARD_H);
     }
 
     #[test]
     fn cell_rect_clips_to_area() {
         let area = Rect::new(0, 0, 10, 3);
-        let r = cell_rect(area, 1, 0, 0, ViewKind::B);
-        assert_eq!(r, Rect::new(0, 0, 10, 3));
-        let below = cell_rect(area, 1, 0, 5, ViewKind::B);
-        assert_eq!(below.height, 0);
+        assert_eq!(cell_rect(area, 1, 0, 0), Rect::new(0, 0, 10, 3));
+        assert_eq!(cell_rect(area, 1, 0, 5).height, 0);
+        assert_eq!(cell_rect(area, 0, 7, 0), Rect::new(0, 0, 10, 3), "cols 0 and a column past the end clamp");
     }
 }

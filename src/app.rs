@@ -1,6 +1,5 @@
 //! App state, key mapping, grid navigation, cmux focus and the event loop.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::io::Stdout;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,12 +20,9 @@ use crate::pr::{default_providers, spawn_poller, PrCache};
 use crate::preview::{spawn_preview, PreviewCache, PreviewSlot, PreviewTarget, PREVIEW_INTERVAL};
 use crate::refresh::{spawn_refresh, Snapshot};
 use crate::source::cmux::{Cmux, CmuxCli, SCREEN_LINES};
-use crate::ui::grid::resolve_view;
 use crate::ui::groups::{layout_groups, move_selection, sort_by_window, Row};
-use crate::ui::mascot::{done_oneshot_len, status_transition_fx, TileFx};
 use crate::ui::preview::{PreviewBody, PREVIEW_DONE, PREVIEW_FAILED, PREVIEW_LOADING, PREVIEW_NO_SESSION};
 use crate::ui::style::FPS;
-use crate::ui::tile::ViewKind;
 use crate::ui::screen;
 
 mod settings_ctl;
@@ -95,20 +91,11 @@ pub fn key_to_action(key: KeyEvent) -> Action {
     }
 }
 
-/// Last status change of a session, in animation ticks.
-#[derive(Debug, Clone, Copy)]
-struct Transition {
-    from: Status,
-    to: Status,
-    at: u64,
-}
-
 pub struct App {
     pub sessions: Vec<Session>,
     pub selected: usize,
     /// Columns of the last drawn grid (navigation uses it).
     pub cols: usize,
-    pub view: ViewKind,
     pub config: Config,
     pub mode: Mode,
     /// First visible grid row.
@@ -119,7 +106,6 @@ pub struct App {
     source_message: Option<String>,
     /// Footer message, when it was shown and for how long.
     flash: Option<(String, Instant, Duration)>,
-    transitions: HashMap<String, Transition>,
     /// A background focus call has not reported back yet.
     focus_pending: bool,
     /// Selected row of the settings window.
@@ -164,7 +150,6 @@ impl App {
             sessions: Vec::new(),
             selected: 0,
             cols: 1,
-            view: resolve_view(config.view, 0),
             config,
             mode: Mode::Tiles,
             scroll: 0,
@@ -172,7 +157,6 @@ impl App {
             loaded: false,
             source_message: None,
             flash: None,
-            transitions: HashMap::new(),
             focus_pending: false,
             settings_cursor: 0,
             pr_tools_note: None,
@@ -222,33 +206,22 @@ impl App {
         }
     }
 
-    pub fn apply_snapshot(&mut self, snap: Snapshot, tick: u64) {
+    pub fn apply_snapshot(&mut self, snap: Snapshot) {
         self.source_message = snap.message;
         self.pr_note = snap.pr_note;
         self.window_order = snap.window_order;
         self.current_window = snap.current_window;
         self.loaded = true;
-        self.set_sessions(snap.sessions, tick);
+        self.set_sessions(snap.sessions);
     }
 
     /// Replaces the list, keeping the selection on the same session id when it
-    /// still exists (else the clamped index) and recording status changes.
-    /// The list is put in window-group order (see [`crate::ui::groups`]).
-    pub fn set_sessions(&mut self, mut sessions: Vec<Session>, tick: u64) {
+    /// still exists (else the clamped index). The list is put in window-group
+    /// order (see [`crate::ui::groups`]).
+    pub fn set_sessions(&mut self, mut sessions: Vec<Session>) {
         sort_by_window(&mut sessions, &self.window_order);
         let selected_id = self.selected_session().map(|s| s.id.clone());
-        let mut transitions = HashMap::with_capacity(sessions.len());
-        for s in &sessions {
-            let t = match self.transitions.get(&s.id) {
-                Some(t) if t.to == s.status => *t,
-                Some(t) => Transition { from: t.to, to: s.status, at: tick },
-                None => Transition { from: s.status, to: s.status, at: tick },
-            };
-            transitions.insert(s.id.clone(), t);
-        }
-        self.transitions = transitions;
         self.sessions = sessions;
-        self.view = resolve_view(self.config.view, self.sessions.len());
         match selected_id.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
             Some(i) => self.selected = i,
             None => self.clamp_selection(),
@@ -428,30 +401,6 @@ impl App {
             Action::None => {}
         }
     }
-
-    /// Whether status-change tracking still holds state for session `id`.
-    #[cfg(test)]
-    pub(crate) fn has_transition(&self, id: &str) -> bool {
-        self.transitions.contains_key(id)
-    }
-
-    fn transition(&self, s: &Session, tick: u64) -> Option<(Transition, u64)> {
-        let t = self.transitions.get(&s.id).filter(|t| t.to == s.status)?;
-        Some((*t, tick.saturating_sub(t.at)))
-    }
-
-    /// Shake/flash for the tile of `s` at `tick`.
-    pub fn tile_fx(&self, s: &Session, tick: u64) -> TileFx {
-        self.transition(s, tick)
-            .map(|(t, since)| status_transition_fx(t.from, t.to, since))
-            .unwrap_or_default()
-    }
-
-    /// Ticks since `s` turned `Done` while the one-shot celebration is playing.
-    pub fn done_oneshot_tick(&self, s: &Session, tick: u64) -> Option<u64> {
-        let (t, since) = self.transition(s, tick)?;
-        (t.to == Status::Done && t.from != Status::Done && since < done_oneshot_len()).then_some(since)
-    }
 }
 
 /// The newest message waiting in `rx`, discarding older ones (non-blocking).
@@ -523,10 +472,9 @@ pub fn run(
         loop {
             let now = Instant::now();
             let tick = tick_at(start, now);
-            // Only the newest snapshot matters; transitions compare it with
-            // the previously applied one.
+            // Only the newest snapshot matters.
             if let Some(snap) = latest(&rx) {
-                app.apply_snapshot(snap, tick);
+                app.apply_snapshot(snap);
             }
             while let Some(result) = cmux.try_result() {
                 app.focus_done(result, Instant::now());
@@ -580,7 +528,7 @@ mod tests {
     fn app_with(n: usize, cols: usize) -> App {
         let mut app = App::new(Config::default());
         let sessions = (0..n).map(|i| fake_session(&format!("s{i}"), Status::Idle)).collect();
-        app.set_sessions(sessions, 0);
+        app.set_sessions(sessions);
         app.cols = cols;
         app
     }
@@ -708,9 +656,9 @@ mod tests {
     fn selected_clamped_when_sessions_shrink() {
         let mut app = app_with(5, 3);
         app.selected = 4;
-        app.set_sessions(ids(&["x", "y"]), 1);
+        app.set_sessions(ids(&["x", "y"]));
         assert_eq!(app.selected, 1);
-        app.set_sessions(Vec::new(), 2);
+        app.set_sessions(Vec::new());
         assert_eq!(app.selected, 0);
         app.apply_move(Dir::Right);
         assert_eq!(app.selected, 0);
@@ -719,11 +667,11 @@ mod tests {
     #[test]
     fn selection_follows_session_id_across_refresh() {
         let mut app = App::new(Config::default());
-        app.set_sessions(ids(&["a", "b", "c"]), 0);
+        app.set_sessions(ids(&["a", "b", "c"]));
         app.selected = 1;
-        app.set_sessions(ids(&["new", "a", "b", "c"]), 1);
+        app.set_sessions(ids(&["new", "a", "b", "c"]));
         assert_eq!(app.selected_session().unwrap().id, "b");
-        app.set_sessions(ids(&["new", "a", "c"]), 2);
+        app.set_sessions(ids(&["new", "a", "c"]));
         assert_eq!(app.selected, 2, "gone: falls back to the clamped index");
     }
 
@@ -773,12 +721,12 @@ mod tests {
         assert_eq!(slot.lock().unwrap().as_ref().map(|t| t.session_id.clone()), Some("s1".into()));
         // a Done or id-less selection reads nothing and shows a note
         app.sessions[1].status = Status::Done;
-        app.set_sessions(app.sessions.clone(), 1);
+        app.set_sessions(app.sessions.clone());
         assert_eq!(*slot.lock().unwrap(), None);
         assert_eq!(app.preview_body(), PreviewBody::Note(PREVIEW_DONE));
         app.sessions[1].status = Status::Idle;
         app.sessions[1].surface_id.clear();
-        app.set_sessions(app.sessions.clone(), 2);
+        app.set_sessions(app.sessions.clone());
         assert_eq!(*slot.lock().unwrap(), None);
         assert_eq!(app.preview_body(), PreviewBody::Note(NO_TARGET));
         app.handle_key(key(KeyCode::Char('h')), &cmux, Instant::now());
@@ -821,18 +769,18 @@ mod tests {
             window_order: vec!["W1".into(), "W2".into()],
             ..Default::default()
         };
-        app.apply_snapshot(snap(vec![in_window("a", "W1"), in_window("b", "W2"), in_window("c", "W1")]), 0);
+        app.apply_snapshot(snap(vec![in_window("a", "W1"), in_window("b", "W2"), in_window("c", "W1")]));
         assert_eq!(app.sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a", "c", "b"]);
         app.selected = 2; // b
         // b moves to window 1 and a new window appears
-        app.apply_snapshot(snap(vec![in_window("a", "W1"), in_window("b", "W1"), in_window("c", "W2")]), 1);
+        app.apply_snapshot(snap(vec![in_window("a", "W1"), in_window("b", "W1"), in_window("c", "W2")]));
         assert_eq!(app.sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
         assert_eq!(app.selected_session().unwrap().id, "b");
         // windows info gone (tree failed): one list, still on b
-        app.apply_snapshot(Snapshot { sessions: ids(&["a", "b", "c"]), ..Default::default() }, 2);
+        app.apply_snapshot(Snapshot { sessions: ids(&["a", "b", "c"]), ..Default::default() });
         assert_eq!(app.selected_session().unwrap().id, "b");
         // j/k cross the group boundary with one column
-        app.apply_snapshot(snap(vec![in_window("a", "W1"), in_window("b", "W2")]), 3);
+        app.apply_snapshot(snap(vec![in_window("a", "W1"), in_window("b", "W2")]));
         app.cols = 4;
         app.selected = 0;
         app.apply_move(Dir::Down);
@@ -977,7 +925,7 @@ mod tests {
     #[test]
     fn source_message_shown_after_flash_expires() {
         let mut app = App::new(Config::default());
-        app.apply_snapshot(Snapshot { message: Some("cmux unavailable".into()), ..Default::default() }, 0);
+        app.apply_snapshot(Snapshot { message: Some("cmux unavailable".into()), ..Default::default() });
         let t0 = Instant::now();
         assert_eq!(app.footer_message(t0), Some("cmux unavailable"));
         app.notify("boom", t0);
@@ -1004,50 +952,6 @@ mod tests {
         assert_eq!(app.mode, Mode::Tiles);
         app.handle_key(key(KeyCode::Char('q')), &cmux, now);
         assert!(app.should_quit);
-    }
-
-    #[test]
-    fn view_follows_session_count_in_auto() {
-        let mut app = app_with(6, 3);
-        assert_eq!(app.view, ViewKind::B);
-        app.set_sessions(ids(&["a", "b", "c", "d", "e", "f", "g"]), 0);
-        assert_eq!(app.view, ViewKind::A);
-    }
-
-    #[test]
-    fn transition_tracking_sets_fx_on_status_change() {
-        let mut app = App::new(Config::default());
-        app.set_sessions(vec![fake_session("a", Status::Idle)], 0);
-        let s = app.sessions[0].clone();
-        assert_eq!(app.tile_fx(&s, 0), TileFx::default(), "first sighting has no fx");
-
-        app.set_sessions(vec![fake_session("a", Status::NeedsInput)], 10);
-        let s = app.sessions[0].clone();
-        assert_eq!(app.tile_fx(&s, 10), status_transition_fx(Status::Idle, Status::NeedsInput, 0));
-        assert_ne!(app.tile_fx(&s, 10), TileFx::default());
-        assert_eq!(app.tile_fx(&s, 11), status_transition_fx(Status::Idle, Status::NeedsInput, 1));
-        assert_eq!(app.tile_fx(&s, 30), TileFx::default());
-
-        // unchanged status in a later refresh keeps the original change time
-        app.set_sessions(vec![fake_session("a", Status::NeedsInput)], 11);
-        assert_eq!(app.tile_fx(&s, 11), status_transition_fx(Status::Idle, Status::NeedsInput, 1));
-    }
-
-    #[test]
-    fn done_oneshot_plays_once_then_holds() {
-        let mut app = App::new(Config::default());
-        app.set_sessions(vec![fake_session("a", Status::Running)], 0);
-        app.set_sessions(vec![fake_session("a", Status::Done)], 5);
-        let s = app.sessions[0].clone();
-        let len = done_oneshot_len();
-        assert_eq!(app.done_oneshot_tick(&s, 5), Some(0));
-        assert_eq!(app.done_oneshot_tick(&s, 5 + len - 1), Some(len - 1));
-        assert_eq!(app.done_oneshot_tick(&s, 5 + len), None);
-        assert_eq!(app.done_oneshot_tick(&s, 5 + 10 * len), None);
-        // a session first seen as Done does not celebrate
-        let mut app = App::new(Config::default());
-        app.set_sessions(vec![fake_session("b", Status::Done)], 0);
-        assert_eq!(app.done_oneshot_tick(&app.sessions[0].clone(), 0), None);
     }
 
     #[test]

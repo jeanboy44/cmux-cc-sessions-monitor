@@ -12,7 +12,7 @@ use ratatui::layout::Rect;
 
 use crate::app::Dir;
 use crate::model::Session;
-use crate::ui::tile::truncate_to_width;
+use crate::ui::style::truncate_to_width;
 
 /// Label of the group of sessions whose window is unknown.
 pub const UNKNOWN_WINDOW_LABEL: &str = "창 ?";
@@ -114,7 +114,6 @@ pub fn move_selection(rows: &[Row], selected: usize, dir: Dir) -> usize {
         },
         Dir::Down => land(rows[r + 1..].iter().find(tiles)),
         Dir::Up => land(rows[..r].iter().rev().find(tiles)),
-        _ => selected,
     }
 }
 

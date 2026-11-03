@@ -11,7 +11,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::{App, Mode};
 use crate::ui::settings::{toggle, SettingsItem, ALL_ITEMS, PR_UNAVAILABLE};
-use crate::ui::grid::resolve_view;
 
 /// Starts and stops the PR poller. `launch` spawns a poller that exits once
 /// the flag it receives is set; stopping never joins.
@@ -115,7 +114,6 @@ impl App {
     pub(crate) fn apply_setting(&mut self, item: SettingsItem, now: Instant) {
         let pr_before = self.config.extras.pr;
         toggle(&mut self.config, item);
-        self.view = resolve_view(self.config.view, self.sessions.len());
         if let Some(shared) = &self.shared_config {
             *shared.lock().unwrap_or_else(|e| e.into_inner()) = self.config.clone();
         }
@@ -169,7 +167,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::{key_to_action, Action};
-    use crate::config::{Config, ViewMode};
+    use crate::config::Config;
+    use crate::fx::theme::Theme;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
 
@@ -211,7 +210,7 @@ mod tests {
         press(&mut app, KeyCode::Char(' '));
         assert!(app.config.guess_worktree);
         // tile navigation does not move tiles
-        app.set_sessions(vec![crate::app::fake_session("a", crate::model::Status::Idle), crate::app::fake_session("b", crate::model::Status::Idle)], 0);
+        app.set_sessions(vec![crate::app::fake_session("a", crate::model::Status::Idle), crate::app::fake_session("b", crate::model::Status::Idle)]);
         app.cols = 2;
         press(&mut app, KeyCode::Char('l'));
         assert_eq!(app.selected, 0);
@@ -235,10 +234,10 @@ mod tests {
     fn settings_changes_persist_to_file() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_in(&dir);
-        app.apply_setting(SettingsItem::View, Instant::now());
+        app.apply_setting(SettingsItem::Theme, Instant::now());
         app.apply_setting(SettingsItem::ExtraSummary, Instant::now());
         let loaded = Config::load(app.config_path.as_ref().unwrap());
-        assert_eq!(loaded.view, ViewMode::A);
+        assert_eq!(loaded.theme, Theme::Water);
         assert!(!loaded.extras.summary);
         assert_eq!(loaded, app.config);
         assert_eq!(app.footer_message(Instant::now()), None);
@@ -250,13 +249,17 @@ mod tests {
         let mut app = app_in(&dir);
         let path = app.config_path.clone().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "view = \"A\" # hand-edited\n").unwrap();
+        std::fs::write(&path, "theme = \"bogus\" # hand-edited\n").unwrap();
         let t0 = Instant::now();
-        app.report_config_load_error(crate::config::LOAD_FAILED.into(), t0);
+        // an unknown theme makes the load fail like any parse error
+        let (loaded, err) = Config::load_checked(&path);
+        assert_eq!(loaded, Config::default());
+        app.report_config_load_error(err.expect("load failure reported"), t0);
         assert_eq!(app.footer_message(t0), Some(crate::config::LOAD_FAILED));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = \"bogus\" # hand-edited\n", "untouched until a save");
         app.apply_setting(SettingsItem::ExtraSummary, t0);
         let bak = path.with_file_name("config.toml.bak");
-        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "view = \"A\" # hand-edited\n");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "theme = \"bogus\" # hand-edited\n");
         let msg = app.footer_message(t0).unwrap().to_string();
         assert!(msg.contains("config.toml.bak"), "{msg}");
         assert!(!msg.contains(dir.path().to_str().unwrap()), "no full paths: {msg}");
@@ -264,7 +267,7 @@ mod tests {
         // later saves do not back up again
         app.apply_setting(SettingsItem::ExtraSummary, t0);
         assert!(!path.with_file_name("config.toml.bak.1").exists());
-        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "view = \"A\" # hand-edited\n");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "theme = \"bogus\" # hand-edited\n");
     }
 
     #[test]
@@ -287,7 +290,7 @@ mod tests {
         let mut app = app_in(&dir);
         let path = app.config_path.clone().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "view = \"b\"\n").unwrap();
+        std::fs::write(&path, "theme = \"ice\"\n").unwrap();
         app.apply_setting(SettingsItem::ExtraSummary, Instant::now());
         assert!(!path.with_file_name("config.toml.bak").exists());
     }
@@ -327,16 +330,6 @@ mod tests {
         app.apply_setting(SettingsItem::ExtraBranch, Instant::now());
         assert!(!shared.lock().unwrap().extras.branch);
         assert_eq!(*shared.lock().unwrap(), app.config);
-    }
-
-    #[test]
-    fn view_change_applies_to_resolved_view() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = app_in(&dir);
-        app.apply_setting(SettingsItem::View, Instant::now()); // Auto -> A
-        assert_eq!(app.view, crate::ui::tile::ViewKind::A);
-        app.apply_setting(SettingsItem::View, Instant::now()); // A -> B
-        assert_eq!(app.view, crate::ui::tile::ViewKind::B);
     }
 
     #[test]

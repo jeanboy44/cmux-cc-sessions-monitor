@@ -1,12 +1,14 @@
-//! Shared game-style look: palette, thin rounded border, blinking cursor.
+//! Shared game-style look: palette, thin rounded border, blinking cursor,
+//! and small text helpers (durations, width-aware truncation).
 //!
-//! Tiles and the settings "game menu" window use the same border set, cursor
-//! glyph and blink rhythm so the whole UI reads as one game. The frame is a
-//! thin one-cell line so the mascot and text stay the focus.
+//! Cards and the settings "game menu" window use the same border set so the
+//! whole UI reads as one game. The frame is a thin one-cell line so the
+//! scene and text stay the focus.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::widgets::Block;
+use unicode_width::UnicodeWidthChar;
 
 use crate::model::Status;
 
@@ -22,7 +24,7 @@ pub const CURSOR_PERIOD: u64 = 12;
 /// Animation frame rate the tick counter is based on.
 pub const FPS: u64 = 12;
 
-/// Selection colour (selected tile border, `▶` cursor, settings window,
+/// Selection colour (selected card border, `▶` cursor, settings window,
 /// scroll hints): "cmux blue" `#4C8DFF`, the colour cmux itself gives agent
 /// status in its sidebar (`cmux list-status`: `claude_code=Running …
 /// color=#4C8DFF`), which is the default `app.accentColor: "cmux"` ("cmux
@@ -31,7 +33,6 @@ pub const FPS: u64 = 12;
 pub const SELECTED: Color = Color::Rgb(0x4C, 0x8D, 0xFF);
 /// Background of the HUD's ` ◆ SESSIONS n ` badge (the original game yellow).
 pub const HUD_BADGE: Color = Color::Rgb(255, 236, 64);
-pub const FLASH: Color = Color::Rgb(255, 255, 255);
 /// Warning red (PR conflicts, alert glyphs).
 pub const FLASH_ALERT: Color = Color::Rgb(255, 84, 60);
 pub const TEXT: Color = Color::Rgb(236, 230, 220);
@@ -46,7 +47,7 @@ pub const IDLE: Color = Color::Rgb(140, 116, 96);
 pub const DONE: Color = Color::Rgb(84, 200, 110);
 pub const UNKNOWN: Color = Color::Rgb(140, 140, 140);
 
-/// Main (body) color of a status; also the tile border color.
+/// Main (body) color of a status; also the card border color.
 pub fn status_color(status: Status) -> Color {
     match status {
         Status::Running => RUNNING,
@@ -57,7 +58,7 @@ pub fn status_color(status: Status) -> Color {
     }
 }
 
-/// Short status tag shown on tiles.
+/// Short status tag shown on cards.
 pub fn status_tag(status: Status) -> &'static str {
     match status {
         Status::Running => "RUN",
@@ -84,11 +85,9 @@ pub fn cursor_visible(tick: u64) -> bool {
     tick % CURSOR_PERIOD < CURSOR_PERIOD / 2
 }
 
-/// Thin-bordered window in `color`; `selected`/`flash` brighten it.
-pub fn window_block(color: Color, selected: bool, flash: bool) -> Block<'static> {
-    let style = if flash {
-        Style::new().fg(FLASH).add_modifier(Modifier::BOLD)
-    } else if selected {
+/// Thin-bordered window in `color`; `selected` turns it bold cmux blue.
+pub fn window_block(color: Color, selected: bool) -> Block<'static> {
+    let style = if selected {
         Style::new().fg(SELECTED).add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(color)
@@ -96,9 +95,75 @@ pub fn window_block(color: Color, selected: bool, flash: bool) -> Block<'static>
     Block::bordered().border_set(BORDER).border_style(style)
 }
 
+/// Compact duration: `45s`, `12m`, `3h`, `2d` (rounded down).
+pub fn fmt_duration(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+/// Cuts `s` to at most `max` display columns, ending in `…` when cut.
+/// Wide (CJK) chars are never split; control chars become spaces.
+pub fn truncate_to_width(s: &str, max: usize) -> String {
+    let clean: Vec<(char, usize)> = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| (c, c.width().unwrap_or(0)))
+        .collect();
+    if clean.iter().map(|(_, w)| w).sum::<usize>() <= max {
+        return clean.into_iter().map(|(c, _)| c).collect();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for (c, w) in clean {
+        if used + w > max - 1 {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_to_width_respects_display_width() {
+        assert_eq!(truncate_to_width("proj-a", 10), "proj-a");
+        assert_eq!(truncate_to_width("proj-a", 6), "proj-a");
+        assert_eq!(truncate_to_width("proj-a", 5), "proj…");
+        assert_eq!(truncate_to_width("proj-a", 1), "…");
+        assert_eq!(truncate_to_width("proj-a", 0), "");
+        assert_eq!(truncate_to_width("프로젝트", 8), "프로젝트");
+        assert_eq!(truncate_to_width("프로젝트", 7), "프로젝…");
+        assert_eq!(truncate_to_width("프로젝트", 6), "프로…"); // never splits a wide char
+        assert_eq!(truncate_to_width("프로젝트", 2), "…");
+        assert_eq!(truncate_to_width("a\nb\tc", 10), "a b c", "control chars become spaces");
+    }
+
+    #[test]
+    fn fmt_duration_seconds_minutes_hours_days() {
+        assert_eq!(fmt_duration(0), "0s");
+        assert_eq!(fmt_duration(45), "45s");
+        assert_eq!(fmt_duration(59), "59s");
+        assert_eq!(fmt_duration(60), "1m");
+        assert_eq!(fmt_duration(12 * 60 + 59), "12m");
+        assert_eq!(fmt_duration(3599), "59m");
+        assert_eq!(fmt_duration(3600), "1h");
+        assert_eq!(fmt_duration(3 * 3600 + 1800), "3h");
+        assert_eq!(fmt_duration(86_399), "23h");
+        assert_eq!(fmt_duration(2 * 86_400), "2d");
+        assert_eq!(fmt_duration(u64::MAX), format!("{}d", u64::MAX / 86_400));
+    }
 
     #[test]
     fn cursor_blinks_six_on_six_off() {

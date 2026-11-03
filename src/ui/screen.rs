@@ -1,4 +1,4 @@
-//! Whole-frame drawing: HUD on top, tile grid (or empty / loading message)
+//! Whole-frame drawing: HUD on top, card grid (or empty / loading message)
 //! in the middle, key help and messages in the footer.
 
 use std::time::Instant;
@@ -11,15 +11,14 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
-use crate::model::Status;
-use crate::ui::grid::{cell_rect, grid_cols};
+use crate::fx::static_scene;
+use crate::ui::card::{compact_mode, render_card, render_compact, CARD_H};
+use crate::ui::grid::{card_cols, cell_rect};
 use crate::ui::groups::{divider_text, place_rows, row_of, scroll_to_show_rows, Row};
 use crate::ui::hud::{render_hud, StatusCounts};
-use crate::ui::mascot::{sprite, sprite_oneshot_done, SpriteSize};
 use crate::ui::preview::{preview_layout, preview_read_lines, render_preview, PREVIEW_TOO_SMALL};
 use crate::ui::settings::render_settings;
 use crate::ui::style;
-use crate::ui::tile::{render_tile, render_tile_with_sprite, tile_size};
 
 pub const EMPTY_MESSAGE: &str = "cmux에서 실행 중인 Claude 세션이 없습니다";
 pub const LOADING_MESSAGE: &str = "세션을 불러오는 중…";
@@ -27,7 +26,7 @@ pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter 포커스 · p �
 
 /// Draws the full frame. Updates `app.cols`, `app.scroll`, `app.grid_rect`,
 /// `app.preview_too_small` and the preview's read line count from the layout.
-/// With the preview panel shown the session list is one column.
+/// With the preview panel shown the session list is one column of compact cards.
 pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     let [hud, middle, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
@@ -47,10 +46,10 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     let (above, below) = if app.sessions.is_empty() {
         app.cols = 1;
         app.scroll = 0;
-        draw_empty(f, grid, app.loaded, tick);
+        draw_empty(f, grid, app.loaded);
         (false, false)
     } else {
-        draw_grid(f, grid, app, tick, layout.one_column)
+        draw_grid(f, grid, app, layout.one_column)
     };
     draw_footer(f, footer, app, above, below, now);
 
@@ -59,28 +58,28 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     }
 }
 
-/// Tile grid (grouped by cmux window, see [`crate::ui::groups`]) with
+/// Card grid (grouped by cmux window, see [`crate::ui::groups`]) with
 /// vertical scrolling in layout rows; returns (more above, more below).
-/// Areas smaller than one tile fall back to one name-only row per session.
-/// `one_column` (preview shown) forces a single column, see [`grid_cols`].
-fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, tick: u64, one_column: bool) -> (bool, bool) {
+/// In compact mode (preview shown, or the area cannot hold one full card,
+/// see [`compact_mode`]) every session is one line in a single column.
+fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool) -> (bool, bool) {
     if area.is_empty() {
         return (false, false);
     }
-    let view = app.view;
-    let (tile_w, tile_h) = tile_size(view);
-    let compact = area.width < tile_w || area.height < tile_h;
-    let cols = if compact { 1 } else { grid_cols(area.width, view, one_column) };
+    let compact = compact_mode(one_column, area);
+    let cols = if compact { 1 } else { card_cols(area.width) };
     app.cols = cols;
     app.clamp_selection();
     let rows = app.grid_rows();
-    let tile_row_h = if compact { 1 } else { tile_h };
+    let card_row_h = if compact { 1 } else { CARD_H };
     let heights: Vec<u16> =
-        rows.iter().map(|r| if matches!(r, Row::Divider { .. }) { 1 } else { tile_row_h }).collect();
+        rows.iter().map(|r| if matches!(r, Row::Divider { .. }) { 1 } else { card_row_h }).collect();
     let sel_row = row_of(&rows, app.selected).unwrap_or(0);
     app.scroll = scroll_to_show_rows(&rows, &heights, app.scroll, sel_row, area.height);
     let placed = place_rows(&heights, app.scroll, area);
     let dim = Style::new().fg(style::TEXT_DIM);
+    // Static for now: every card shows the same standing scene.
+    let scene = (!compact).then(static_scene);
 
     for (ri, row_rect) in &placed {
         let (start, end) = match &rows[*ri] {
@@ -93,19 +92,11 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, tick: u64, one_column: bo
         };
         for (col, idx) in (start..end).enumerate() {
             let Some(s) = app.sessions.get(idx) else { break };
-            let rect = if compact {
-                Rect { height: 1, ..*row_rect }
-            } else {
-                cell_rect(*row_rect, cols, col, 0, view)
-            };
             let selected = idx == app.selected;
-            let fx = app.tile_fx(s, tick);
-            match app.done_oneshot_tick(s, tick) {
-                Some(t) => {
-                    let frame = sprite_oneshot_done(view.sprite_size(), t);
-                    render_tile_with_sprite(f, rect, s, &app.config, selected, tick, fx, view, frame);
-                }
-                None => render_tile(f, rect, s, &app.config, selected, tick, fx, view),
+            if compact {
+                render_compact(f, Rect { height: 1, ..*row_rect }, s, &app.config, selected);
+            } else {
+                render_card(f, cell_rect(*row_rect, cols, col, 0), s, &app.config, selected, scene.as_ref());
             }
         }
     }
@@ -113,20 +104,12 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, tick: u64, one_column: bo
     (app.scroll > 0, below)
 }
 
-fn draw_empty(f: &mut Frame, area: Rect, loaded: bool, tick: u64) {
+fn draw_empty(f: &mut Frame, area: Rect, loaded: bool) {
     if area.is_empty() {
         return;
     }
     let text = if loaded { EMPTY_MESSAGE } else { LOADING_MESSAGE };
-    let (sw, sh) = SpriteSize::Large.cells();
-    let show_sprite = loaded && area.width >= sw && area.height >= sh + 2;
-    let block_h = if show_sprite { sh + 2 } else { 1 };
-    let top = area.y + area.height.saturating_sub(block_h) / 2;
-    if show_sprite {
-        let sprite_area = Rect::new(area.x + (area.width - sw) / 2, top, sw, sh);
-        f.render_widget(Paragraph::new(sprite(Status::Idle, SpriteSize::Large, tick)), sprite_area);
-    }
-    let line_area = Rect::new(area.x, top + block_h - 1, area.width, 1);
+    let line_area = Rect::new(area.x, area.y + area.height / 2, area.width, 1);
     let para = Paragraph::new(Line::styled(text, Style::new().fg(style::TEXT).add_modifier(Modifier::BOLD)))
         .alignment(Alignment::Center);
     f.render_widget(para, line_area);
@@ -173,7 +156,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, above: bool, below: bool, n
 mod tests {
     use super::*;
     use crate::app::{fake_session, Dir};
-    use crate::config::{Config, ViewMode};
+    use crate::config::Config;
+    use crate::model::Status;
     use crate::refresh::Snapshot;
     use crate::ui::style;
     use crate::ui::test_util::{draw as draw_buf, rows};
@@ -187,71 +171,72 @@ mod tests {
         (0..10).map(|i| fake_session(&format!("t{i}"), statuses[i % 5])).collect()
     }
 
+    fn has_braille(text: &str) -> bool {
+        text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
+    }
+
     #[test]
     fn draw_with_zero_sessions_shows_message() {
         let mut app = App::new(Config::default());
         let screen = render(&mut app, 80, 24, 0).join("\n");
         assert!(screen.contains(LOADING_MESSAGE));
-        app.apply_snapshot(Snapshot::default(), 0);
+        app.apply_snapshot(Snapshot::default());
         let screen = render(&mut app, 80, 24, 0).join("\n");
         assert!(screen.contains(EMPTY_MESSAGE), "{screen}");
         assert!(screen.contains("SESSIONS 0"));
         assert!(screen.contains("q 종료"));
-        // the idle mascot is drawn above the message (Braille dots)
-        assert!(screen.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "{screen}");
+        assert!(!has_braille(&screen), "text only: {screen}");
     }
 
     #[test]
     fn draw_small_terminal_does_not_panic() {
-        for view in [ViewMode::A, ViewMode::B, ViewMode::Auto] {
-            let mut cfg = Config::default();
-            cfg.view = view;
-            let mut app = App::new(cfg);
-            app.set_sessions(ten_sessions(), 0);
-            app.selected = 9;
-            for (w, h) in [(0, 0), (1, 1), (5, 2), (10, 3), (20, 6), (29, 7), (40, 11), (200, 3)] {
-                let screen = render(&mut app, w, h, 3);
-                assert_eq!(screen.len(), h as usize);
-            }
-            // name-only rows on a terminal smaller than one tile, selection visible
-            let screen = render(&mut app, 20, 6, 0).join("\n");
-            assert!(screen.contains("proj-t9"), "{screen}");
-        }
         let mut app = App::new(Config::default());
-        app.apply_snapshot(Snapshot::default(), 0);
+        app.set_sessions(ten_sessions());
+        app.selected = 9;
+        for (w, h) in [(0, 0), (1, 1), (5, 2), (10, 3), (20, 6), (29, 7), (40, 11), (49, 18), (50, 17), (200, 3)] {
+            let screen = render(&mut app, w, h, 3);
+            assert_eq!(screen.len(), h as usize);
+        }
+        // compact one-line cards on a terminal smaller than one card, selection visible
+        let screen = render(&mut app, 20, 6, 0).join("\n");
+        assert!(screen.contains("proj-t9"), "{screen}");
+        assert!(!screen.contains('╭'), "{screen}");
+        let mut app = App::new(Config::default());
+        app.apply_snapshot(Snapshot::default());
         for (w, h) in [(0, 0), (1, 1), (3, 3), (10, 8)] {
             render(&mut app, w, h, 0);
         }
     }
 
     #[test]
-    fn draw_smoke_both_views() {
-        for view in [ViewMode::A, ViewMode::B] {
-            let mut cfg = Config::default();
-            cfg.view = view;
-            let mut app = App::new(cfg);
-            app.apply_snapshot(Snapshot { sessions: ten_sessions(), ..Default::default() }, 0);
-            let screen = render(&mut app, 120, 40, 0);
-            let text = screen.join("\n");
-            assert!(screen[0].contains("SESSIONS 10"), "{}", screen[0]);
-            assert!(screen[0].contains("RUN 2") && screen[0].contains("INPUT 2") && screen[0].contains("DONE 2"));
-            assert!(text.contains("proj-t0"), "{text}");
-            assert!(screen.last().unwrap().contains("Enter 포커스"));
-            assert!(app.cols >= 2, "{view:?} cols={}", app.cols);
-        }
+    fn draw_smoke_cards_with_scenes() {
+        let mut app = App::new(Config::default());
+        app.apply_snapshot(Snapshot { sessions: ten_sessions(), ..Default::default() });
+        let buf = draw_buf(120, 40, |f| draw(f, &mut app, 0, Instant::now()));
+        let screen = rows(&buf);
+        let text = screen.join("\n");
+        assert!(screen[0].contains("SESSIONS 10"), "{}", screen[0]);
+        assert!(screen[0].contains("RUN 2") && screen[0].contains("INPUT 2") && screen[0].contains("DONE 2"));
+        assert!(text.contains("proj-t0") && text.contains("proj-t1"), "{text}");
+        assert!(has_braille(&text), "scenes drawn: {text}");
+        assert!(screen.last().unwrap().contains("Enter 포커스"));
+        assert_eq!(app.cols, 2);
+        // the selected (first) card has the blue border, the second does not
+        assert_eq!(buf[(0, 1)].fg, style::SELECTED);
+        assert_eq!(buf[(60, 1)].symbol(), "╭");
+        assert_ne!(buf[(60, 1)].fg, style::SELECTED);
     }
 
     #[test]
     fn draw_scrolls_to_selected_and_hints_more() {
-        let mut cfg = Config::default();
-        cfg.view = ViewMode::B;
-        let mut app = App::new(cfg);
-        app.set_sessions(ten_sessions(), 0);
-        // 48x26 -> 2 cols, 2 visible rows of 5
-        let screen = render(&mut app, 48, 26, 0);
+        let mut app = App::new(Config::default());
+        app.set_sessions(ten_sessions());
+        // 100x34 -> 2 cols, 2 visible card rows of 5
+        let screen = render(&mut app, 100, 34, 0);
+        assert_eq!(app.cols, 2);
         assert!(screen.last().unwrap().contains("▼ more"));
         app.selected = 9;
-        let screen = render(&mut app, 48, 26, 0);
+        let screen = render(&mut app, 100, 34, 0);
         assert_eq!(app.scroll, 3);
         assert!(screen.join("\n").contains("proj-t9"));
         assert!(screen.last().unwrap().contains("▲ more"));
@@ -261,16 +246,16 @@ mod tests {
     #[test]
     fn settings_mode_draws_window() {
         let mut app = App::new(Config::default());
-        app.set_sessions(ten_sessions(), 0);
+        app.set_sessions(ten_sessions());
         app.mode = Mode::Settings;
         let screen = render(&mut app, 80, 24, 0).join("\n");
-        assert!(screen.contains("SETTINGS") && screen.contains("Esc 닫기"), "{screen}");
+        assert!(screen.contains("SETTINGS") && screen.contains("Esc 닫기") && screen.contains("기본 테마"), "{screen}");
     }
 
     #[test]
     fn footer_message_survives_narrow_terminal() {
         let mut app = App::new(Config::default());
-        app.set_sessions(ten_sessions(), 0);
+        app.set_sessions(ten_sessions());
         app.selected = 9;
         app.notify("no such surface", Instant::now());
         let screen = render(&mut app, 60, 30, 0);
@@ -282,7 +267,7 @@ mod tests {
     fn footer_shows_pr_note_dim_and_drops_it_first_when_narrow() {
         let mut app = App::new(Config::default());
         let snap = Snapshot { sessions: ten_sessions(), pr_note: Some("PR: az 로그인 필요".into()), ..Default::default() };
-        app.apply_snapshot(snap, 0);
+        app.apply_snapshot(snap);
         let buf = draw_buf(120, 30, |f| draw(f, &mut app, 0, Instant::now()));
         let footer = rows(&buf).last().unwrap().clone();
         assert!(footer.contains("PR: az 로그인 필요") && footer.contains("q 종료"), "{footer}");
@@ -301,28 +286,25 @@ mod tests {
     fn closed_tab_session_leaves_hud_and_selection_stays_valid() {
         let mut app = App::new(Config::default());
         let three: Vec<_> = ["a", "b", "c"].iter().map(|id| fake_session(id, Status::Running)).collect();
-        app.apply_snapshot(Snapshot { sessions: three.clone(), ..Default::default() }, 0);
+        app.apply_snapshot(Snapshot { sessions: three.clone(), ..Default::default() });
         app.selected = 2;
-        assert!(render(&mut app, 120, 30, 0)[0].contains("SESSIONS 3"));
-        // the refresh dropped "c" (its tab was closed): no Done tile, count drops at once
-        app.apply_snapshot(Snapshot { sessions: three[..2].to_vec(), ..Default::default() }, 5);
-        let screen = render(&mut app, 120, 30, 5);
+        assert!(render(&mut app, 120, 40, 0)[0].contains("SESSIONS 3"));
+        // the refresh dropped "c" (its tab was closed): no Done card, count drops at once
+        app.apply_snapshot(Snapshot { sessions: three[..2].to_vec(), ..Default::default() });
+        let screen = render(&mut app, 120, 40, 5);
         assert!(screen[0].contains("SESSIONS 2") && screen[0].contains("DONE 0"), "{}", screen[0]);
         assert!(!screen.join("\n").contains("proj-c"));
-        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("b"), "clamped to a valid tile");
-        assert!(!app.has_transition("c"), "no stale fx state for the closed session");
-        // the selected tile itself closes: the selection clamps to a tile that exists
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("b"), "clamped to a valid card");
+        // the selected card itself closes: the selection clamps to a card that exists
         app.selected = 0;
-        app.apply_snapshot(Snapshot { sessions: three[1..2].to_vec(), ..Default::default() }, 6);
+        app.apply_snapshot(Snapshot { sessions: three[1..2].to_vec(), ..Default::default() });
         assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("b"));
     }
 
     fn preview_app(n: usize) -> App {
-        let mut cfg = Config::default();
-        cfg.view = ViewMode::A;
-        let mut app = App::new(cfg);
+        let mut app = App::new(Config::default());
         let sessions = (0..n).map(|i| fake_session(&format!("t{i}"), Status::Running)).collect();
-        app.apply_snapshot(Snapshot { sessions, ..Default::default() }, 0);
+        app.apply_snapshot(Snapshot { sessions, ..Default::default() });
         app.preview = true;
         let (cache, _) = app.preview_shared();
         cache.put(
@@ -338,33 +320,45 @@ mod tests {
     }
 
     #[test]
+    fn preview_mode_uses_compact_one_line_cards() {
+        let mut app = preview_app(6);
+        // tall and wide: a full card would fit the height, the preview still lists compact cards
+        let screen = render(&mut app, 200, 60, 0);
+        let list_w = app.grid_rect.width as usize;
+        let list = list_part(&screen, list_w, 1..59);
+        for (i, row) in list.iter().take(6).enumerate() {
+            assert!(row.contains(&format!("proj-t{i}")) && row.contains("RUN"), "row {i}: {row}");
+        }
+        assert!(list[0].starts_with('▶'), "selected marker: {}", list[0]);
+        let text = list.join("\n");
+        assert!(!text.contains('╭'), "no card frames: {text}");
+        assert!(!has_braille(&text), "no scenes: {text}");
+        assert!(crate::ui::card::compact_mode(true, Rect::new(0, 0, 500, 500)));
+    }
+
+    #[test]
     fn preview_turns_the_list_into_one_column_left_with_preview_right() {
         let mut app = preview_app(6);
         let screen = render(&mut app, 150, 30, 0);
         // middle 150x28: list clamp(150/5, 26, 34) = 30 wide, preview the rest
         assert_eq!(app.grid_rect, Rect::new(0, 1, 30, 28));
-        assert_eq!(app.cols, 1, "one tile per row");
+        assert_eq!(app.cols, 1, "one card per row");
         let list = list_part(&screen, 30, 1..29);
-        for row in &list {
-            assert!(row.matches("proj-t").count() <= 1, "one tile per row: {row}");
-        }
-        let text = list.join("\n");
-        for i in 0..4 {
-            assert!(text.contains(&format!("proj-t{i}")), "{text}");
+        for (i, row) in list.iter().take(6).enumerate() {
+            assert_eq!(row.matches("proj-t").count(), 1, "one card per row: {row}");
+            assert!(row.contains(&format!("proj-t{i}")), "{row}");
         }
         assert!(screen[1].chars().nth(30) == Some('╭') && screen[1].contains("미리보기 · proj-t0"), "{}", screen[1]);
         assert!(screen[28].chars().nth(30) == Some('╰') && screen[28].ends_with('╯'), "{}", screen[28]);
         let right: String = screen[2..28].iter().map(|r| r.chars().skip(31).collect::<String>()).collect::<Vec<_>>().join("\n");
         assert!(right.contains("first") && right.contains("❯ last prompt line"), "{right}");
-        assert!(screen.last().unwrap().contains("▼ more"), "6 tiles do not fit 28 rows");
+        assert!(!screen.last().unwrap().contains("more"), "6 one-line cards fit 28 rows");
         assert!(!app.preview_too_small);
         // the read asks for the panel's inner height
         assert_eq!(app.preview_target().map(|t| t.lines), Some(26));
-        // the selection at the bottom is scrolled into view
         app.selected = 5;
         let screen = render(&mut app, 150, 30, 0);
-        assert!(list_part(&screen, 30, 1..29).join("\n").contains("proj-t5"));
-        assert!(screen.last().unwrap().contains("▲ more"));
+        assert!(list_part(&screen, 30, 1..29)[5].starts_with("▶ proj-t5"));
         assert!(screen[1].contains("미리보기 · proj-t5"), "{}", screen[1]);
     }
 
@@ -375,14 +369,13 @@ mod tests {
         let screen = render(&mut app, 60, 32, 0);
         // middle 60x30: list clamp(30*2/5, 8, 14) = 12 rows, preview 18 below
         assert_eq!(app.grid_rect, Rect::new(0, 1, 60, 12));
-        assert_eq!(app.cols, 1, "still one column though 60 fits two tiles");
+        assert_eq!(app.cols, 1, "one column though 60 fits a card");
         assert!(screen[13].starts_with('╭') && screen[13].contains("미리보기 · proj-t9"), "{}", screen[13]);
         assert!(screen[30].starts_with('╰'), "{}", screen[30]);
         assert!(screen.join("\n").contains(crate::ui::preview::PREVIEW_LOADING), "t9 not read yet");
-        let list = screen[1..13].join("\n");
-        assert!(list.contains("proj-t9") && list.contains("proj-t8") && !list.contains("proj-t7"), "{list}");
-        for row in &screen[1..13] {
-            assert!(row.matches("proj-t").count() <= 1, "{row}");
+        for (i, row) in screen[1..11].iter().enumerate() {
+            assert_eq!(row.matches("proj-t").count(), 1, "{row}");
+            assert!(row.contains(&format!("proj-t{i}")), "{row}");
         }
         assert_eq!(app.preview_target().map(|t| t.lines), Some(16));
     }
@@ -410,7 +403,7 @@ mod tests {
         for _ in 0..2 {
             let screen = render(&mut app, 150, 30, 0);
             assert_eq!(app.grid_rect, Rect::new(0, 1, 150, 28));
-            assert_eq!(app.cols, crate::ui::grid::compute_cols(150, app.view), "normal grid");
+            assert_eq!(app.cols, crate::ui::grid::card_cols(150), "normal grid");
             assert!(screen.join("\n").contains("proj-t10"));
             app.toggle_preview();
             assert!(app.preview);
@@ -419,7 +412,7 @@ mod tests {
             assert_eq!(app.grid_rect.width, 30);
             assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("t10"), "selection kept by id");
             assert!(list_part(&screen, 30, 1..29).join("\n").contains("proj-t10"), "still visible");
-            // j/k move one tile, h/l stay
+            // j/k move one card, h/l wrap to the neighbouring row and back
             app.apply_move(Dir::Down);
             assert_eq!(app.selected, 11);
             app.apply_move(Dir::Up);
@@ -434,12 +427,14 @@ mod tests {
 
     #[test]
     fn preview_too_small_shows_footer_note_and_the_normal_grid() {
-        for (w, h, cols) in [(110, 9, 4), (60, 25, 2), (69, 25, 2)] {
+        // (w, h, full cards fit)
+        for (w, h, cards) in [(110, 9, false), (60, 25, true), (69, 25, true)] {
             let mut app = preview_app(4);
             let screen = render(&mut app, w, h, 0);
             assert!(app.preview_too_small, "{w}x{h}");
             assert_eq!(app.grid_rect, Rect::new(0, 1, w, h - 2));
-            assert_eq!(app.cols, cols, "{w}x{h}: grid back to normal");
+            assert_eq!(app.cols, 1, "{w}x{h}");
+            assert_eq!(screen[1].starts_with('╭'), cards, "{w}x{h}: normal grid, not the preview list");
             assert!(screen.last().unwrap().contains(PREVIEW_TOO_SMALL), "{}", screen.last().unwrap());
             assert!(!screen[..h as usize - 1].join("\n").contains("미리보기 · "), "no panel");
         }
@@ -469,27 +464,27 @@ mod tests {
     }
 
     #[test]
-    fn two_windows_draw_divider_lines_and_grouped_tiles() {
-        let mut cfg = Config::default();
-        cfg.view = ViewMode::A;
-        let mut app = App::new(cfg);
+    fn two_windows_draw_divider_lines_and_grouped_cards() {
+        let mut app = App::new(Config::default());
         let snap = Snapshot {
             sessions: vec![windowed("x", "W2"), windowed("y", "W1"), windowed("z", "W2")],
             window_order: vec!["W1".into(), "W2".into()],
             current_window: Some("W2".into()),
             ..Default::default()
         };
-        app.apply_snapshot(snap, 0);
-        let screen = render(&mut app, 80, 24, 0);
+        app.apply_snapshot(snap);
+        let screen = render(&mut app, 120, 40, 0);
         assert!(screen[0].contains("SESSIONS 3"), "HUD counts stay global");
-        let w = 80;
+        let w = 120;
+        let name_row = 1 + 1 + crate::ui::card::SCENE_ROWS as usize; // divider, border, scene
         assert_eq!(screen[1], crate::ui::groups::divider_text("창 1", 1, w));
         assert!(screen[1].starts_with("── 창 1 · 세션 1 ─") && !screen[1].contains('╭'), "{}", screen[1]);
-        assert!(screen[3].contains("proj-y"), "{}", screen.join("\n"));
-        assert_eq!(screen[8], crate::ui::groups::divider_text("창 2 (현재)", 2, w));
-        assert!(screen[10].contains("proj-x") && screen[10].contains("proj-z"), "{}", screen.join("\n"));
+        assert!(screen[1 + name_row].contains("proj-y"), "{}", screen.join("\n"));
+        let d2 = 2 + CARD_H as usize;
+        assert_eq!(screen[d2], crate::ui::groups::divider_text("창 2 (현재)", 2, w));
+        assert!(screen[d2 + name_row].contains("proj-x") && screen[d2 + name_row].contains("proj-z"), "{}", screen.join("\n"));
         // dim, plain line
-        let buf = draw_buf(80, 24, |f| draw(f, &mut app, 0, Instant::now()));
+        let buf = draw_buf(120, 40, |f| draw(f, &mut app, 0, Instant::now()));
         assert_eq!(buf[(0, 1)].fg, style::TEXT_DIM);
         // one window only: no divider at all
         let one = Snapshot {
@@ -497,60 +492,56 @@ mod tests {
             window_order: vec!["W1".into(), "W2".into()],
             ..Default::default()
         };
-        app.apply_snapshot(one, 1);
-        let text = render(&mut app, 80, 24, 0).join("\n");
+        app.apply_snapshot(one);
+        let text = render(&mut app, 120, 40, 0).join("\n");
         assert!(!text.contains("창 "), "{text}");
     }
 
     #[test]
     fn one_column_list_scrolls_to_selected_with_group_dividers() {
-        let mut cfg = Config::default();
-        cfg.view = ViewMode::A;
-        let mut app = App::new(cfg);
-        let mut sessions: Vec<_> = (0..4).map(|i| windowed(&format!("a{i}"), "W1")).collect();
-        sessions.extend((0..4).map(|i| windowed(&format!("b{i}"), "W2")));
-        app.apply_snapshot(Snapshot { sessions, window_order: vec!["W1".into(), "W2".into()], ..Default::default() }, 0);
+        let mut app = App::new(Config::default());
+        let mut sessions: Vec<_> = (0..12).map(|i| windowed(&format!("a{i}"), "W1")).collect();
+        sessions.extend((0..12).map(|i| windowed(&format!("b{i}"), "W2")));
+        app.apply_snapshot(Snapshot { sessions, window_order: vec!["W1".into(), "W2".into()], ..Default::default() });
         app.preview = true;
-        // 150x16: middle 150x14 -> list 30x14, one column: D T T T T D T T T T
-        app.selected = 7;
+        // 150x16: middle 150x14 -> list 30x14, one line per card: D + 12 + D + 12 = 26 rows
+        app.selected = 23;
         let screen = render(&mut app, 150, 16, 0);
         assert_eq!((app.grid_rect.width, app.cols), (30, 1));
         let list = list_part(&screen, 30, 1..15).join("\n");
-        assert!(list.contains("proj-b3") && list.contains("proj-b2"), "{list}");
+        assert!(list.contains("proj-b11") && list.contains("proj-b10"), "{list}");
         assert!(screen.last().unwrap().contains("▲ more"));
-        // first tile of group 2: its divider is shown right above it
-        app.selected = 4;
+        // first card of group 2: its divider is shown right above it
+        app.selected = 12;
         let screen = render(&mut app, 150, 16, 0);
         let list = list_part(&screen, 30, 1..15);
-        let d = list.iter().position(|r| r.starts_with("── 창 2 · 세션 4")).expect("divider of group 2");
-        assert!(list[d + 2].contains("proj-b0"), "{list:?}");
-        // j walks every tile in order, across the divider
+        let d = list.iter().position(|r| r.starts_with("── 창 2 · 세션 12")).expect("divider of group 2");
+        assert!(list[d + 1].contains("proj-b0"), "{list:?}");
+        // j walks every card in order, across the divider
         app.selected = 0;
         let mut seen = vec![0];
-        for _ in 0..9 {
+        for _ in 0..25 {
             app.apply_move(Dir::Down);
             render(&mut app, 150, 16, 0);
             seen.push(app.selected);
         }
-        assert_eq!(seen, vec![0, 1, 2, 3, 4, 5, 6, 7, 7, 7]);
-        for sel in (0..8).rev() {
+        let want: Vec<usize> = (0..24).chain([23, 23]).collect();
+        assert_eq!(seen, want);
+        for sel in (0..24).rev() {
             app.selected = sel;
             let screen = render(&mut app, 150, 16, 0);
             let id = &app.sessions[sel].id;
-            assert!(list_part(&screen, 30, 1..15).join("\n").contains(&format!("proj-{id}")), "sel={sel}");
+            let row = list_part(&screen, 30, 1..15).into_iter().find(|r| r.starts_with('▶')).expect("selected row");
+            assert!(row.contains(&format!("proj-{id}")), "sel={sel}: {row}");
         }
         assert_eq!(app.scroll, 0);
-        assert!(screen_starts_with_divider(&render(&mut app, 150, 16, 0)));
-    }
-
-    fn screen_starts_with_divider(screen: &[String]) -> bool {
-        screen[1].starts_with("── 창 1 · 세션 4")
+        assert!(render(&mut app, 150, 16, 0)[1].starts_with("── 창 1 · 세션 12"));
     }
 
     #[test]
     fn footer_shows_flash_message() {
         let mut app = App::new(Config::default());
-        app.set_sessions(ten_sessions(), 0);
+        app.set_sessions(ten_sessions());
         app.notify("이동할 수 없는 세션", Instant::now());
         let screen = render(&mut app, 120, 30, 0);
         assert!(screen.last().unwrap().contains("이동할 수 없는 세션"));

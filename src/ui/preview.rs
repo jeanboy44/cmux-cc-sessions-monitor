@@ -1,8 +1,8 @@
 //! Preview panel: where it goes (picked from the space between HUD and
 //! footer) and how it is drawn. Plain chrome: the tiles' thin rounded border
-//! and a dim title, no mascot.
+//! and a dim title, no scene.
 //!
-//! While the preview is on, the session list turns into ONE column of tiles
+//! While the preview is on, the session list turns into ONE column of compact cards
 //! and the panel takes the rest (master/detail). Placement rule
 //! ([`preview_layout`], sizes of the area between HUD and footer):
 //! - width ≥ [`SIDE_MIN_WIDTH`] and height ≥ [`SIDE_MIN_HEIGHT`]: list on the
@@ -20,7 +20,7 @@ use ratatui::Frame;
 
 use crate::preview::preview_lines;
 use crate::ui::style;
-use crate::ui::tile::truncate_to_width;
+use crate::ui::style::truncate_to_width;
 
 /// From this width (and [`SIDE_MIN_HEIGHT`]) on, list left / preview right.
 pub const SIDE_MIN_WIDTH: u16 = 70;

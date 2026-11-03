@@ -1,14 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ViewMode {
-    A,
-    B,
-    Auto,
-}
+use crate::fx::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -23,11 +18,15 @@ pub struct Extras {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub view: ViewMode,
+    /// Default card theme. Files written before themes existed may still hold
+    /// a `view` key; unknown keys are ignored, so they load fine.
+    pub theme: Theme,
     pub extras: Extras,
     pub pr_poll_seconds: u64,
     pub guess_worktree: bool,
     pub done_retention_minutes: u64,
+    /// Per-card theme overrides, keyed by the session's cwd (its id when the cwd is empty).
+    pub card_themes: BTreeMap<String, Theme>,
 }
 
 impl Default for Extras {
@@ -45,11 +44,12 @@ impl Default for Extras {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            view: ViewMode::Auto,
+            theme: Theme::default(),
             extras: Extras::default(),
             pr_poll_seconds: 45,
             guess_worktree: true,
             done_retention_minutes: 10,
+            card_themes: BTreeMap::new(),
         }
     }
 }
@@ -141,7 +141,8 @@ mod tests {
     #[test]
     fn config_defaults_match_spec() {
         let c = Config::default();
-        assert_eq!(c.view, ViewMode::Auto);
+        assert_eq!(c.theme, Theme::Fire);
+        assert!(c.card_themes.is_empty());
         assert!(!c.extras.pr);
         assert!(!c.extras.last_activity);
         assert!(c.extras.summary);
@@ -157,7 +158,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sub").join("config.toml");
         let mut c = Config::default();
-        c.view = ViewMode::B;
+        c.theme = Theme::Water;
         c.extras.pr = true;
         c.pr_poll_seconds = 90;
         c.save(&path).unwrap();
@@ -203,9 +204,9 @@ mod tests {
     fn config_partial_file_fills_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "view = \"a\"\n[extras]\npr = true\n").unwrap();
+        std::fs::write(&path, "theme = \"ice\"\n[extras]\npr = true\n").unwrap();
         let c = Config::load(&path);
-        assert_eq!(c.view, ViewMode::A);
+        assert_eq!(c.theme, Theme::Ice);
         assert!(c.extras.pr);
         assert!(c.extras.summary);
         assert_eq!(c.pr_poll_seconds, 45);
@@ -215,7 +216,7 @@ mod tests {
     fn load_checked_reports_parse_failure_of_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "view = \"A\"\n").unwrap(); // enum values are lowercase
+        std::fs::write(&path, "theme = \"Fire\"\n").unwrap(); // enum values are lowercase
         let (c, err) = Config::load_checked(&path);
         assert_eq!(c, Config::default());
         assert_eq!(err.as_deref(), Some(LOAD_FAILED));
@@ -227,9 +228,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(Config::load_checked(&dir.path().join("nope.toml")), (Config::default(), None));
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "view = \"b\"\n").unwrap();
+        std::fs::write(&path, "theme = \"melee\"\n").unwrap();
         let (c, err) = Config::load_checked(&path);
-        assert_eq!((c.view, err), (ViewMode::B, None));
+        assert_eq!((c.theme, err), (Theme::Melee, None));
     }
 
     #[test]
@@ -259,7 +260,7 @@ mod tests {
         let real_dir = dir.path().join("dotfiles");
         std::fs::create_dir(&real_dir).unwrap();
         let real = real_dir.join("config.toml");
-        std::fs::write(&real, "view = \"a\"\n").unwrap();
+        std::fs::write(&real, "theme = \"ice\"\n").unwrap();
         let link_dir = dir.path().join("cfg");
         std::fs::create_dir(&link_dir).unwrap();
         let link = link_dir.join("config.toml");
@@ -271,6 +272,48 @@ mod tests {
         assert_eq!(Config::load(&real), c, "content written to the real file");
         let names: Vec<_> = std::fs::read_dir(&link_dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(names, vec![std::ffi::OsString::from("config.toml")], "no temp file left next to the link");
+    }
+
+    #[test]
+    fn old_view_key_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "view = \"a\"\npr_poll_seconds = 30\n[extras]\npr = true\n").unwrap();
+        let (c, err) = Config::load_checked(&path);
+        assert_eq!(err, None, "the removed view key is ignored");
+        assert_eq!(c.theme, Theme::default());
+        assert!(c.card_themes.is_empty());
+        assert_eq!(c.pr_poll_seconds, 30);
+        assert!(c.extras.pr);
+    }
+
+    #[test]
+    fn unknown_theme_falls_back_to_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "theme = \"bogus\"\npr_poll_seconds = 30\n";
+        std::fs::write(&path, text).unwrap();
+        let (c, err) = Config::load_checked(&path);
+        assert_eq!(c, Config::default());
+        assert_eq!(err.as_deref(), Some(LOAD_FAILED));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "loading never rewrites the file");
+        // a bad per-card theme is the same kind of failure
+        std::fs::write(&path, "[card_themes]\n\"/w/proj\" = \"plasma\"\n").unwrap();
+        assert_eq!(Config::load_checked(&path), (Config::default(), Some(LOAD_FAILED.into())));
+    }
+
+    #[test]
+    fn themes_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut c = Config::default();
+        c.theme = Theme::Ice;
+        c.card_themes.insert("/w/proj-a".into(), Theme::Lightning);
+        c.card_themes.insert("sess-1".into(), Theme::Melee);
+        c.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("theme = \"ice\""), "{text}");
+        assert_eq!(Config::load(&path), c);
     }
 
     #[test]

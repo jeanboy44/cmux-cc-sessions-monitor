@@ -11,12 +11,13 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::{Config, ViewMode};
+use crate::config::Config;
+use crate::fx::theme::Theme;
 use crate::ui::style::{self, cursor_visible, window_block, CURSOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsItem {
-    View,
+    Theme,
     ExtraBranch,
     ExtraElapsed,
     ExtraLastActivity,
@@ -26,7 +27,7 @@ pub enum SettingsItem {
 }
 
 pub const ALL_ITEMS: [SettingsItem; 7] = [
-    SettingsItem::View,
+    SettingsItem::Theme,
     SettingsItem::ExtraBranch,
     SettingsItem::ExtraElapsed,
     SettingsItem::ExtraLastActivity,
@@ -39,16 +40,10 @@ pub const HELP: &str = "j/k 이동  Enter/Space 변경  Esc 닫기";
 pub const PR_UNAVAILABLE: &str = "사용 불가";
 const TITLE: &str = " ⚙ SETTINGS ";
 
-/// View cycles `A -> B -> Auto -> A`; every other item flips its flag.
+/// The default theme cycles (see [`Theme::next`]); every other item flips its flag.
 pub fn toggle(cfg: &mut Config, item: SettingsItem) {
     match item {
-        SettingsItem::View => {
-            cfg.view = match cfg.view {
-                ViewMode::A => ViewMode::B,
-                ViewMode::B => ViewMode::Auto,
-                ViewMode::Auto => ViewMode::A,
-            }
-        }
+        SettingsItem::Theme => cfg.theme = cfg.theme.next(),
         SettingsItem::ExtraBranch => cfg.extras.branch = !cfg.extras.branch,
         SettingsItem::ExtraElapsed => cfg.extras.elapsed = !cfg.extras.elapsed,
         SettingsItem::ExtraLastActivity => cfg.extras.last_activity = !cfg.extras.last_activity,
@@ -60,7 +55,7 @@ pub fn toggle(cfg: &mut Config, item: SettingsItem) {
 
 pub fn item_label(item: SettingsItem) -> &'static str {
     match item {
-        SettingsItem::View => "뷰 (A/B/자동)",
+        SettingsItem::Theme => "기본 테마",
         SettingsItem::ExtraBranch => "브랜치",
         SettingsItem::ExtraElapsed => "경과 시간",
         SettingsItem::ExtraLastActivity => "마지막 활동",
@@ -70,10 +65,10 @@ pub fn item_label(item: SettingsItem) -> &'static str {
     }
 }
 
-/// Boolean state of a flag item; `None` for [`SettingsItem::View`].
+/// Boolean state of a flag item; `None` for [`SettingsItem::Theme`].
 fn flag(cfg: &Config, item: SettingsItem) -> Option<bool> {
     match item {
-        SettingsItem::View => None,
+        SettingsItem::Theme => None,
         SettingsItem::ExtraBranch => Some(cfg.extras.branch),
         SettingsItem::ExtraElapsed => Some(cfg.extras.elapsed),
         SettingsItem::ExtraLastActivity => Some(cfg.extras.last_activity),
@@ -87,11 +82,18 @@ pub fn item_value(cfg: &Config, item: SettingsItem) -> String {
     match (item, flag(cfg, item)) {
         (_, Some(true)) => "켜짐".into(),
         (_, Some(false)) => "꺼짐".into(),
-        (_, None) => match cfg.view {
-            ViewMode::A => "A".into(),
-            ViewMode::B => "B".into(),
-            ViewMode::Auto => "자동".into(),
-        },
+        (_, None) => theme_label(cfg.theme).into(),
+    }
+}
+
+/// Korean name of a theme for the settings window.
+pub fn theme_label(theme: Theme) -> &'static str {
+    match theme {
+        Theme::Fire => "불",
+        Theme::Water => "물",
+        Theme::Ice => "얼음",
+        Theme::Lightning => "번개",
+        Theme::Melee => "근접",
     }
 }
 
@@ -119,7 +121,7 @@ pub fn render_settings(f: &mut Frame, area: Rect, cfg: &Config, cursor: usize, t
         return;
     }
     let rect = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
-    let block = window_block(style::SELECTED, false, false)
+    let block = window_block(style::SELECTED, false)
         .title(Line::styled(TITLE, Style::new().fg(style::SELECTED).add_modifier(Modifier::BOLD)));
     let inner = block.inner(rect);
     f.render_widget(Clear, rect);
@@ -159,21 +161,24 @@ mod tests {
     use crate::ui::test_util::{draw, rows};
 
     #[test]
-    fn toggle_view_cycles_a_b_auto() {
+    fn toggle_theme_cycles_all_themes() {
         let mut c = Config::default();
-        c.view = ViewMode::A;
-        toggle(&mut c, SettingsItem::View);
-        assert_eq!(c.view, ViewMode::B);
-        toggle(&mut c, SettingsItem::View);
-        assert_eq!(c.view, ViewMode::Auto);
-        toggle(&mut c, SettingsItem::View);
-        assert_eq!(c.view, ViewMode::A);
+        assert_eq!(c.theme, Theme::Fire);
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            toggle(&mut c, SettingsItem::Theme);
+            seen.push(c.theme);
+        }
+        assert_eq!(seen, [Theme::Water, Theme::Ice, Theme::Lightning, Theme::Melee, Theme::Fire]);
+        assert_eq!(item_value(&c, SettingsItem::Theme), "불");
+        c.theme = Theme::Lightning;
+        assert_eq!(item_value(&c, SettingsItem::Theme), "번개");
     }
 
     #[test]
     fn toggle_extra_flips_flag() {
         let mut c = Config::default();
-        for item in ALL_ITEMS.into_iter().filter(|i| *i != SettingsItem::View) {
+        for item in ALL_ITEMS.into_iter().filter(|i| *i != SettingsItem::Theme) {
             let before = flag(&c, item).unwrap();
             toggle(&mut c, item);
             assert_eq!(flag(&c, item), Some(!before), "{item:?}");
@@ -205,7 +210,7 @@ mod tests {
     #[test]
     fn settings_render_shows_cursor_and_values() {
         let mut cfg = Config::default();
-        cfg.view = ViewMode::B;
+        cfg.theme = Theme::Ice;
         let text = screen(&cfg, 2, 0, None);
         let all = text.join("\n");
         for item in ALL_ITEMS {
@@ -217,7 +222,8 @@ mod tests {
         assert_eq!(all.matches(CURSOR).count(), 1);
         assert!(row("경과 시간").contains("[x]") && row("경과 시간").trim_end_matches(['│', ' ']).ends_with("켜짐"));
         assert!(row("마지막 활동").contains("[ ]") && row("마지막 활동").contains("꺼짐"));
-        assert!(row("뷰").contains('B'));
+        assert!(row("기본 테마").trim_end_matches(['│', ' ']).ends_with("얼음"), "{all}");
+        assert!(!all.contains("뷰"), "the A/B view row is gone");
         assert!(row("PR 상태").contains("꺼짐"));
         // hidden half of the blink: no cursor
         let hidden = screen(&cfg, 2, 6, None).join("\n");

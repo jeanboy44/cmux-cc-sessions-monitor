@@ -1,15 +1,14 @@
-//! Game-style terminal UI: pixel mascot "Pochi", character-card tiles, HUD.
+//! Game-style terminal UI: session cards with pixel scenes, HUD, preview, settings.
 
+pub mod card;
 pub mod grid;
 pub mod groups;
 pub mod hud;
-pub mod mascot;
 pub mod preview;
 pub mod scene;
 pub mod screen;
 pub mod settings;
 pub mod style;
-pub mod tile;
 
 #[cfg(test)]
 pub(crate) mod test_util {

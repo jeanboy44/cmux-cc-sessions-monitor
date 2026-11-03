@@ -4,8 +4,6 @@
 //! A cell has one foreground color: the average RGB of its lit pixels. A pixel is lit when its alpha is
 //! above 0 after compositing over the scene background. The cell background is always `SCENE_BG`.
 
-#![allow(dead_code)] // wired up by the screen integration task
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -81,7 +79,8 @@ pub fn render_braille(buf: &mut Buffer, area: Rect, rgba: &[u32], w_px: usize, h
     }
 }
 
-fn rgb_color(c: u32) -> Color {
+/// Terminal color of an 0xAABBGGRR pixel (alpha ignored).
+pub fn rgb_color(c: u32) -> Color {
     Color::Rgb((c & 255) as u8, ((c >> 8) & 255) as u8, ((c >> 16) & 255) as u8)
 }
 
