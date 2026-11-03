@@ -53,7 +53,7 @@ Rust에서 프레임(`color`/`light`)을 만들고 `composite()`로 RGBA 픽셀 
 ## 제약
 
 - macOS 전용, 기존 Rust 2021 / ratatui 0.30 / crossterm 0.29, 새 의존성은 최소화(이미지·JS 런타임 금지).
-- 개인정보 가드 테스트(`tests/no_personal_info.rs`)를 통과해야 한다: 문서·픽스처에 `/Users/`, 실제 UUID/회사명 금지.
+- 개인정보 가드 테스트(`tests/no_personal_info.rs`)를 통과해야 한다: 문서·픽스처에 홈 디렉터리 절대경로, 실제 UUID/회사명 금지.
 - 골든 프레임 픽스처는 저장소에 커밋하되 크기를 작게 유지한다(대표 몇 프레임만).
 
 ## 빌더에게 맡기는 것

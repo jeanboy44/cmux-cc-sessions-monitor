@@ -19,7 +19,7 @@
 - 골든 비교는 비트 일치가 아니라 허용 오차(차이 픽셀 비율)로 한다. 정수 해시/RNG(`hash`, `Rng`)는 원본과 정확히 같아야 한다.
 - 애니메이션 약 15fps, 장면이 화면에 보이는 카드만 계산한다.
 - NOTICE에 patch-gg/pixelfx, Hugo Duprez(Sprite Fusion), Hollow Crown(rehan-remade) MIT 고지 포함.
-- 개인정보 가드(`tests/no_personal_info.rs`) 통과: 코드·픽스처·문서에 `/Users/`, 실제 UUID, 회사 문자열 금지. 골든 스크립트에 로컬 경로를 하드코딩하지 말고 환경변수 `PIXELFX_DIR`로 받는다.
+- 개인정보 가드(`tests/no_personal_info.rs`) 통과: 코드·픽스처·문서에 홈 디렉터리 절대경로, 실제 UUID, 회사 문자열 금지. 골든 스크립트에 로컬 경로를 하드코딩하지 말고 환경변수 `PIXELFX_DIR`로 받는다.
 - 커밋: 작성자 `jeanboy44 <noreply@users.noreply.github.com>` (-c 플래그), 메시지 끝에 `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 - 문서는 한국어(내부 문서), 소스 주석은 영어.
 
