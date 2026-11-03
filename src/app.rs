@@ -20,7 +20,7 @@ use crate::model::{Session, Status};
 use crate::pr::{default_providers, spawn_poller, PrCache};
 use crate::preview::{spawn_preview, PreviewCache, PreviewSlot, PreviewTarget, PREVIEW_INTERVAL};
 use crate::refresh::{spawn_refresh, Snapshot};
-use crate::source::cmux::{Cmux, CmuxCli};
+use crate::source::cmux::{Cmux, CmuxCli, SCREEN_LINES};
 use crate::ui::grid::resolve_view;
 use crate::ui::groups::{layout_groups, move_selection, sort_by_window, Row};
 use crate::ui::mascot::{done_oneshot_len, status_transition_fx, TileFx};
@@ -149,6 +149,9 @@ pub struct App {
     pub grid_rect: Rect,
     /// The preview is on but the last frame had no room for the panel.
     pub preview_too_small: bool,
+    /// Screen lines the preview reads: the last drawn panel's inner height
+    /// (capped), [`SCREEN_LINES`] before the first panel is drawn.
+    preview_read_lines: u16,
     /// cmux windows in tree order (tiles are grouped by window).
     pub window_order: Vec<String>,
     /// The window holding the monitor itself, if known.
@@ -184,6 +187,7 @@ impl App {
             preview_slot: Arc::new(Mutex::new(None)),
             grid_rect: Rect::default(),
             preview_too_small: false,
+            preview_read_lines: SCREEN_LINES,
             window_order: Vec::new(),
             current_window: None,
         }
@@ -270,7 +274,21 @@ impl App {
         if s.status == Status::Done || s.workspace_id.is_empty() || s.surface_id.is_empty() {
             return None;
         }
-        Some(PreviewTarget { session_id: s.id.clone(), workspace_id: s.workspace_id.clone(), surface_id: s.surface_id.clone() })
+        Some(PreviewTarget {
+            session_id: s.id.clone(),
+            workspace_id: s.workspace_id.clone(),
+            surface_id: s.surface_id.clone(),
+            lines: self.preview_read_lines,
+        })
+    }
+
+    /// The renderer reports the panel size: the preview reads `lines` screen
+    /// lines from now on (a change is published to the preview thread).
+    pub fn set_preview_read_lines(&mut self, lines: u16) {
+        if self.preview_read_lines != lines {
+            self.preview_read_lines = lines;
+            self.sync_preview_target();
+        }
     }
 
     /// Publishes [`App::preview_target`] to the preview thread (only on change).
@@ -590,7 +608,7 @@ mod tests {
             std::thread::sleep(self.delay);
             self.result.clone().map_err(|e| anyhow!(e))
         }
-        fn read_screen(&self, _: &str, _: &str) -> Result<String> {
+        fn read_screen(&self, _: &str, _: &str, _: u16) -> Result<String> {
             Ok(String::new())
         }
     }

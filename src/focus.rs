@@ -66,7 +66,7 @@ impl Cmux for BackgroundFocus {
         Ok(())
     }
 
-    fn read_screen(&self, workspace_id: &str, surface_id: &str) -> Result<String> {
-        self.inner.read_screen(workspace_id, surface_id)
+    fn read_screen(&self, workspace_id: &str, surface_id: &str, lines: u16) -> Result<String> {
+        self.inner.read_screen(workspace_id, surface_id, lines)
     }
 }

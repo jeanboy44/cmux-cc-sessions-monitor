@@ -26,6 +26,17 @@ pub fn compute_cols(width: u16, view: ViewKind) -> usize {
     (usize::from(width) / usize::from(w.max(1))).max(1)
 }
 
+/// Tile columns of the session list: [`compute_cols`], or exactly 1 while
+/// the preview turns the list into one column. The renderer stores the
+/// result in `App::cols`, which the navigation reads, so both always agree.
+pub fn grid_cols(width: u16, view: ViewKind, one_column: bool) -> usize {
+    if one_column {
+        1
+    } else {
+        compute_cols(width, view)
+    }
+}
+
 /// Rectangle of the tile at (`col`, `row` within the visible window) inside
 /// `area`. Leftover width is spread across columns; heights are the minimum
 /// tile height, cut at the bottom of `area`.
@@ -68,6 +79,17 @@ mod tests {
         assert_eq!(compute_cols(104, ViewKind::A), 4);
         assert_eq!(compute_cols(48, ViewKind::B), 2);
         assert_eq!(compute_cols(u16::MAX, ViewKind::B), u16::MAX as usize / 24);
+    }
+
+    #[test]
+    fn grid_cols_forced_to_one_for_the_preview_list() {
+        for view in [ViewKind::A, ViewKind::B] {
+            for w in [0u16, 30, 80, 200, u16::MAX] {
+                assert_eq!(grid_cols(w, view, true), 1, "{view:?} w={w}");
+                assert_eq!(grid_cols(w, view, false), compute_cols(w, view), "{view:?} w={w}");
+            }
+        }
+        assert_eq!(grid_cols(104, ViewKind::A, false), 4);
     }
 
     #[test]

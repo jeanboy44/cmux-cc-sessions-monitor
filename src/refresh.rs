@@ -19,7 +19,7 @@ use crate::merge::{merge_sessions, select_refs};
 use crate::model::{Session, Status};
 use crate::pr::{pr_note, PrCache, PrLookup};
 use crate::source::claude_sessions::read_claude_sessions;
-use crate::source::cmux::{Cmux, CmuxCli, CmuxSessionRef};
+use crate::source::cmux::{Cmux, CmuxCli, CmuxSessionRef, SCREEN_LINES};
 use crate::source::hook_sessions::read_hook_sessions;
 use crate::status::resolve_status;
 
@@ -146,7 +146,7 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
             break;
         }
         reads += 1;
-        if let Ok(screen) = deps.cmux.read_screen(&s.workspace_id, &s.surface_id) {
+        if let Ok(screen) = deps.cmux.read_screen(&s.workspace_id, &s.surface_id, SCREEN_LINES) {
             let h = hooks.iter().find(|h| h.session_id == s.id);
             let c = claude.iter().find(|c| c.session_id == s.id);
             s.status = resolve_status(h, c, true, Some(&screen));

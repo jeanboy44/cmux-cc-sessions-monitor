@@ -2,10 +2,14 @@
 //! footer) and how it is drawn. Plain chrome: the tiles' thin rounded border
 //! and a dim title, no mascot.
 //!
-//! Placement rule ([`preview_layout`]):
-//! - width ≥ [`RIGHT_MIN_WIDTH`]: panel on the RIGHT, `clamp(width/3, 40, 60)` wide, full height;
-//! - else height ≥ [`BOTTOM_MIN_HEIGHT`]: panel at the BOTTOM, `clamp(height/3, 6, 12)` tall;
-//! - else no panel (the footer says the terminal is too small).
+//! While the preview is on, the session list turns into ONE column of tiles
+//! and the panel takes the rest (master/detail). Placement rule
+//! ([`preview_layout`], sizes of the area between HUD and footer):
+//! - width ≥ [`SIDE_MIN_WIDTH`] and height ≥ [`SIDE_MIN_HEIGHT`]: list on the
+//!   LEFT, `clamp(width/4, 28, 40)` wide, preview on the RIGHT (≥ 42 columns);
+//! - else height ≥ [`STACK_MIN_HEIGHT`]: list on TOP, `clamp(height*2/5, 8, 14)`
+//!   tall, preview at the BOTTOM (≥ 10 rows);
+//! - else no panel: the normal grid, and the footer says the terminal is too small.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -17,10 +21,20 @@ use crate::preview::preview_lines;
 use crate::ui::style;
 use crate::ui::tile::truncate_to_width;
 
-/// From this width on the panel goes to the right.
-pub const RIGHT_MIN_WIDTH: u16 = 120;
-/// Below [`RIGHT_MIN_WIDTH`], from this height on the panel goes to the bottom.
-pub const BOTTOM_MIN_HEIGHT: u16 = 24;
+/// From this width (and [`SIDE_MIN_HEIGHT`]) on, list left / preview right.
+pub const SIDE_MIN_WIDTH: u16 = 70;
+/// Minimum height for the side-by-side layout.
+pub const SIDE_MIN_HEIGHT: u16 = 8;
+/// Side-by-side list width bounds (the minimum is above both tile widths).
+pub const LIST_MIN_WIDTH: u16 = 28;
+pub const LIST_MAX_WIDTH: u16 = 40;
+/// Narrower than [`SIDE_MIN_WIDTH`]: from this height on, list top / preview bottom.
+pub const STACK_MIN_HEIGHT: u16 = 24;
+/// Stacked list height bounds.
+pub const LIST_MIN_HEIGHT: u16 = 8;
+pub const LIST_MAX_HEIGHT: u16 = 14;
+/// The preview never asks cmux for more screen lines than this.
+pub const PREVIEW_MAX_READ_LINES: u16 = 80;
 /// Footer note while the preview is on but there is no room for it.
 pub const PREVIEW_TOO_SMALL: &str = "터미널이 작아 미리보기를 쓸 수 없습니다";
 pub const PREVIEW_LOADING: &str = "읽는 중…";
@@ -28,32 +42,43 @@ pub const PREVIEW_FAILED: &str = "미리보기를 읽지 못했습니다";
 pub const PREVIEW_DONE: &str = "종료된 세션";
 pub const PREVIEW_NO_SESSION: &str = "선택한 세션이 없습니다";
 
-/// Grid area and (optional) preview panel area.
+/// Session list area, (optional) preview panel area, and whether the list
+/// is forced to a single column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviewLayout {
-    pub grid: Rect,
+    pub list: Rect,
     pub panel: Option<Rect>,
+    /// True exactly when there is a panel: the list is one tile per row.
+    pub one_column: bool,
 }
 
-/// Splits `area` (between HUD and footer) into grid and preview panel.
+/// Splits `area` (between HUD and footer) into session list and preview panel.
 pub fn preview_layout(area: Rect, enabled: bool) -> PreviewLayout {
-    let full = PreviewLayout { grid: area, panel: None };
+    let full = PreviewLayout { list: area, panel: None, one_column: false };
     if !enabled {
         return full;
     }
-    if area.width >= RIGHT_MIN_WIDTH {
-        let w = (area.width / 3).clamp(40, 60);
-        let grid = Rect { width: area.width - w, ..area };
-        let panel = Rect { x: area.x + grid.width, width: w, ..area };
-        PreviewLayout { grid, panel: Some(panel) }
-    } else if area.height >= BOTTOM_MIN_HEIGHT {
-        let h = (area.height / 3).clamp(6, 12);
-        let grid = Rect { height: area.height - h, ..area };
-        let panel = Rect { y: area.y + grid.height, height: h, ..area };
-        PreviewLayout { grid, panel: Some(panel) }
+    if area.width >= SIDE_MIN_WIDTH && area.height >= SIDE_MIN_HEIGHT {
+        let w = (area.width / 4).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH);
+        let list = Rect { width: w, ..area };
+        let panel = Rect { x: area.x + w, width: area.width - w, ..area };
+        PreviewLayout { list, panel: Some(panel), one_column: true }
+    } else if area.height >= STACK_MIN_HEIGHT {
+        let h = (u32::from(area.height) * 2 / 5) as u16;
+        let h = h.clamp(LIST_MIN_HEIGHT, LIST_MAX_HEIGHT);
+        let list = Rect { height: h, ..area };
+        let panel = Rect { y: area.y + h, height: area.height - h, ..area };
+        PreviewLayout { list, panel: Some(panel), one_column: true }
     } else {
         full
     }
+}
+
+/// Screen lines to ask cmux for when the panel is `panel`: its inner height
+/// (cmux returns the last non-blank lines), at least 1, at most
+/// [`PREVIEW_MAX_READ_LINES`].
+pub fn preview_read_lines(panel: Rect) -> u16 {
+    panel.height.saturating_sub(2).clamp(1, PREVIEW_MAX_READ_LINES)
 }
 
 /// What the panel shows.
@@ -107,58 +132,87 @@ mod tests {
         Rect::new(0, 1, w, h)
     }
 
-    #[test]
-    fn preview_layout_right_when_wide() {
-        let l = preview_layout(r(150, 30), true);
-        assert_eq!(l.panel, Some(Rect::new(100, 1, 50, 30)));
-        assert_eq!(l.grid, Rect::new(0, 1, 100, 30));
-        // width/3 clamped to 40..=60
-        assert_eq!(preview_layout(r(120, 10), true).panel.unwrap().width, 40);
-        assert_eq!(preview_layout(r(240, 10), true).panel.unwrap().width, 60);
-        assert_eq!(preview_layout(r(300, 10), true).grid.width, 240);
+    /// The list and the panel never overlap and together cover the area.
+    fn assert_split(l: PreviewLayout, area: Rect) {
+        let p = l.panel.expect("panel");
+        assert!(!l.list.intersects(p), "{l:?}");
+        assert_eq!(u32::from(l.list.area()) + u32::from(p.area()), u32::from(area.area()), "{l:?}");
+        assert_eq!(l.list.union(p), area, "{l:?}");
+        assert!(l.one_column);
     }
 
     #[test]
-    fn preview_layout_bottom_when_tall_enough() {
-        let l = preview_layout(r(100, 30), true);
-        assert_eq!(l.panel, Some(Rect::new(0, 21, 100, 10)));
-        assert_eq!(l.grid, Rect::new(0, 1, 100, 20));
-        // height/3 clamped to 6..=12
-        assert_eq!(preview_layout(r(80, 24), true).panel.unwrap().height, 8);
-        assert_eq!(preview_layout(r(80, 60), true).panel.unwrap().height, 12);
+    fn preview_layout_left_list_right_preview_when_wide_enough() {
+        let l = preview_layout(r(160, 30), true);
+        assert_eq!(l.list, Rect::new(0, 1, 40, 30));
+        assert_eq!(l.panel, Some(Rect::new(40, 1, 120, 30)));
+        assert_split(l, r(160, 30));
+        // list width = clamp(width/4, 28, 40)
+        assert_eq!(preview_layout(r(70, 8), true).list.width, 28);
+        assert_eq!(preview_layout(r(120, 8), true).list.width, 30);
+        assert_eq!(preview_layout(r(400, 8), true).list.width, 40);
+        // the preview always keeps at least 40 columns
+        for w in 70..=300 {
+            let l = preview_layout(r(w, 10), true);
+            assert!(l.panel.unwrap().width >= 40 && l.list.width >= 28, "w={w}");
+            assert_split(l, r(w, 10));
+        }
+    }
+
+    #[test]
+    fn preview_layout_top_list_bottom_preview_when_narrow_but_tall() {
+        let l = preview_layout(r(60, 30), true);
+        assert_eq!(l.list, Rect::new(0, 1, 60, 12));
+        assert_eq!(l.panel, Some(Rect::new(0, 13, 60, 18)));
+        assert_split(l, r(60, 30));
+        // list height = clamp(height*2/5, 8, 14)
+        assert_eq!(preview_layout(r(40, 24), true).list.height, 9);
+        assert_eq!(preview_layout(r(40, 100), true).list.height, 14);
+        assert_eq!(preview_layout(r(0, 24), true).list.height, 9, "zero width does not panic");
+        let huge = preview_layout(r(69, u16::MAX - 1), true);
+        assert_eq!(huge.list.height, 14, "no overflow");
+    }
+
+    #[test]
+    fn preview_layout_boundaries() {
+        // width 69/70 (tall enough for both)
+        assert_eq!(preview_layout(r(70, 24), true).list.height, 24, "70 wide: side by side");
+        assert_eq!(preview_layout(r(69, 24), true).list.width, 69, "69 wide: stacked");
+        assert_eq!(preview_layout(r(69, 24), true).panel.map(|p| p.y), Some(1 + 9));
+        // height 7/8 when wide
+        assert!(preview_layout(r(70, 8), true).panel.is_some_and(|p| p.x == 28));
+        assert_eq!(preview_layout(r(70, 7), true).panel, None);
+        assert_eq!(preview_layout(r(200, 7), true).panel, None);
+        // height 23/24 when narrow
+        assert!(preview_layout(r(69, 24), true).panel.is_some());
+        assert_eq!(preview_layout(r(69, 23), true).panel, None);
+        for (w, h) in [(70, 8), (70, 24), (69, 24), (200, 60), (0, 24), (30, 40)] {
+            assert_split(preview_layout(r(w, h), true), r(w, h));
+        }
     }
 
     #[test]
     fn preview_layout_none_when_small() {
-        for (w, h) in [(119, 23), (80, 10), (0, 0), (1, 1), (10, 3)] {
+        for (w, h) in [(69, 23), (70, 7), (40, 10), (0, 0), (1, 1), (10, 3)] {
             let l = preview_layout(r(w, h), true);
-            assert_eq!(l.panel, None, "{w}x{h}");
-            assert_eq!(l.grid, r(w, h));
+            assert_eq!(l, PreviewLayout { list: r(w, h), panel: None, one_column: false }, "{w}x{h}");
         }
     }
 
     #[test]
     fn preview_layout_disabled_gives_full_area() {
-        for (w, h) in [(200, 50), (100, 30), (10, 3)] {
-            assert_eq!(preview_layout(r(w, h), false), PreviewLayout { grid: r(w, h), panel: None });
+        for (w, h) in [(200, 50), (60, 30), (10, 3)] {
+            assert_eq!(preview_layout(r(w, h), false), PreviewLayout { list: r(w, h), panel: None, one_column: false });
         }
     }
 
     #[test]
-    fn preview_layout_boundaries() {
-        assert!(preview_layout(r(120, 5), true).panel.is_some_and(|p| p.x == 80), "120 wide: right");
-        let l = preview_layout(r(119, 5), true);
-        assert_eq!(l.panel, None, "119 wide and short: none");
-        let l = preview_layout(r(119, 24), true);
-        assert_eq!(l.panel.map(|p| (p.y, p.height)), Some((1 + 16, 8)), "119 wide, 24 tall: bottom");
-        assert_eq!(preview_layout(r(119, 23), true).panel, None);
-        // the two parts never overlap and fill the area
-        for (w, h) in [(120, 24), (200, 60), (119, 24), (130, 3)] {
-            let l = preview_layout(r(w, h), true);
-            let p = l.panel.unwrap();
-            assert!(!l.grid.intersects(p), "{w}x{h}");
-            assert_eq!(u32::from(l.grid.area()) + u32::from(p.area()), u32::from(r(w, h).area()));
-        }
+    fn preview_read_lines_follow_panel_height_capped() {
+        assert_eq!(preview_read_lines(Rect::new(0, 0, 50, 30)), 28);
+        assert_eq!(preview_read_lines(Rect::new(0, 0, 50, 82)), 80);
+        assert_eq!(preview_read_lines(Rect::new(0, 0, 50, 200)), 80);
+        assert_eq!(preview_read_lines(Rect::new(0, 0, 50, 3)), 1);
+        assert_eq!(preview_read_lines(Rect::new(0, 0, 50, 0)), 1);
     }
 
     #[test]

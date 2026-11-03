@@ -7,8 +7,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(2);
-/// Lines read by `read-screen` (the permission prompt sits at the bottom).
-const SCREEN_LINES: &str = "40";
+/// Lines read by `read-screen` for status detection (the permission prompt
+/// sits at the bottom).
+pub const SCREEN_LINES: u16 = 40;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CmuxSessionRef {
@@ -142,9 +143,9 @@ pub trait Cmux {
     /// this is the only source for "is this tab still open".
     fn tree(&self) -> Result<TreeLayout>;
     fn focus(&self, workspace_id: &str, surface_id: &str) -> Result<()>;
-    /// Last lines of a surface's screen. `workspace_id` is required: cmux
-    /// otherwise defaults to the caller's own workspace.
-    fn read_screen(&self, workspace_id: &str, surface_id: &str) -> Result<String>;
+    /// Last `lines` non-blank lines of a surface's screen. `workspace_id` is
+    /// required: cmux otherwise defaults to the caller's own workspace.
+    fn read_screen(&self, workspace_id: &str, surface_id: &str, lines: u16) -> Result<String>;
 }
 
 /// Real implementation shelling out to the `cmux` binary, 2s timeout per call.
@@ -260,8 +261,9 @@ impl Cmux for CmuxCli {
         Ok(())
     }
 
-    fn read_screen(&self, workspace_id: &str, surface_id: &str) -> Result<String> {
-        self.run(&["read-screen", "--workspace", workspace_id, "--surface", surface_id, "--lines", SCREEN_LINES])
+    fn read_screen(&self, workspace_id: &str, surface_id: &str, lines: u16) -> Result<String> {
+        let lines = lines.max(1).to_string();
+        self.run(&["read-screen", "--workspace", workspace_id, "--surface", surface_id, "--lines", &lines])
     }
 }
 
@@ -277,6 +279,8 @@ pub struct FakeCmux {
     pub focus_result: Result<(), String>,
     /// Recorded calls, e.g. `sessions`, `focus ws surface`, `read_screen ws surface`.
     pub calls: std::sync::Mutex<Vec<String>>,
+    /// `lines` argument of every `read_screen` call, in order.
+    pub read_lines: std::sync::Mutex<Vec<u16>>,
 }
 
 #[cfg(test)]
@@ -293,6 +297,7 @@ impl FakeCmux {
             screens: Default::default(),
             focus_result: Ok(()),
             calls: Default::default(),
+            read_lines: Default::default(),
         }
     }
 
@@ -318,8 +323,9 @@ impl Cmux for FakeCmux {
         self.focus_result.clone().map_err(|e| anyhow!(e))
     }
 
-    fn read_screen(&self, workspace_id: &str, surface_id: &str) -> Result<String> {
+    fn read_screen(&self, workspace_id: &str, surface_id: &str, lines: u16) -> Result<String> {
         self.calls.lock().unwrap().push(format!("read_screen {workspace_id} {surface_id}"));
+        self.read_lines.lock().unwrap().push(lines);
         let result = self.screens.get(surface_id).unwrap_or(&self.read_screen_result);
         result.clone().map_err(|e| anyhow!(e))
     }
@@ -398,7 +404,7 @@ mod tests {
         let _g = lock();
         let cli = CmuxCli::with_bin(PathBuf::from("/nonexistent/cmux-bin"), TIMEOUT);
         assert!(cli.sessions().is_err());
-        assert!(cli.read_screen("w", "x").is_err());
+        assert!(cli.read_screen("w", "x", SCREEN_LINES).is_err());
     }
 
     #[test]
@@ -470,11 +476,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let log = d.path().join("log.txt");
         let ok = script(&d, &format!("echo \"$@\" >> {}; echo screen-text", log.display()));
-        let out = CmuxCli::with_bin(ok, TIMEOUT).read_screen("WS", "SURF").unwrap();
-        assert_eq!(out, "screen-text\n");
+        let cli = CmuxCli::with_bin(ok, TIMEOUT);
+        assert_eq!(cli.read_screen("WS", "SURF", SCREEN_LINES).unwrap(), "screen-text\n");
+        cli.read_screen("WS", "SURF", 77).unwrap();
+        cli.read_screen("WS", "SURF", 0).unwrap();
         assert_eq!(
             std::fs::read_to_string(&log).unwrap(),
-            "read-screen --workspace WS --surface SURF --lines 40\n"
+            "read-screen --workspace WS --surface SURF --lines 40\n\
+             read-screen --workspace WS --surface SURF --lines 77\n\
+             read-screen --workspace WS --surface SURF --lines 1\n"
         );
     }
 
@@ -483,8 +493,9 @@ mod tests {
         let f = FakeCmux::new(vec![]);
         f.sessions().unwrap();
         f.focus("w", "s").unwrap();
-        f.read_screen("w", "s").unwrap();
+        f.read_screen("w", "s", 12).unwrap();
         f.tree().unwrap();
+        assert_eq!(*f.read_lines.lock().unwrap(), vec![12]);
         assert_eq!(f.calls(), vec!["sessions", "focus w s", "read_screen w s", "tree"]);
     }
 

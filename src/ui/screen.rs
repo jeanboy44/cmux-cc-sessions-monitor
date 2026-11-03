@@ -12,11 +12,11 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
 use crate::model::Status;
-use crate::ui::grid::{cell_rect, compute_cols};
+use crate::ui::grid::{cell_rect, grid_cols};
 use crate::ui::groups::{divider_text, place_rows, row_of, scroll_to_show_rows, Row};
 use crate::ui::hud::{render_hud, StatusCounts};
 use crate::ui::mascot::{sprite, sprite_oneshot_done, SpriteSize};
-use crate::ui::preview::{preview_layout, render_preview, PREVIEW_TOO_SMALL};
+use crate::ui::preview::{preview_layout, preview_read_lines, render_preview, PREVIEW_TOO_SMALL};
 use crate::ui::settings::render_settings;
 use crate::ui::style;
 use crate::ui::tile::{render_tile, render_tile_with_sprite, tile_size};
@@ -25,8 +25,9 @@ pub const EMPTY_MESSAGE: &str = "cmux에서 실행 중인 Claude 세션이 없�
 pub const LOADING_MESSAGE: &str = "세션을 불러오는 중…";
 pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter 포커스 · p 미리보기 · i 설정 · q 종료 ";
 
-/// Draws the full frame. Updates `app.cols`, `app.scroll`, `app.grid_rect`
-/// and `app.preview_too_small` from the layout.
+/// Draws the full frame. Updates `app.cols`, `app.scroll`, `app.grid_rect`,
+/// `app.preview_too_small` and the preview's read line count from the layout.
+/// With the preview panel shown the session list is one column.
 pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     let [hud, middle, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
@@ -34,10 +35,11 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     render_hud(f, hud, &counts);
 
     let layout = preview_layout(middle, app.preview);
-    let grid = layout.grid;
+    let grid = layout.list;
     app.grid_rect = grid;
     app.preview_too_small = app.preview && layout.panel.is_none();
     if let Some(panel) = layout.panel {
+        app.set_preview_read_lines(preview_read_lines(panel));
         let name = app.selected_session().map(|s| s.name.clone());
         render_preview(f, panel, name.as_deref(), &app.preview_body());
     }
@@ -48,7 +50,7 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
         draw_empty(f, grid, app.loaded, tick);
         (false, false)
     } else {
-        draw_grid(f, grid, app, tick)
+        draw_grid(f, grid, app, tick, layout.one_column)
     };
     draw_footer(f, footer, app, above, below, now);
 
@@ -60,14 +62,15 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
 /// Tile grid (grouped by cmux window, see [`crate::ui::groups`]) with
 /// vertical scrolling in layout rows; returns (more above, more below).
 /// Areas smaller than one tile fall back to one name-only row per session.
-fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, tick: u64) -> (bool, bool) {
+/// `one_column` (preview shown) forces a single column, see [`grid_cols`].
+fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, tick: u64, one_column: bool) -> (bool, bool) {
     if area.is_empty() {
         return (false, false);
     }
     let view = app.view;
     let (tile_w, tile_h) = tile_size(view);
     let compact = area.width < tile_w || area.height < tile_h;
-    let cols = if compact { 1 } else { compute_cols(area.width, view) };
+    let cols = if compact { 1 } else { grid_cols(area.width, view, one_column) };
     app.cols = cols;
     app.clamp_selection();
     let rows = app.grid_rows();
@@ -169,7 +172,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, above: bool, below: bool, n
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::fake_session;
+    use crate::app::{fake_session, Dir};
     use crate::config::{Config, ViewMode};
     use crate::refresh::Snapshot;
     use crate::ui::style;
@@ -329,65 +332,131 @@ mod tests {
         app
     }
 
-    #[test]
-    fn preview_panel_draws_on_the_right_when_wide() {
-        let mut app = preview_app(4);
-        let screen = render(&mut app, 150, 30, 0);
-        // middle area 150x28: panel 50 wide on the right
-        assert_eq!(app.grid_rect, Rect::new(0, 1, 100, 28));
-        assert!(screen[1][..].contains("미리보기 · proj-t0"), "{}", screen[1]);
-        let text = screen.join("\n");
-        assert!(text.contains("❯ last prompt line") && text.contains("first"), "{text}");
-        assert!(screen.last().unwrap().contains("p 미리보기"));
-        assert!(app.cols >= 3, "grid uses the narrowed rect: cols={}", app.cols);
-        assert!(!app.preview_too_small);
+    /// Rows of the list part (`x < list_w`) of the screen, HUD/footer excluded.
+    fn list_part(screen: &[String], list_w: usize, rows: std::ops::Range<usize>) -> Vec<String> {
+        screen[rows].iter().map(|r| r.chars().take(list_w).collect()).collect()
     }
 
     #[test]
-    fn preview_panel_draws_at_the_bottom_when_narrow_but_tall() {
+    fn preview_turns_the_list_into_one_column_left_with_preview_right() {
+        let mut app = preview_app(6);
+        let screen = render(&mut app, 150, 30, 0);
+        // middle 150x28: list clamp(150/4, 28, 40) = 37 wide, preview the rest
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 37, 28));
+        assert_eq!(app.cols, 1, "one tile per row");
+        let list = list_part(&screen, 37, 1..29);
+        for row in &list {
+            assert!(row.matches("proj-t").count() <= 1, "one tile per row: {row}");
+        }
+        let text = list.join("\n");
+        for i in 0..4 {
+            assert!(text.contains(&format!("proj-t{i}")), "{text}");
+        }
+        assert!(screen[1].chars().nth(37) == Some('╭') && screen[1].contains("미리보기 · proj-t0"), "{}", screen[1]);
+        assert!(screen[28].chars().nth(37) == Some('╰') && screen[28].ends_with('╯'), "{}", screen[28]);
+        let right: String = screen[2..28].iter().map(|r| r.chars().skip(38).collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(right.contains("first") && right.contains("❯ last prompt line"), "{right}");
+        assert!(screen.last().unwrap().contains("▼ more"), "6 tiles do not fit 28 rows");
+        assert!(!app.preview_too_small);
+        // the read asks for the panel's inner height
+        assert_eq!(app.preview_target().map(|t| t.lines), Some(26));
+        // the selection at the bottom is scrolled into view
+        app.selected = 5;
+        let screen = render(&mut app, 150, 30, 0);
+        assert!(list_part(&screen, 37, 1..29).join("\n").contains("proj-t5"));
+        assert!(screen.last().unwrap().contains("▲ more"));
+        assert!(screen[1].contains("미리보기 · proj-t5"), "{}", screen[1]);
+    }
+
+    #[test]
+    fn preview_stacks_list_on_top_of_preview_when_narrow_but_tall() {
         let mut app = preview_app(10);
         app.selected = 9;
-        let screen = render(&mut app, 100, 32, 0);
-        // middle 100x30: bottom panel 10 tall, grid 100x20
-        assert_eq!(app.grid_rect, Rect::new(0, 1, 100, 20));
-        assert!(screen[21].contains("미리보기 · proj-t9"), "{}", screen[21]);
+        let screen = render(&mut app, 60, 32, 0);
+        // middle 60x30: list clamp(30*2/5, 8, 14) = 12 rows, preview 18 below
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 60, 12));
+        assert_eq!(app.cols, 1, "still one column though 60 fits two tiles");
+        assert!(screen[13].starts_with('╭') && screen[13].contains("미리보기 · proj-t9"), "{}", screen[13]);
+        assert!(screen[30].starts_with('╰'), "{}", screen[30]);
         assert!(screen.join("\n").contains(crate::ui::preview::PREVIEW_LOADING), "t9 not read yet");
-        // the selection stays visible inside the shrunken grid (3 rows of 6)
-        assert_eq!(app.cols, 3);
-        assert_eq!(app.scroll, 1);
-        assert!(screen[1..21].join("\n").contains("proj-t9"));
+        let list = screen[1..13].join("\n");
+        assert!(list.contains("proj-t9") && list.contains("proj-t8") && !list.contains("proj-t7"), "{list}");
+        for row in &screen[1..13] {
+            assert!(row.matches("proj-t").count() <= 1, "{row}");
+        }
+        assert_eq!(app.preview_target().map(|t| t.lines), Some(16));
     }
 
     #[test]
-    fn toggling_preview_changes_the_grid_rect() {
-        let mut app = preview_app(4);
+    fn preview_read_lines_follow_the_panel_height_capped_at_80() {
+        let mut app = preview_app(3);
+        assert_eq!(app.preview_target().map(|t| t.lines), Some(crate::source::cmux::SCREEN_LINES), "before a draw");
+        render(&mut app, 150, 50, 0);
+        assert_eq!(app.preview_target().map(|t| t.lines), Some(46));
+        let (_, slot) = app.preview_shared();
+        assert_eq!(slot.lock().unwrap().as_ref().map(|t| t.lines), Some(46), "published to the thread");
+        render(&mut app, 150, 200, 0);
+        assert_eq!(app.preview_target().map(|t| t.lines), Some(80));
+        assert_eq!(slot.lock().unwrap().as_ref().map(|t| t.lines), Some(80));
+        render(&mut app, 60, 26, 0); // middle 60x24 -> preview 24 - 9 = 15 rows
+        assert_eq!(app.preview_target().map(|t| t.lines), Some(13));
+    }
+
+    #[test]
+    fn toggling_preview_forces_one_column_and_restores_the_grid_keeping_selection() {
+        let mut app = preview_app(12);
         app.preview = false;
-        render(&mut app, 150, 30, 0);
-        assert_eq!(app.grid_rect, Rect::new(0, 1, 150, 28));
-        app.toggle_preview();
-        assert!(app.preview);
-        render(&mut app, 150, 30, 0);
-        assert_eq!(app.grid_rect, Rect::new(0, 1, 100, 28));
-        app.toggle_preview();
-        render(&mut app, 150, 30, 0);
-        assert_eq!(app.grid_rect.width, 150);
+        app.selected = 10;
+        for _ in 0..2 {
+            let screen = render(&mut app, 150, 30, 0);
+            assert_eq!(app.grid_rect, Rect::new(0, 1, 150, 28));
+            assert_eq!(app.cols, crate::ui::grid::compute_cols(150, app.view), "normal grid");
+            assert!(screen.join("\n").contains("proj-t10"));
+            app.toggle_preview();
+            assert!(app.preview);
+            let screen = render(&mut app, 150, 30, 0);
+            assert_eq!(app.cols, 1);
+            assert_eq!(app.grid_rect.width, 37);
+            assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("t10"), "selection kept by id");
+            assert!(list_part(&screen, 37, 1..29).join("\n").contains("proj-t10"), "still visible");
+            // j/k move one tile, h/l stay
+            app.apply_move(Dir::Down);
+            assert_eq!(app.selected, 11);
+            app.apply_move(Dir::Up);
+            app.apply_move(Dir::Right);
+            app.apply_move(Dir::Left);
+            assert_eq!(app.selected, 10);
+            app.toggle_preview();
+        }
+        let screen = render(&mut app, 150, 30, 0);
+        assert!(app.cols > 1 && screen.join("\n").contains("proj-t10"));
     }
 
     #[test]
-    fn preview_too_small_shows_footer_note_and_no_panel() {
-        let mut app = preview_app(4);
-        let screen = render(&mut app, 110, 20, 0);
-        assert!(app.preview_too_small);
-        assert_eq!(app.grid_rect, Rect::new(0, 1, 110, 18));
-        assert!(screen.last().unwrap().contains(PREVIEW_TOO_SMALL), "{}", screen.last().unwrap());
-        assert!(!screen[..19].join("\n").contains("미리보기 · "), "no panel title above the footer");
+    fn preview_too_small_shows_footer_note_and_the_normal_grid() {
+        for (w, h, cols) in [(110, 9, 4), (60, 25, 2), (69, 25, 2)] {
+            let mut app = preview_app(4);
+            let screen = render(&mut app, w, h, 0);
+            assert!(app.preview_too_small, "{w}x{h}");
+            assert_eq!(app.grid_rect, Rect::new(0, 1, w, h - 2));
+            assert_eq!(app.cols, cols, "{w}x{h}: grid back to normal");
+            assert!(screen.last().unwrap().contains(PREVIEW_TOO_SMALL), "{}", screen.last().unwrap());
+            assert!(!screen[..h as usize - 1].join("\n").contains("미리보기 · "), "no panel");
+        }
+        // one more row / column and the panel is back
+        for (w, h) in [(110, 10), (60, 26), (70, 10)] {
+            let mut app = preview_app(4);
+            render(&mut app, w, h, 0);
+            assert!(!app.preview_too_small && app.cols == 1, "{w}x{h}");
+        }
     }
 
     #[test]
     fn preview_on_tiny_terminals_does_not_panic() {
         for n in [0, 1, 10] {
             let mut app = preview_app(n);
-            for (w, h) in [(0, 0), (1, 1), (10, 3), (40, 26), (121, 3), (200, 5)] {
+            app.selected = n.saturating_sub(1);
+            for (w, h) in [(0, 0), (1, 1), (10, 3), (10, 26), (40, 26), (70, 10), (121, 3), (200, 5), (3, 60)] {
                 assert_eq!(render(&mut app, w, h, 0).len(), h as usize);
             }
         }
@@ -434,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn grouped_grid_scrolls_to_selected_with_dividers_and_preview() {
+    fn one_column_list_scrolls_to_selected_with_group_dividers() {
         let mut cfg = Config::default();
         cfg.view = ViewMode::A;
         let mut app = App::new(cfg);
@@ -442,19 +511,40 @@ mod tests {
         sessions.extend((0..4).map(|i| windowed(&format!("b{i}"), "W2")));
         app.apply_snapshot(Snapshot { sessions, window_order: vec!["W1".into(), "W2".into()], ..Default::default() }, 0);
         app.preview = true;
-        // 150x16: middle 150x14, right preview 50 -> grid 100x14 (3 cols)
+        // 150x16: middle 150x14 -> list 37x14, one column: D T T T T D T T T T
         app.selected = 7;
         let screen = render(&mut app, 150, 16, 0);
-        assert_eq!(app.grid_rect.width, 100);
-        assert_eq!(app.cols, 3);
-        let text = screen.join("\n");
-        assert!(text.contains("proj-b3"), "{text}");
+        assert_eq!((app.grid_rect.width, app.cols), (37, 1));
+        let list = list_part(&screen, 37, 1..15).join("\n");
+        assert!(list.contains("proj-b3") && list.contains("proj-b2"), "{list}");
         assert!(screen.last().unwrap().contains("▲ more"));
-        app.selected = 0;
+        // first tile of group 2: its divider is shown right above it
+        app.selected = 4;
         let screen = render(&mut app, 150, 16, 0);
+        let list = list_part(&screen, 37, 1..15);
+        let d = list.iter().position(|r| r.starts_with("── 창 2 · 세션 4")).expect("divider of group 2");
+        assert!(list[d + 2].contains("proj-b0"), "{list:?}");
+        // j walks every tile in order, across the divider
+        app.selected = 0;
+        let mut seen = vec![0];
+        for _ in 0..9 {
+            app.apply_move(Dir::Down);
+            render(&mut app, 150, 16, 0);
+            seen.push(app.selected);
+        }
+        assert_eq!(seen, vec![0, 1, 2, 3, 4, 5, 6, 7, 7, 7]);
+        for sel in (0..8).rev() {
+            app.selected = sel;
+            let screen = render(&mut app, 150, 16, 0);
+            let id = &app.sessions[sel].id;
+            assert!(list_part(&screen, 37, 1..15).join("\n").contains(&format!("proj-{id}")), "sel={sel}");
+        }
         assert_eq!(app.scroll, 0);
-        assert!(screen[1].starts_with("── 창 1 · 세션 4"), "{}", screen[1]);
-        assert!(screen.last().unwrap().contains("▼ more"));
+        assert!(screen_starts_with_divider(&render(&mut app, 150, 16, 0)));
+    }
+
+    fn screen_starts_with_divider(screen: &[String]) -> bool {
+        screen[1].starts_with("── 창 1 · 세션 4")
     }
 
     #[test]

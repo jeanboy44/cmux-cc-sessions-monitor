@@ -5,7 +5,10 @@
 //! at once when the target changes, and stores the result in
 //! [`PreviewCache`]. The UI only reads the cache; the refresh thread never
 //! touches it. Nothing is read while the target is `None` (preview off, or
-//! the selected session is done / has no ids). Each read is bounded by the
+//! the selected session is done / has no ids). The target carries how many
+//! screen lines to ask for (the panel's inner height, see
+//! [`crate::ui::preview::preview_read_lines`]); a size change is a new
+//! target and is read at once. Each read is bounded by the
 //! cmux runner's 2 s timeout; a failing or panicking read is recorded as a
 //! failure and the thread keeps going. Callers never join it.
 
@@ -30,6 +33,8 @@ pub struct PreviewTarget {
     pub session_id: String,
     pub workspace_id: String,
     pub surface_id: String,
+    /// Screen lines to read (the panel's inner height, capped).
+    pub lines: u16,
 }
 
 /// Shared between the UI (writer) and the preview thread (reader).
@@ -152,7 +157,7 @@ pub fn spawn_preview(
                     };
                     if due {
                         // A panicking read is a failed read; the thread lives on.
-                        let screen = catch_unwind(AssertUnwindSafe(|| cmux.read_screen(&t.workspace_id, &t.surface_id)))
+                        let screen = catch_unwind(AssertUnwindSafe(|| cmux.read_screen(&t.workspace_id, &t.surface_id, t.lines)))
                             .ok()
                             .and_then(|r| r.ok())
                             .ok_or(());
@@ -228,7 +233,7 @@ mod tests {
     }
 
     fn target(id: &str) -> PreviewTarget {
-        PreviewTarget { session_id: id.into(), workspace_id: format!("ws-{id}"), surface_id: format!("sf-{id}") }
+        PreviewTarget { session_id: id.into(), workspace_id: format!("ws-{id}"), surface_id: format!("sf-{id}"), lines: 20 }
     }
 
     fn fake_with_screens() -> Arc<FakeCmux> {
@@ -292,6 +297,24 @@ mod tests {
     }
 
     #[test]
+    fn preview_thread_reads_the_target_line_count_and_rereads_on_resize() {
+        let fake = fake_with_screens();
+        let cache = Arc::new(PreviewCache::new());
+        let slot: PreviewSlot = Arc::new(Mutex::new(Some(PreviewTarget { lines: 28, ..target("a") })));
+        let stop = Arc::new(AtomicBool::new(false));
+        let h = spawn_preview(cache.clone(), slot.clone(), fake.clone(), Duration::from_secs(5), stop.clone());
+        assert!(wait_until(Duration::from_secs(2), || cache.get("a").is_some()).is_some());
+        assert_eq!(*fake.read_lines.lock().unwrap(), vec![28]);
+        // the panel grew: same session, new line count, read at once (not after 5 s)
+        *slot.lock().unwrap() = Some(PreviewTarget { lines: 80, ..target("a") });
+        let t = wait_until(Duration::from_secs(2), || fake.read_lines.lock().unwrap().len() >= 2).expect("re-read");
+        assert!(t < Duration::from_millis(300), "{t:?}");
+        assert_eq!(fake.read_lines.lock().unwrap()[1], 80);
+        stop.store(true, Ordering::Relaxed);
+        h.join().unwrap();
+    }
+
+    #[test]
     fn preview_thread_stop_ends_promptly() {
         let fake = fake_with_screens();
         let slot: PreviewSlot = Arc::new(Mutex::new(Some(target("a"))));
@@ -318,11 +341,11 @@ mod tests {
         fn focus(&self, w: &str, s: &str) -> anyhow::Result<()> {
             self.0.focus(w, s)
         }
-        fn read_screen(&self, w: &str, s: &str) -> anyhow::Result<String> {
+        fn read_screen(&self, w: &str, s: &str, lines: u16) -> anyhow::Result<String> {
             if s == "sf-boom" {
                 panic!("read exploded");
             }
-            self.0.read_screen(w, s)
+            self.0.read_screen(w, s, lines)
         }
     }
 
