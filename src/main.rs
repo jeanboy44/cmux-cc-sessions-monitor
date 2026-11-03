@@ -3,6 +3,7 @@ mod branch;
 mod config;
 mod exec;
 mod focus;
+mod fx;
 mod merge;
 mod model;
 mod pr;
