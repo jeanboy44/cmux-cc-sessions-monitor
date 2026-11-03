@@ -86,7 +86,8 @@ pub fn row_of(rows: &[Row], idx: usize) -> Option<usize> {
     rows.iter().position(|r| matches!(r, Row::Tiles { start, end } if (*start..*end).contains(&idx)))
 }
 
-/// Selection after a move: h/l stay in the row, j/k go to the next/previous
+/// Selection after a move: h/l move within the row and wrap to the next/previous
+/// tile row at its ends (no wrap past the first/last tile), j/k go to the next/previous
 /// tile row (across dividers and groups) with the column clamped to that
 /// row's length; edges clamp.
 pub fn move_selection(rows: &[Row], selected: usize, dir: Dir) -> usize {
@@ -101,6 +102,16 @@ pub fn move_selection(rows: &[Row], selected: usize, dir: Dir) -> usize {
     match dir {
         Dir::Left if col > 0 => selected - 1,
         Dir::Right if selected + 1 < end => selected + 1,
+        // End of a row: wrap to the first tile of the next tile row.
+        Dir::Right => match rows[r + 1..].iter().find(tiles) {
+            Some(Row::Tiles { start, .. }) => *start,
+            _ => selected,
+        },
+        // Start of a row: wrap to the last tile of the previous tile row.
+        Dir::Left => match rows[..r].iter().rev().find(tiles) {
+            Some(Row::Tiles { end, .. }) => end - 1,
+            _ => selected,
+        },
         Dir::Down => land(rows[r + 1..].iter().find(tiles)),
         Dir::Up => land(rows[..r].iter().rev().find(tiles)),
         _ => selected,
@@ -271,12 +282,14 @@ mod tests {
     }
 
     #[test]
-    fn h_and_l_do_not_cross_rows_or_groups() {
+    fn h_and_l_wrap_across_rows_and_groups() {
         let rows = two_groups();
-        assert_eq!(move_selection(&rows, 4, Dir::Right), 4, "end of group 1");
-        assert_eq!(move_selection(&rows, 5, Dir::Left), 5, "start of group 2");
-        assert_eq!(move_selection(&rows, 2, Dir::Right), 2);
-        assert_eq!(move_selection(&rows, 3, Dir::Left), 3);
+        assert_eq!(move_selection(&rows, 4, Dir::Right), 5, "end of group 1 -> first tile of group 2");
+        assert_eq!(move_selection(&rows, 5, Dir::Left), 4, "start of group 2 -> last tile of group 1");
+        assert_eq!(move_selection(&rows, 2, Dir::Right), 3, "end of row -> next row start");
+        assert_eq!(move_selection(&rows, 3, Dir::Left), 2, "row start -> previous row end");
+        assert_eq!(move_selection(&rows, 8, Dir::Right), 8, "last tile: no wrap");
+        assert_eq!(move_selection(&rows, 0, Dir::Left), 0, "first tile: no wrap");
         assert_eq!(move_selection(&rows, 6, Dir::Right), 7);
         assert_eq!(move_selection(&rows, 6, Dir::Left), 5);
         // out of range selection never panics

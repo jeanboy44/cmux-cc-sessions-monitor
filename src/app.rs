@@ -656,15 +656,20 @@ mod tests {
         app.apply_move(Dir::Up);
         assert_eq!(app.selected, 0);
         app.selected = 2;
-        app.apply_move(Dir::Right); // end of row: no wrap
-        assert_eq!(app.selected, 2);
         app.selected = 5;
         app.apply_move(Dir::Down);
-        app.apply_move(Dir::Right);
+        app.apply_move(Dir::Right); // last tile: no wrap
         assert_eq!(app.selected, 5);
-        app.selected = 3;
-        app.apply_move(Dir::Left); // start of row: no wrap
+    }
+
+    #[test]
+    fn move_wraps_between_rows() {
+        let mut app = app_with(6, 3);
+        app.selected = 2;
+        app.apply_move(Dir::Right); // end of row -> first tile of next row
         assert_eq!(app.selected, 3);
+        app.apply_move(Dir::Left); // start of row -> last tile of previous row
+        assert_eq!(app.selected, 2);
     }
 
     #[test]
@@ -833,7 +838,9 @@ mod tests {
         app.apply_move(Dir::Down);
         assert_eq!(app.selected_session().unwrap().id, "b");
         app.apply_move(Dir::Left);
-        assert_eq!(app.selected_session().unwrap().id, "b", "h does not cross groups");
+        assert_eq!(app.selected_session().unwrap().id, "a", "h wraps to the previous row, across groups");
+        app.apply_move(Dir::Right);
+        assert_eq!(app.selected_session().unwrap().id, "b");
         app.apply_move(Dir::Up);
         assert_eq!(app.selected_session().unwrap().id, "a");
     }
