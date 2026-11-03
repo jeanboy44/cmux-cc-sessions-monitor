@@ -567,8 +567,28 @@ mod tests {
     }
 
     #[test]
-    fn selected_tile_border_is_yellow() {
+    fn selected_tile_border_is_cmux_blue_and_unselected_borders_are_not() {
         use crate::ui::style;
+        use ratatui::style::{Color, Modifier};
+        assert_eq!(style::SELECTED, Color::Rgb(0x4C, 0x8D, 0xFF), "cmux blue");
+        assert_eq!(style::NEEDS_INPUT, Color::Rgb(250, 204, 21), "needs-input keeps its yellow");
+        for st in [Status::Running, Status::NeedsInput, Status::Idle, Status::Done, Status::Unknown] {
+            let s = session("proj-a", st);
+            // tick 0: cursor visible
+            let buf = draw(30, 6, |f| render_tile(f, f.area(), &s, &Config::default(), true, 0, TileFx::default(), ViewKind::A));
+            let corner = &buf[(0, 0)];
+            assert_eq!((corner.symbol(), corner.fg), ("╭", style::SELECTED), "{st:?}");
+            assert!(corner.modifier.contains(Modifier::BOLD), "{st:?}");
+            assert_eq!(buf[(29, 3)].fg, style::SELECTED, "{st:?}: right border");
+            let cursor = &buf[(0, 1)];
+            assert_eq!((cursor.symbol(), cursor.fg), ("▶", style::SELECTED), "{st:?}");
+            let buf = draw(30, 6, |f| render_tile(f, f.area(), &s, &Config::default(), false, 0, TileFx::default(), ViewKind::A));
+            assert_ne!(buf[(0, 0)].fg, style::SELECTED, "{st:?}: unselected border differs");
+            assert!(!buf[(0, 0)].modifier.contains(Modifier::BOLD), "{st:?}");
+            // no unselected border colour is blue-dominant, so blue always means "selected"
+            let Color::Rgb(r, g, b) = style::status_color(st) else { panic!("rgb") };
+            assert!(!(b > r && b > g), "{st:?} border is blue-ish");
+        }
         let s = session("proj-a", Status::Running);
         let buf = draw(30, 6, |f| render_tile(f, f.area(), &s, &Config::default(), true, 6, TileFx::default(), ViewKind::A));
         assert_eq!(buf[(0, 0)].fg, style::SELECTED);

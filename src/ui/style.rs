@@ -22,7 +22,15 @@ pub const CURSOR_PERIOD: u64 = 12;
 /// Animation frame rate the tick counter is based on.
 pub const FPS: u64 = 12;
 
-pub const SELECTED: Color = Color::Rgb(255, 236, 64);
+/// Selection colour (selected tile border, `▶` cursor, settings window,
+/// scroll hints): "cmux blue" `#4C8DFF`, the colour cmux itself gives agent
+/// status in its sidebar (`cmux list-status`: `claude_code=Running …
+/// color=#4C8DFF`), which is the default `app.accentColor: "cmux"` ("cmux
+/// blue") of cmux's settings schema. No status colour is blue-dominant, so
+/// blue always means "selected".
+pub const SELECTED: Color = Color::Rgb(0x4C, 0x8D, 0xFF);
+/// Background of the HUD's ` ◆ SESSIONS n ` badge (the original game yellow).
+pub const HUD_BADGE: Color = Color::Rgb(255, 236, 64);
 pub const FLASH: Color = Color::Rgb(255, 255, 255);
 /// Warning red (PR conflicts, alert glyphs).
 pub const FLASH_ALERT: Color = Color::Rgb(255, 84, 60);

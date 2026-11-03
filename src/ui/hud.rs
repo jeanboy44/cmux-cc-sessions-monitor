@@ -86,7 +86,7 @@ pub fn render_hud(f: &mut Frame, area: Rect, counts: &StatusCounts) {
     let mut spans = vec![
         Span::styled(
             format!(" ◆ SESSIONS {} ", counts.total()),
-            Style::new().fg(style::BADGE_FG).bg(style::SELECTED).add_modifier(Modifier::BOLD),
+            Style::new().fg(style::BADGE_FG).bg(style::HUD_BADGE).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
     ];
@@ -152,6 +152,17 @@ mod tests {
         for want in ["SESSIONS 7", "✦ RUN 2", "! INPUT 1", "z IDLE 3", "✓ DONE 0", "? UNK 1"] {
             assert!(row.contains(want), "missing {want:?} in {row:?}");
         }
+    }
+
+    #[test]
+    fn hud_badge_keeps_its_yellow_not_the_selection_blue() {
+        use crate::ui::style;
+        let counts = StatusCounts { running: 1, ..Default::default() };
+        let buf = draw(60, 1, |f| render_hud(f, f.area(), &counts));
+        assert_eq!(buf[(1, 0)].symbol(), "◆");
+        assert_eq!(buf[(1, 0)].bg, style::HUD_BADGE);
+        assert_eq!(style::HUD_BADGE, ratatui::style::Color::Rgb(255, 236, 64));
+        assert_ne!(style::HUD_BADGE, style::SELECTED);
     }
 
     #[test]
