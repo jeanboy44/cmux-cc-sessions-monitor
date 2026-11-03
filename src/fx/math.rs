@@ -68,6 +68,9 @@ pub fn angle_to(x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
 pub mod ease {
     use std::f64::consts::PI;
 
+    /// Upstream default overshoot for `in_back` / `out_back`.
+    pub const BACK_S: f64 = 1.70158;
+
     pub fn linear(t: f64) -> f64 {
         t
     }
@@ -280,6 +283,38 @@ pub fn fbm(mut x: f64, mut y: f64, seed: f64, octaves: u32) -> f64 {
     s / n
 }
 
+/// 2D value noise whose lattice repeats every `px` cells in x and `py` cells in y (0: no repeat).
+pub fn tile_noise(x: f64, y: f64, px: f64, py: f64, seed: f64) -> f64 {
+    let (ix, iy) = (x.floor(), y.floor());
+    let (fx, fy) = (x - ix, y - iy);
+    let ux = fx * fx * (3.0 - 2.0 * fx);
+    let uy = fy * fy * (3.0 - 2.0 * fy);
+    let w = |v: f64, p: f64| if p != 0.0 { wrap(v, p) } else { v };
+    let (x0, x1) = (w(ix, px), w(ix + 1.0, px));
+    let (y0, y1) = (w(iy, py), w(iy + 1.0, py));
+    let a = rand(&[x0, y0, seed]);
+    let b = rand(&[x1, y0, seed]);
+    let c = rand(&[x0, y1, seed]);
+    let d = rand(&[x1, y1, seed]);
+    lerp(lerp(a, b, ux), lerp(c, d, ux), uy) * 2.0 - 1.0
+}
+/// Fractal `tile_noise`: every octave keeps the repeat, so scrolled fields still loop.
+pub fn tile_fbm(x: f64, y: f64, px: f64, py: f64, seed: f64, octaves: u32) -> f64 {
+    let (mut s, mut a, mut n, mut k) = (0.0, 0.5, 0.0, 1.0);
+    for o in 0..octaves {
+        s += tile_noise(x * k, y * k, px * k, py * k, seed + o as f64 * 101.0) * a;
+        n += a;
+        a *= 0.5;
+        k *= 2.0;
+    }
+    s / n
+}
+/// Noise that loops: the same value at phase 0 and phase 1.
+pub fn loop_noise(phase: f64, radius: f64, seed: f64) -> f64 {
+    let a = phase * TAU;
+    noise2(a.cos() * radius + 50.0, a.sin() * radius + 50.0, seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +359,20 @@ mod tests {
             let got = fbm(f(&c["x"]), f(&c["y"]), f(&c["seed"]), c["octaves"].as_u64().unwrap() as u32);
             assert!((got - f(&c["v"])).abs() < 1e-9, "fbm {c}");
         }
+        for c in g["tile"].as_array().unwrap() {
+            let (x, y, px, py, seed) = (f(&c["x"]), f(&c["y"]), f(&c["px"]), f(&c["py"]), f(&c["seed"]));
+            assert!((tile_noise(x, y, px, py, seed) - f(&c["v"])).abs() < 1e-9, "tile_noise {c}");
+            assert!((tile_fbm(x, y, px, py, seed, 4) - f(&c["f"])).abs() < 1e-9, "tile_fbm {c}");
+        }
+        for c in g["loop"].as_array().unwrap() {
+            let got = loop_noise(f(&c["phase"]), f(&c["radius"]), f(&c["seed"]));
+            assert!((got - f(&c["v"])).abs() < 1e-9, "loop_noise {c}");
+        }
+    }
+
+    #[test]
+    fn back_s_constant() {
+        assert_eq!(ease::BACK_S, 1.70158);
+        assert_eq!(ease::out_back(0.5, ease::BACK_S), 1.0 + 2.70158 * -0.125 + 1.70158 * 0.25);
     }
 }

@@ -32,7 +32,15 @@ for (const octaves of [1, 3, 5]) for (let i = -2; i <= 2; i++) for (let j = -2; 
   fbm.push({ x, y, seed: 3, octaves, v: m.fbm(x, y, 3, octaves) });
 }
 
+const tile = [];
+for (const [px, py] of [[0, 0], [4, 0], [0, 3], [5, 3]]) for (let i = -2; i <= 3; i++) for (let j = -2; j <= 3; j++) {
+  const x = i * 1.9 + 0.3, y = j * 1.3 - 0.7;
+  tile.push({ x, y, px, py, seed: 2, v: m.tileNoise(x, y, px, py, 2), f: m.tileFbm(x, y, px, py, 2, 4) });
+}
+const loop = [];
+for (const radius of [1, 2.5]) for (let i = 0; i <= 8; i++) { const phase = i / 8 + 0.013; loop.push({ phase, radius, seed: 1, v: m.loopNoise(phase, radius, 1) }); }
+
 const out = join(dirname(fileURLToPath(import.meta.url)), "../../tests/golden/math.json");
 mkdirSync(dirname(out), { recursive: true });
-writeFileSync(out, JSON.stringify({ hash, rng, noise, noise2, fbm }, null, 1) + "\n");
+writeFileSync(out, JSON.stringify({ hash, rng, noise, noise2, fbm, tile, loop }, null, 1) + "\n");
 console.log("wrote", out);

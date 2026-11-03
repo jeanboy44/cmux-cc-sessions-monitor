@@ -1,10 +1,11 @@
 //! Colors are `0xAABBGGRR` u32 values (R in the low byte), as in pixelfx `core/color.js`.
 
 use super::math::clamp;
+use std::sync::OnceLock;
 
-fn pack(r: f64, g: f64, b: f64) -> u32 {
-    // `as i64` truncates toward zero like JS ToInt32 for in-range values; `& 255` wraps.
-    let ch = |v: f64| (v as i64 & 255) as u32;
+/// Float-channel `rgb`: each channel is truncated toward zero and wrapped with `& 255`, like JS.
+pub fn rgb_f(r: f64, g: f64, b: f64) -> u32 {
+    let ch = |v: f64| if v.is_finite() { v.trunc().rem_euclid(256.0) as u32 } else { 0 };
     (255 << 24) | (ch(b) << 16) | (ch(g) << 8) | ch(r)
 }
 pub fn rgb(r: u32, g: u32, b: u32) -> u32 {
@@ -38,11 +39,11 @@ pub fn to_hex(c: u32) -> String {
 pub fn mix(a: u32, b: u32, t: f64) -> u32 {
     let t = clamp(t, 0.0, 1.0);
     let ch = |x: u32, y: u32| x as f64 + (y as f64 - x as f64) * t;
-    pack(ch(red(a), red(b)), ch(green(a), green(b)), ch(blue(a), blue(b)))
+    rgb_f(ch(red(a), red(b)), ch(green(a), green(b)), ch(blue(a), blue(b)))
 }
 /// Multiply a color's brightness by k.
 pub fn scale(c: u32, k: f64) -> u32 {
-    pack((red(c) as f64 * k).min(255.0), (green(c) as f64 * k).min(255.0), (blue(c) as f64 * k).min(255.0))
+    rgb_f((red(c) as f64 * k).min(255.0), (green(c) as f64 * k).min(255.0), (blue(c) as f64 * k).min(255.0))
 }
 /// Perceived brightness 0..1.
 pub fn luma(c: u32) -> f64 {
@@ -68,6 +69,11 @@ pub fn at(r: &[u32], t: f64) -> u32 {
 }
 /// Blended color along a ramp (for light, where smooth is right).
 pub fn blend(r: &[u32], t: f64) -> u32 {
+    match r.len() {
+        0 => return 0,
+        1 => return r[0],
+        _ => {}
+    }
     let x = clamp(t, 0.0, 1.0) * (r.len() - 1) as f64;
     let i = ((r.len() - 2) as f64).min(x.floor()) as usize;
     mix(r[i], r[i + 1], x - i as f64)
@@ -109,6 +115,13 @@ pub fn pal(name: &str) -> Option<&'static [&'static str]> {
     PAL.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
 }
 
+/// The PAL ramps as color numbers (cached). Unknown names give an empty slice.
+pub fn ramp_of(name: &str) -> &'static [u32] {
+    static CACHE: OnceLock<Vec<(&'static str, Vec<u32>)>> = OnceLock::new();
+    let all = CACHE.get_or_init(|| PAL.iter().map(|(k, v)| (*k, ramp(v))).collect());
+    all.iter().find(|(k, _)| *k == name).map(|(_, v)| v.as_slice()).unwrap_or(&[])
+}
+
 pub const WHITE: u32 = 0xFFFF_FFFF;
 pub const BLACK: u32 = 0xFF00_0000;
 /// `#0b0a10`
@@ -127,6 +140,27 @@ mod tests {
         assert_eq!(hex("#f80"), hex("#ff8800"));
         assert_eq!(hex("#ffffff"), WHITE);
         assert_eq!(INK, rgb(0x0b, 0x0a, 0x10));
+    }
+
+    #[test]
+    fn rgb_f_matches_js_and_semantics() {
+        assert_eq!(rgb_f(127.5, 1.9, 0.0), rgb(127, 1, 0));
+        assert_eq!(rgb_f(-1.0, 256.0, 511.0), rgb(255, 0, 255));
+        assert_eq!(rgb_f(-0.5, 300.7, f64::NAN), rgb(0, 44, 0));
+    }
+
+    #[test]
+    fn ramp_of_matches_pal() {
+        assert_eq!(ramp_of("fire"), ramp(pal("fire").unwrap()).as_slice());
+        assert_eq!(ramp_of("night").len(), 6);
+        assert!(ramp_of("nope").is_empty());
+    }
+
+    #[test]
+    fn blend_degenerate_ramps() {
+        assert_eq!(blend(&[], 0.5), 0);
+        assert_eq!(blend(&[WHITE], 0.5), WHITE);
+        assert_eq!(blend(&[rgb(0, 0, 0), rgb(255, 255, 255)], 0.5), rgb(127, 127, 127));
     }
 
     #[test]
