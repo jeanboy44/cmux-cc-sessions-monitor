@@ -270,6 +270,26 @@ mod tests {
     }
 
     #[test]
+    fn closed_tab_session_leaves_hud_and_selection_stays_valid() {
+        let mut app = App::new(Config::default());
+        let three: Vec<_> = ["a", "b", "c"].iter().map(|id| fake_session(id, Status::Running)).collect();
+        app.apply_snapshot(Snapshot { sessions: three.clone(), ..Default::default() }, 0);
+        app.selected = 2;
+        assert!(render(&mut app, 120, 30, 0)[0].contains("SESSIONS 3"));
+        // the refresh dropped "c" (its tab was closed): no Done tile, count drops at once
+        app.apply_snapshot(Snapshot { sessions: three[..2].to_vec(), ..Default::default() }, 5);
+        let screen = render(&mut app, 120, 30, 5);
+        assert!(screen[0].contains("SESSIONS 2") && screen[0].contains("DONE 0"), "{}", screen[0]);
+        assert!(!screen.join("\n").contains("proj-c"));
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("b"), "clamped to a valid tile");
+        assert!(!app.has_transition("c"), "no stale fx state for the closed session");
+        // the selected tile itself closes: the selection clamps to a tile that exists
+        app.selected = 0;
+        app.apply_snapshot(Snapshot { sessions: three[1..2].to_vec(), ..Default::default() }, 6);
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("b"));
+    }
+
+    #[test]
     fn footer_shows_flash_message() {
         let mut app = App::new(Config::default());
         app.set_sessions(ten_sessions(), 0);

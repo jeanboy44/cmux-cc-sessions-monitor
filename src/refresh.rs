@@ -101,7 +101,8 @@ pub fn default_hook_path() -> PathBuf {
 }
 
 /// Builds the next snapshot from the sources and the previous one. A failing
-/// cmux keeps the previous cmux list and sets [`Snapshot::message`].
+/// cmux keeps the previous cmux list and sets [`Snapshot::message`]. Sessions
+/// whose cmux tab no longer exists (per `cmux tree`) are dropped at once.
 pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
     let claude = read_claude_sessions(&deps.claude_dir);
     let hooks = read_hook_sessions(&deps.hook_path);
@@ -109,8 +110,12 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
         Ok(refs) => (refs, None),
         Err(_) => (prev.cmux_refs.clone(), Some(CMUX_UNAVAILABLE.to_string())),
     };
+    // The list keeps closed tabs (stale `active_surface=yes`); the tree is
+    // the only live view. A failing tree is "unknown": nothing is dropped.
+    let open_surfaces = deps.cmux.surfaces().ok();
     let retention = Duration::from_secs(deps.config.done_retention_minutes.saturating_mul(60));
-    let mut sessions = merge_sessions(&claude, &hooks, &cmux_refs, deps.now, retention, &prev.sessions);
+    let mut sessions =
+        merge_sessions(&claude, &hooks, &cmux_refs, deps.now, retention, &prev.sessions, open_surfaces.as_ref());
 
     // Last-resort screen rule for live sessions the files could not classify.
     let alive: HashMap<&str, bool> =
@@ -368,6 +373,7 @@ mod tests {
 
         let mut broken = FakeCmux::new(vec![]);
         broken.sessions_result = Err("socket gone".into());
+        broken.surfaces_result = Err("socket gone".into());
         let second = build_snapshot(&deps(dir.path(), &broken), &first);
         assert_eq!(ids(&second), vec!["live"]);
         assert_eq!(second.sessions[0].status, Status::Idle);
@@ -416,7 +422,40 @@ mod tests {
         write_claude(&dir.path().join("sessions"), 11, "live", "busy");
         let cmux = FakeCmux::new(vec![cref("live", true)]);
         build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
-        assert_eq!(cmux.calls(), vec!["sessions".to_string()]);
+        assert_eq!(cmux.calls(), vec!["sessions".to_string(), "surfaces".to_string()]);
+    }
+
+    #[test]
+    fn refresh_round_uses_surfaces_and_survives_tree_failure() {
+        let dir = setup();
+        let sd = dir.path().join("sessions");
+        write_claude(&sd, 11, "a", "busy");
+        write_claude(&sd, 12, "b", "busy");
+        let mut cmux = FakeCmux::new(vec![cref("a", true), cref("b", true)]);
+        let first = build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
+        assert_eq!(ids(&first), vec!["a", "b"]);
+        assert!(cmux.calls().contains(&"surfaces".to_string()), "{:?}", cmux.calls());
+
+        // b's tab was closed: claude is gone, cmux still lists the dead record
+        std::fs::remove_file(sd.join("12.json")).unwrap();
+        cmux.sessions_result = Ok(vec![cref("a", true), cref("b", false)]);
+        cmux.surfaces_result = Ok(["SF-A".to_string()].into_iter().collect());
+        let second = build_snapshot(&deps(dir.path(), &cmux), &first);
+        assert_eq!(ids(&second), vec!["a"], "dropped at once, no Done tile");
+        assert_eq!(second.message, None);
+
+        // tree fails: nothing is dropped for that reason, no blank screen
+        cmux.surfaces_result = Err("tree timed out".into());
+        cmux.sessions_result = Ok(vec![cref("a", true)]);
+        let third = build_snapshot(&deps(dir.path(), &cmux), &second);
+        assert_eq!(ids(&third), vec!["a"]);
+        assert_eq!(third.sessions[0].status, Status::Running);
+        // and a normal exit with an open tab still becomes Done
+        cmux.sessions_result = Ok(vec![cref("a", false)]);
+        cmux.surfaces_result = Ok(["SF-A".to_string()].into_iter().collect());
+        let fourth = build_snapshot(&deps(dir.path(), &cmux), &third);
+        assert_eq!(ids(&fourth), vec!["a"]);
+        assert_eq!(fourth.sessions[0].status, Status::Done);
     }
 
     fn cached(cache: &BranchCache, id: &str, branch: &str) {

@@ -49,6 +49,12 @@ cmux 안에서 `claude`(v2.1.x)를 새로 띄우고, 기본 권한 모드(manual
 - `cmux send-key`는 대상 surface가 질문/대화 상자 대기 상태이면 `nothing was sent` 오류를 내며 키를 보내지 않는다. 이때는 `--force`를 붙여야 한다.
 - `cmux close-surface`는 1~2초 뒤 목록에서 사라지며, 닫힌 뒤 cmux 포커스가 임의의 다른 워크스페이스로 이동했다. 닫은 뒤에는 원래 포커스를 복원해야 한다.
 
+## 탭 닫기
+
+Claude Code가 돌고 있는 탭(cmux surface)을 닫으면 `claude` 프로세스가 곧바로 종료되고 `~/.claude/sessions/<pid>.json`도 사라진다. 그런데 `cmux sessions list`는 저장된 기록 목록이라 살아 있는 화면을 반영하지 않는다. 닫힌 탭의 세션도 목록에 그대로 남고 `pid_exists=no`가 되지만 `active_surface=yes`는 낡은 값으로 남는다. 그래서 목록만 보면 "프로세스가 끝났다"와 "탭이 닫혔다"를 구별할 수 없다.
+
+탭이 아직 있는지는 `cmux tree --all --id-format uuids`가 유일하게 믿을 만한 출처다. 출력은 window / workspace / pane / surface 계층이고 surface 줄은 `│   └── surface <UUID> [terminal] "<제목>" [selected] tty=ttys004` 형태다(UUID는 대문자, `[browser]` surface도 있다). 모니터는 매 갱신마다 이 목록을 읽어, 탭이 없어진 세션은 완료(DONE) 타일로 남기지 않고 바로 지운다. tree 호출이 실패하거나 surface가 하나도 없는 이상한 출력이면 "알 수 없음"으로 보고 이 이유로는 아무것도 지우지 않는다.
+
 ## 관찰하지 못한 것
 
 단일 실행(1회)이라 아래는 확인하지 못했다. Task 4 구현 시 가정으로만 두고 실제 사용 중 확인이 필요하다.

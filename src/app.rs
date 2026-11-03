@@ -331,6 +331,12 @@ impl App {
         }
     }
 
+    /// Whether status-change tracking still holds state for session `id`.
+    #[cfg(test)]
+    pub(crate) fn has_transition(&self, id: &str) -> bool {
+        self.transitions.contains_key(id)
+    }
+
     fn transition(&self, s: &Session, tick: u64) -> Option<(Transition, u64)> {
         let t = self.transitions.get(&s.id).filter(|t| t.to == s.status)?;
         Some((*t, tick.saturating_sub(t.at)))
@@ -491,6 +497,9 @@ mod tests {
     impl Cmux for SlowCmux {
         fn sessions(&self) -> Result<Vec<crate::source::cmux::CmuxSessionRef>> {
             Ok(vec![])
+        }
+        fn surfaces(&self) -> Result<std::collections::HashSet<String>> {
+            Ok(Default::default())
         }
         fn focus(&self, _: &str, _: &str) -> Result<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);

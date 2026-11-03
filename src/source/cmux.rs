@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -67,8 +68,32 @@ fn parse_line(line: &str) -> Option<CmuxSessionRef> {
     })
 }
 
+/// Surface ids (uppercased) found in `cmux tree --all --id-format uuids`
+/// output, whose surface lines look like
+/// `│   └── surface <UUID> [terminal] "title" [selected] tty=ttys004`.
+/// Lines that are not surface lines, or whose id looks wrong, are ignored.
+pub fn parse_tree_surfaces(output: &str) -> HashSet<String> {
+    output.lines().filter_map(tree_surface_id).collect()
+}
+
+fn tree_surface_id(line: &str) -> Option<String> {
+    // Drop the tree drawing (`│ ├── └──`) and indentation in front.
+    let rest = line.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '├' | '└' | '─' | '|' | '`'));
+    let mut toks = rest.split_whitespace();
+    if toks.next()? != "surface" {
+        return None;
+    }
+    let id = toks.next()?;
+    let ok = id.len() >= 8 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    ok.then(|| id.to_ascii_uppercase())
+}
+
 pub trait Cmux {
     fn sessions(&self) -> Result<Vec<CmuxSessionRef>>;
+    /// Ids (uppercase) of every surface (tab) that currently exists in cmux.
+    /// `cmux sessions list` is a saved-record list and keeps closed tabs, so
+    /// this is the only source for "is this tab still open".
+    fn surfaces(&self) -> Result<HashSet<String>>;
     fn focus(&self, workspace_id: &str, surface_id: &str) -> Result<()>;
     /// Last lines of a surface's screen. `workspace_id` is required: cmux
     /// otherwise defaults to the caller's own workspace.
@@ -171,6 +196,17 @@ impl Cmux for CmuxCli {
         Ok(parse_sessions_list(&self.run(&["sessions", "list"])?))
     }
 
+    /// An output without any surface is treated as an error: the monitor's
+    /// own tab always exists, so an empty tree means cmux answered oddly and
+    /// must not make every tile disappear.
+    fn surfaces(&self) -> Result<HashSet<String>> {
+        let set = parse_tree_surfaces(&self.run(&["tree", "--all", "--id-format", "uuids"])?);
+        if set.is_empty() {
+            bail!("cmux tree listed no surfaces");
+        }
+        Ok(set)
+    }
+
     fn focus(&self, workspace_id: &str, surface_id: &str) -> Result<()> {
         self.run(&["select-workspace", "--workspace", workspace_id])?;
         self.run(&["focus-panel", "--panel", surface_id, "--workspace", workspace_id])?;
@@ -185,6 +221,8 @@ impl Cmux for CmuxCli {
 #[cfg(test)]
 pub struct FakeCmux {
     pub sessions_result: Result<Vec<CmuxSessionRef>, String>,
+    /// Defaults to the surfaces of the sessions passed to [`FakeCmux::new`].
+    pub surfaces_result: Result<HashSet<String>, String>,
     pub read_screen_result: Result<String, String>,
     pub focus_result: Result<(), String>,
     /// Recorded calls, e.g. `sessions`, `focus ws surface`, `read_screen ws surface`.
@@ -194,8 +232,10 @@ pub struct FakeCmux {
 #[cfg(test)]
 impl FakeCmux {
     pub fn new(sessions: Vec<CmuxSessionRef>) -> Self {
+        let surfaces = sessions.iter().map(|r| r.surface_id.to_ascii_uppercase()).collect();
         Self {
             sessions_result: Ok(sessions),
+            surfaces_result: Ok(surfaces),
             read_screen_result: Ok(String::new()),
             focus_result: Ok(()),
             calls: Default::default(),
@@ -212,6 +252,11 @@ impl Cmux for FakeCmux {
     fn sessions(&self) -> Result<Vec<CmuxSessionRef>> {
         self.calls.lock().unwrap().push("sessions".into());
         self.sessions_result.clone().map_err(|e| anyhow!(e))
+    }
+
+    fn surfaces(&self) -> Result<HashSet<String>> {
+        self.calls.lock().unwrap().push("surfaces".into());
+        self.surfaces_result.clone().map_err(|e| anyhow!(e))
     }
 
     fn focus(&self, workspace_id: &str, surface_id: &str) -> Result<()> {
@@ -384,6 +429,55 @@ mod tests {
         f.sessions().unwrap();
         f.focus("w", "s").unwrap();
         f.read_screen("w", "s").unwrap();
-        assert_eq!(f.calls(), vec!["sessions", "focus w s", "read_screen w s"]);
+        f.surfaces().unwrap();
+        assert_eq!(f.calls(), vec!["sessions", "focus w s", "read_screen w s", "surfaces"]);
+    }
+
+    const TREE: &str = "\
+window AAAAAAAA-0000-0000-0000-0000000000F0 [current] ◀ active
+├── workspace AAAAAAAA-0000-0000-0000-000000000001 \"proj a\"
+│   ├── pane AAAAAAAA-0000-0000-0000-0000000000A1 [focused]
+│   │   └── surface BBBBBBBB-0000-0000-0000-000000000001 [terminal] \"✳ surface BBBBBBBB-0000-0000-0000-00000000DEAD\" [selected] tty=ttys004
+│   └── pane AAAAAAAA-0000-0000-0000-0000000000A2
+│       ├── surface bbbbbbbb-0000-0000-0000-000000000002 [terminal] \"lower\" tty=ttys005
+│       └── surface BBBBBBBB-0000-0000-0000-000000000003 [browser] \"docs\" [selected]
+└── workspace AAAAAAAA-0000-0000-0000-000000000002 \"empty\"
+garbage line
+surface
+    surface ??? [terminal]
+│   └── surface
+surfaces BBBBBBBB-0000-0000-0000-00000000BEEF
+";
+
+    #[test]
+    fn tree_parse_extracts_surface_ids() {
+        let got = parse_tree_surfaces(TREE);
+        let want: HashSet<String> = [
+            "BBBBBBBB-0000-0000-0000-000000000001",
+            "BBBBBBBB-0000-0000-0000-000000000002",
+            "BBBBBBBB-0000-0000-0000-000000000003",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(got, want);
+        assert!(parse_tree_surfaces("").is_empty());
+        assert!(parse_tree_surfaces("\n│\n└──\n").is_empty());
+    }
+
+    #[test]
+    fn cli_surfaces_runs_tree_with_uuids_and_rejects_empty_tree() {
+        let _g = lock();
+        let d = tempfile::tempdir().unwrap();
+        let log = d.path().join("log.txt");
+        let fx = d.path().join("tree.txt");
+        std::fs::write(&fx, TREE).unwrap();
+        let ok = script(&d, &format!("echo \"$@\" >> {}; cat {}", log.display(), fx.display()));
+        assert_eq!(CmuxCli::with_bin(ok, TIMEOUT).surfaces().unwrap().len(), 3);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "tree --all --id-format uuids\n");
+        let empty = script(&d, "echo 'window AAAAAAAA-0000-0000-0000-0000000000F0'");
+        assert!(CmuxCli::with_bin(empty, TIMEOUT).surfaces().is_err(), "no surface at all = unknown");
+        let fail = script(&d, "exit 1");
+        assert!(CmuxCli::with_bin(fail, TIMEOUT).surfaces().is_err());
     }
 }

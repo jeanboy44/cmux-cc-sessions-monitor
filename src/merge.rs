@@ -157,6 +157,11 @@ pub fn select_refs(refs: &[CmuxSessionRef]) -> Vec<&CmuxSessionRef> {
 /// sessions need a cmux ref with workspace and surface; sessions never seen
 /// alive are hidden; a session turns `Done` (ended_at recorded once) when it
 /// was live in `prev` and is now dead or gone, and is dropped after `retention`.
+///
+/// `open_surfaces` is the set of surface ids (uppercase) that still exist in
+/// cmux. When known, a session whose tab was closed is dropped at once (no
+/// `Done` tile, no retention) whatever its pid or previous state; `None`
+/// (the tree call failed) drops nothing for that reason.
 pub fn merge_sessions(
     claude: &[ClaudeSessionRecord],
     hooks: &[HookRecord],
@@ -164,6 +169,7 @@ pub fn merge_sessions(
     now: SystemTime,
     retention: Duration,
     prev: &[Session],
+    open_surfaces: Option<&HashSet<String>>,
 ) -> Vec<Session> {
     let claude_by: HashMap<&str, &ClaudeSessionRecord> = claude.iter().map(|c| (c.session_id.as_str(), c)).collect();
     let hook_by: HashMap<&str, &HookRecord> = hooks.iter().map(|h| (h.session_id.as_str(), h)).collect();
@@ -207,6 +213,9 @@ pub fn merge_sessions(
         out.push(s);
     }
 
+    if let Some(open) = open_surfaces {
+        out.retain(|s| open.contains(&s.surface_id.to_ascii_uppercase()));
+    }
     out.retain(|s| match (s.status, s.ended_at) {
         (Status::Done, Some(e)) => now.duration_since(e).map_or(true, |age| age < retention),
         _ => true,
@@ -326,7 +335,7 @@ mod tests {
     }
 
     fn merge(c: &[ClaudeSessionRecord], h: &[HookRecord], x: &[CmuxSessionRef], prev: &[Session]) -> Vec<Session> {
-        merge_sessions(c, h, x, now(), RET, prev)
+        merge_sessions(c, h, x, now(), RET, prev, None)
     }
 
     #[test]
@@ -455,17 +464,17 @@ mod tests {
         assert_eq!(first[0].status, Status::Running);
         // session vanished from all sources
         let t1 = now() + Duration::from_secs(10);
-        let second = merge_sessions(&[], &[], &[], t1, RET, &first);
+        let second = merge_sessions(&[], &[], &[], t1, RET, &first, None);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].status, Status::Done);
         assert_eq!(second[0].ended_at, Some(t1));
         // still within retention
         let t2 = t1 + Duration::from_secs(59);
-        let third = merge_sessions(&[], &[], &[], t2, RET, &second);
+        let third = merge_sessions(&[], &[], &[], t2, RET, &second, None);
         assert_eq!(third.len(), 1);
         // retention elapsed
         let t3 = t1 + RET;
-        assert!(merge_sessions(&[], &[], &[], t3, RET, &third).is_empty());
+        assert!(merge_sessions(&[], &[], &[], t3, RET, &third, None).is_empty());
     }
 
     #[test]
@@ -483,12 +492,12 @@ mod tests {
         let c = [cr("s1", 10, "busy", None)];
         let first = merge(&c, &[], &[cx("s1", true)], &[]);
         let t1 = now() + Duration::from_secs(5);
-        let done = merge_sessions(&c, &[], &[cx("s1", false)], t1, RET, &first);
+        let done = merge_sessions(&c, &[], &[cx("s1", false)], t1, RET, &first, None);
         assert_eq!(done[0].ended_at, Some(t1));
         let t2 = t1 + Duration::from_secs(20);
-        let again = merge_sessions(&c, &[], &[cx("s1", false)], t2, RET, &done);
+        let again = merge_sessions(&c, &[], &[cx("s1", false)], t2, RET, &done, None);
         assert_eq!(again[0].ended_at, Some(t1));
-        let gone = merge_sessions(&[], &[], &[], t2, RET, &done);
+        let gone = merge_sessions(&[], &[], &[], t2, RET, &done, None);
         assert_eq!(gone[0].ended_at, Some(t1));
     }
 
@@ -522,9 +531,9 @@ mod tests {
     fn merge_clock_skew_ended_in_future_keeps_session() {
         let first = merge(&[cr("s1", 10, "busy", None)], &[], &[cx("s1", true)], &[]);
         let later = now() + Duration::from_secs(100);
-        let done = merge_sessions(&[], &[], &[], later, RET, &first);
+        let done = merge_sessions(&[], &[], &[], later, RET, &first, None);
         // `now` earlier than ended_at must not panic and keeps the session
-        let out = merge_sessions(&[], &[], &[], now(), RET, &done);
+        let out = merge_sessions(&[], &[], &[], now(), RET, &done, None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].ended_at, Some(later));
     }
@@ -539,5 +548,57 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].status, Status::Running);
         assert_eq!(back[0].ended_at, None);
+    }
+
+    fn open(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn merge_drops_session_whose_surface_closed_even_if_recent_done() {
+        let c = [cr("s1", 10, "busy", None)];
+        let first = merge(&c, &[], &[cx("s1", true)], &[]);
+        // tab closed: claude died at once, cmux keeps the record (pid_exists=no)
+        let t1 = now() + Duration::from_secs(1);
+        let closed = merge_sessions(&[], &[], &[cx("s1", false)], t1, RET, &first, Some(&open(&["OTHER"])));
+        assert!(closed.is_empty(), "no Done tile for a closed tab: {closed:?}");
+        // a Done session still within retention goes as soon as its tab closes
+        let done = merge(&c, &[], &[cx("s1", false)], &first);
+        assert_eq!(done[0].status, Status::Done);
+        let gone = merge_sessions(&[], &[], &[], t1, RET, &done, Some(&open(&["OTHER"])));
+        assert!(gone.is_empty(), "{gone:?}");
+    }
+
+    #[test]
+    fn merge_drops_live_looking_session_when_surface_missing() {
+        let c = [cr("s1", 10, "busy", None), cr("s2", 11, "busy", None)];
+        let x = [cx_at("s1", "f1", true, None), cx_at("s2", "f2", true, None)];
+        let out = merge_sessions(&c, &[], &x, now(), RET, &[], Some(&open(&["F2"])));
+        assert_eq!(out.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s2"]);
+    }
+
+    #[test]
+    fn merge_keeps_session_when_surfaces_unknown() {
+        let c = [cr("s1", 10, "busy", None)];
+        let first = merge_sessions(&c, &[], &[cx("s1", true)], now(), RET, &[], None);
+        assert_eq!(first.len(), 1);
+        let done = merge_sessions(&c, &[], &[cx("s1", false)], now(), RET, &first, None);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].status, Status::Done, "normal exit behaviour, nothing dropped");
+    }
+
+    #[test]
+    fn merge_keeps_done_session_when_tab_still_open() {
+        let c = [cr("s1", 10, "busy", None)];
+        let first = merge(&c, &[], &[cx("s1", true)], &[]);
+        // surface ids compare case-insensitively ("f" vs "F")
+        let tab = open(&["F"]);
+        let done = merge_sessions(&c, &[], &[cx("s1", false)], now(), RET, &first, Some(&tab));
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].status, Status::Done);
+        assert_eq!(done[0].surface_id, "f", "kept for Enter to focus the still-open tab");
+        let later = merge_sessions(&[], &[], &[], now() + Duration::from_secs(30), RET, &done, Some(&tab));
+        assert_eq!(later.len(), 1, "still within retention");
+        assert!(merge_sessions(&[], &[], &[], now() + RET, RET, &later, Some(&tab)).is_empty());
     }
 }

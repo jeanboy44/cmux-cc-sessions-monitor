@@ -44,6 +44,10 @@ impl Cmux for BackgroundFocus {
         self.inner.sessions()
     }
 
+    fn surfaces(&self) -> Result<std::collections::HashSet<String>> {
+        self.inner.surfaces()
+    }
+
     /// Dispatches the focus to a worker thread; always returns `Ok(())` once
     /// dispatched. Exactly one [`FocusResult`] is delivered per call, also
     /// when the call panics.
