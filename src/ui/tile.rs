@@ -1,4 +1,4 @@
-//! Character-card tiles: thin rounded border, mascot, name, status badge, extras.
+//! Character-card tiles: thin rounded border, Braille mascot, name, status badge, extras.
 //!
 //! Minimum sizes (borders included), used by the app to compute columns:
 //! - view A (horizontal card): 26×6 — 4×2 mascot top-left, ≥19 text columns right.
@@ -334,8 +334,9 @@ mod tests {
         }
     }
 
+    /// A Braille mascot cell with at least one dot.
     fn is_pixel(c: char) -> bool {
-        matches!(c, '▀' | '▄' | '█')
+        ('\u{2801}'..='\u{28ff}').contains(&c)
     }
 
     fn tile(w: u16, h: u16, s: &Session, cfg: &Config, selected: bool, tick: u64, view: ViewKind) -> Vec<String> {
@@ -652,6 +653,59 @@ mod tests {
         assert!(rows[1].chars().nth(2) == Some('╭'), "{}", rows.join("\n"));
     }
 
+    /// `text` in 24-bit ANSI foreground `color` (other colors: plain).
+    fn ansi(text: &str, color: Option<ratatui::style::Color>) -> String {
+        match color {
+            Some(ratatui::style::Color::Rgb(r, g, b)) => format!("\x1b[38;2;{r};{g};{b}m{text}\x1b[0m"),
+            _ => text.to_string(),
+        }
+    }
+
+    /// Colored gallery for a real terminal: every status in both sizes over
+    /// a few ticks, the Done one-shot, and one tile per view.
+    /// Run with `cargo test dump_color_gallery -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_color_gallery() {
+        use crate::ui::mascot::{sprite, sprite_oneshot_done, SpriteSize};
+        let colored = |lines: &[Line]| -> Vec<String> {
+            lines.iter().map(|l| l.spans.iter().map(|s| ansi(&s.content, s.style.fg)).collect()).collect()
+        };
+        let row = |frames: Vec<Vec<String>>| {
+            for r in 0..frames[0].len() {
+                println!("  {}", frames.iter().map(|f| f[r].clone()).collect::<Vec<_>>().join("   "));
+            }
+        };
+        let statuses = [Status::Running, Status::NeedsInput, Status::Idle, Status::Done, Status::Unknown];
+        for size in [SpriteSize::Small, SpriteSize::Large] {
+            for st in statuses {
+                let len = crate::ui::mascot::loop_len(st);
+                let ticks: Vec<u64> = (0..len).step_by((len as usize / 6).max(1)).take(6).collect();
+                println!("{st:?} {size:?} ticks {ticks:?}");
+                row(ticks.iter().map(|t| colored(&sprite(st, size, *t))).collect());
+            }
+            println!("Done one-shot {size:?} ticks 0,2,4,6,8,12,15");
+            row([0, 2, 4, 6, 8, 12, 15].iter().map(|t| colored(&sprite_oneshot_done(size, *t))).collect());
+        }
+        for view in [ViewKind::A, ViewKind::B] {
+            let (w, h) = tile_size(view);
+            println!("tile view {view:?} {w}x{h}");
+            let buf = draw(w, h, |f| {
+                render_tile(f, f.area(), &session("proj-a", Status::Running), &Config::default(), false, 0, TileFx::default(), view)
+            });
+            for y in 0..h {
+                let mut line = String::new();
+                let mut x = 0;
+                while x < w {
+                    let cell = &buf[(x, y)];
+                    line.push_str(&ansi(cell.symbol(), Some(cell.fg)));
+                    x += unicode_width::UnicodeWidthStr::width(cell.symbol()).max(1) as u16;
+                }
+                println!("  {line}");
+            }
+        }
+    }
+
     /// Plain-text gallery of every sprite and both tile views.
     /// Run with `cargo test dump_gallery -- --ignored --nocapture`.
     #[test]
@@ -671,7 +725,7 @@ mod tests {
                         (0..len).step_by((len as usize / 6).max(2)).collect()
                     }
                 };
-                println!("== {st:?} {size:?} ticks {ticks:?} (pixels: o body = shade # dark * accent; then half-block cells)");
+                println!("== {st:?} {size:?} ticks {ticks:?} (pixels: o body = shade l shine # dark * accent; then Braille cells)");
                 let pix: Vec<Vec<String>> = ticks.iter().map(|t| gallery_pixels(st, size, *t)).collect();
                 for r in 0..pix[0].len() {
                     println!("{}", pix.iter().map(|p| p[r].clone()).collect::<Vec<_>>().join("   "));

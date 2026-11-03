@@ -194,8 +194,8 @@ mod tests {
         assert!(screen.contains(EMPTY_MESSAGE), "{screen}");
         assert!(screen.contains("SESSIONS 0"));
         assert!(screen.contains("q 종료"));
-        // the idle mascot is drawn above the message (half-block pixels)
-        assert!(screen.contains('▀') || screen.contains('▄') || screen.contains('█'));
+        // the idle mascot is drawn above the message (Braille dots)
+        assert!(screen.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "{screen}");
     }
 
     #[test]

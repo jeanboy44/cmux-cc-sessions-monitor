@@ -1,16 +1,18 @@
 //! "Pochi" — the monitor's own pixel mascot.
 //!
-//! Pochi is a tiny round mochi-dumpling sprite with a single antenna pixel
-//! off its top-right corner whose tip glows in the status accent color, two
-//! dot eyes and two stubby feet. The silhouette (body + antenna, no side
-//! arms) is deliberately different from Claude Code's mascot. Kept as small
-//! and flat as still reads: 4×4 px in view A, 6×6 px in view B; the status
-//! shows through color, eyes, the bob/jump and the `! z ? ✓` glyph.
+//! Pochi is a round mochi-dumpling sprite with a bent antenna whose tip
+//! glows in the status accent color, two dot eyes, a shine on the upper left
+//! and two stubby feet. The silhouette (dome body + antenna, no side arms,
+//! no flat top) is deliberately different from Claude Code's mascot.
 //!
-//! Sprites are drawn with half-block characters: every terminal cell holds two
-//! vertical pixels (`▀` fg = top pixel, bg = bottom pixel; `▄` for a lone
-//! bottom pixel; `█` for two equal pixels). Small glyphs (`!`, `z`, `?`, `✓`)
-//! are overlaid on free cells next to the head.
+//! Sprites keep the original pixel art (8×8 px small, 12×12 px large) and draw
+//! it with Unicode Braille cells, 2×4 dots per terminal cell, so the small one
+//! fits in 4×2 cells and the large one in 6×3. Mapping: body, shade, shine and
+//! accent pixels are "on" dots; transparent and dark (eye/mouth) pixels are
+//! "off", so the eyes show as holes. A cell has one color: the accent color
+//! when it holds an accent pixel (antenna tip, sparks), else the body color.
+//! Small glyphs (`!`, `z`, `?`, `✓`) replace a whole empty cell in the last
+//! column, next to the head; the art leaves that 2-px column free.
 //!
 //! Animation is a pure function of the 12 fps `tick`: a status owns a table of
 //! poses with hold durations, and the frame is `tick % loop_len`. Poses follow
@@ -23,12 +25,12 @@ use ratatui::text::{Line, Span};
 use crate::model::Status;
 use crate::ui::style;
 
-/// Sprite sizes in terminal cells (each cell = 1×2 pixels).
+/// Sprite sizes in terminal cells (each cell = 2×4 Braille dots = pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpriteSize {
-    /// 4×2 cells (4×4 px) — the view A character card.
+    /// 4×2 cells (8×8 px) — the view A character card.
     Small,
-    /// 6×3 cells (6×6 px) — the view B character card and the empty screen.
+    /// 6×3 cells (12×12 px) — the view B character card and the empty screen.
     Large,
 }
 
@@ -57,6 +59,7 @@ enum Px {
     Body,
     Shade,
     Dark,
+    Light,
     Accent,
 }
 
@@ -226,100 +229,69 @@ pub fn status_transition_fx(from: Status, to: Status, ticks_since_change: u64) -
     }
 }
 
+/// One body and one accent color per status (a Braille cell has one color).
 struct Palette {
     body: Color,
-    shade: Color,
-    dark: Color,
     accent: Color,
 }
 
 fn palette(status: Status) -> Palette {
-    let body = style::status_color(status);
-    match status {
-        Status::Running => Palette {
-            body,
-            shade: Color::Rgb(170, 80, 24),
-            dark: Color::Rgb(44, 26, 18),
-            accent: Color::Rgb(80, 176, 255),
-        },
-        Status::NeedsInput => Palette {
-            body,
-            shade: Color::Rgb(186, 134, 16),
-            dark: Color::Rgb(48, 34, 10),
-            accent: Color::Rgb(255, 84, 60),
-        },
-        Status::Idle => Palette {
-            body,
-            shade: Color::Rgb(92, 76, 64),
-            dark: Color::Rgb(44, 36, 30),
-            accent: Color::Rgb(150, 162, 196),
-        },
-        Status::Done => Palette {
-            body,
-            shade: Color::Rgb(40, 128, 70),
-            dark: Color::Rgb(16, 44, 26),
-            accent: Color::Rgb(255, 232, 110),
-        },
-        Status::Unknown => Palette {
-            body,
-            shade: Color::Rgb(96, 96, 96),
-            dark: Color::Rgb(44, 44, 44),
-            accent: Color::Rgb(210, 210, 210),
-        },
-    }
+    let accent = match status {
+        Status::Running => Color::Rgb(80, 176, 255),
+        Status::NeedsInput => Color::Rgb(255, 84, 60),
+        Status::Idle => Color::Rgb(150, 162, 196),
+        Status::Done => Color::Rgb(255, 232, 110),
+        Status::Unknown => Color::Rgb(210, 210, 210),
+    };
+    Palette { body: style::status_color(status), accent }
 }
 
-impl Palette {
-    fn color(&self, px: Px) -> Option<Color> {
-        match px {
-            Px::Clear => None,
-            Px::Body => Some(self.body),
-            Px::Shade => Some(self.shade),
-            Px::Dark => Some(self.dark),
-            Px::Accent => Some(self.accent),
-        }
-    }
-}
-
-/// Pixel geometry of one sprite size (coordinates in pixels, y down).
+/// Pixel geometry of one sprite size (coordinates in pixels, y down). The
+/// original art shifted one pixel left so the last 2-px column stays free
+/// for the overlay glyphs.
 struct Geo {
     w: i16,
     h: i16,
     tip: (i16, i16),
+    stem: Option<(i16, i16)>,
     body_top: i16,
     /// Inclusive x span per body row.
     rows: &'static [(i16, i16)],
+    /// Shine pixels (absolute, moved with the body).
+    light: &'static [(i16, i16)],
     /// y of the eye row at dy = 0.
     eye_y: i16,
     feet_y: i16,
     slots: &'static [(i16, i16)],
 }
 
-/// 6×6 px: 5-wide round body in columns 0..=4; column 5 stays free for glyphs.
+/// 12×12 px: 10-wide dome body, two-pixel bent antenna.
 const LARGE: Geo = Geo {
-    w: 6,
-    h: 6,
-    tip: (4, 0),
-    body_top: 1,
-    rows: &[(1, 3), (0, 4), (0, 4), (1, 3)],
-    eye_y: 2,
-    feet_y: 5,
-    // Fewer free pixels: slots 1 and 4 share the top-left corner.
-    slots: &[(5, 1), (0, 0), (5, 4), (5, 2), (0, 0), (5, 3), (0, 5), (5, 5), (2, 0)],
+    w: 12,
+    h: 12,
+    tip: (6, 1),
+    stem: Some((5, 2)),
+    body_top: 3,
+    rows: &[(2, 7), (1, 8), (0, 9), (0, 9), (0, 9), (0, 9), (1, 8), (2, 7)],
+    light: &[(2, 4), (1, 5)],
+    eye_y: 6,
+    feet_y: 11,
+    // Slots used together with a glyph (1, 3, 4, 5, 6, 7) avoid the glyph cell.
+    slots: &[(9, 0), (4, 1), (10, 2), (8, 0), (0, 3), (11, 5), (0, 11), (11, 9), (1, 1)],
 };
 
-/// 4×4 px: 3×2 body in columns 0..=2 (eyes on its top row), antenna tip
-/// above the right edge, feet below; column 3 stays free for glyphs/sparks.
+/// 8×8 px: 6-wide dome body, one-pixel antenna tip.
 const SMALL: Geo = Geo {
-    w: 4,
-    h: 4,
-    tip: (2, 0),
-    body_top: 1,
-    rows: &[(0, 2), (0, 2)],
-    eye_y: 1,
-    feet_y: 3,
-    // Slots used together with a glyph (1, 3, 4, 5, 6, 7) avoid the glyph cell.
-    slots: &[(3, 1), (0, 0), (3, 3), (1, 0), (0, 0), (3, 2), (3, 3), (3, 2), (1, 0)],
+    w: 8,
+    h: 8,
+    tip: (5, 1),
+    stem: None,
+    body_top: 2,
+    rows: &[(1, 4), (0, 5), (0, 5), (0, 5), (1, 4)],
+    light: &[(1, 3)],
+    eye_y: 4,
+    feet_y: 7,
+    slots: &[(7, 0), (4, 0), (7, 2), (7, 6), (0, 2), (7, 5), (0, 6), (7, 7), (0, 0)],
 };
 
 fn geo(size: SpriteSize) -> &'static Geo {
@@ -332,32 +304,33 @@ fn geo(size: SpriteSize) -> &'static Geo {
 /// Eye (and mouth) pixels as (x, offset from eye row).
 fn face(size: SpriteSize, eyes: Eyes) -> &'static [(i16, i16)] {
     match (size, eyes) {
-        (SpriteSize::Large, Open) => &[(1, 0), (3, 0)],
-        (SpriteSize::Large, Glance) => &[(2, 0), (4, 0)],
-        (SpriteSize::Large, Alert) => &[(1, 0), (1, 1), (3, 0), (3, 1)],
-        (SpriteSize::Large, Closed) => &[(0, 1), (1, 1), (3, 1), (4, 1)],
-        (SpriteSize::Large, Happy) => &[(1, -1), (3, -1), (2, 1)],
-        (SpriteSize::Large, Odd) => &[(1, 1), (3, 0)],
-        (SpriteSize::Small, Open) => &[(0, 0), (2, 0)],
-        (SpriteSize::Small, Glance) => &[(1, 0), (2, 0)],
-        (SpriteSize::Small, Alert) => &[(0, 0), (0, 1), (2, 0), (2, 1)],
-        (SpriteSize::Small, Closed) => &[(0, 1), (2, 1)],
-        (SpriteSize::Small, Happy) => &[(0, 0), (2, 0), (1, 1)],
-        (SpriteSize::Small, Odd) => &[(0, 1), (2, 0)],
+        (SpriteSize::Large, Open) => &[(2, 0), (2, 1), (7, 0), (7, 1)],
+        (SpriteSize::Large, Glance) => &[(3, 0), (3, 1), (8, 0), (8, 1)],
+        (SpriteSize::Large, Alert) => &[(2, 0), (3, 0), (2, 1), (3, 1), (6, 0), (7, 0), (6, 1), (7, 1), (4, 3), (5, 3)],
+        (SpriteSize::Large, Closed) => &[(1, 1), (2, 1), (7, 1), (8, 1)],
+        (SpriteSize::Large, Happy) => &[(1, 1), (2, 0), (3, 1), (6, 1), (7, 0), (8, 1), (4, 3), (5, 3)],
+        (SpriteSize::Large, Odd) => &[(2, 1), (7, 0), (7, 1)],
+        (SpriteSize::Small, Open) => &[(1, 0), (4, 0)],
+        (SpriteSize::Small, Glance) => &[(2, 0), (5, 0)],
+        (SpriteSize::Small, Alert) => &[(1, -1), (1, 0), (4, -1), (4, 0)],
+        (SpriteSize::Small, Closed) => &[(0, 0), (1, 0), (4, 0), (5, 0)],
+        (SpriteSize::Small, Happy) => &[(1, -1), (4, -1), (2, 1), (3, 1)],
+        (SpriteSize::Small, Odd) => &[(1, 1), (4, 0)],
     }
 }
 
 fn feet(size: SpriteSize, f: Feet) -> &'static [i16] {
     match (size, f) {
-        (SpriteSize::Large, Both) => &[1, 3],
-        (SpriteSize::Large, Spread) => &[0, 4],
-        (SpriteSize::Large, StepL) => &[2, 3],
-        (SpriteSize::Large, StepR) => &[1, 2],
-        (SpriteSize::Large, Tucked) => &[2],
-        (SpriteSize::Small, Both | Spread) => &[0, 2],
-        (SpriteSize::Small, StepL) => &[1, 2],
-        (SpriteSize::Small, StepR) => &[0, 1],
-        (SpriteSize::Small, Tucked) => &[1],
+        (SpriteSize::Large, Both) => &[2, 3, 6, 7],
+        (SpriteSize::Large, Spread) => &[1, 2, 7, 8],
+        (SpriteSize::Large, StepL) => &[3, 6, 7],
+        (SpriteSize::Large, StepR) => &[2, 3, 6],
+        (SpriteSize::Large, Tucked) => &[3, 6],
+        (SpriteSize::Small, Both) => &[1, 4],
+        (SpriteSize::Small, Spread) => &[0, 5],
+        (SpriteSize::Small, StepL) => &[2, 4],
+        (SpriteSize::Small, StepR) => &[1, 3],
+        (SpriteSize::Small, Tucked) => &[2, 3],
     }
 }
 
@@ -385,10 +358,16 @@ fn pixels(size: SpriteSize, p: &Pose) -> Vec<Vec<Px>> {
     };
     let dy = p.dy;
     put(g.tip.0, g.tip.1 + dy, if p.lit { Px::Accent } else { Px::Shade });
+    if let Some((x, y)) = g.stem {
+        put(x, y + dy, Px::Shade);
+    }
     for (i, (x0, x1)) in g.rows.iter().enumerate() {
         for x in *x0..=*x1 {
             put(x, g.body_top + dy + i as i16, Px::Body);
         }
+    }
+    for (x, y) in g.light {
+        put(*x, y + dy, Px::Light);
     }
     // Grounded feet stay put (a squash hides the body over them);
     // airborne feet hang right under the body.
@@ -396,7 +375,7 @@ fn pixels(size: SpriteSize, p: &Pose) -> Vec<Vec<Px>> {
     for x in feet(size, p.feet) {
         put(*x, fy, Px::Shade);
     }
-    // The face goes last so a squashed 4 px Pochi keeps its eyes.
+    // The face goes last so a squash never hides the eyes.
     for (x, off) in face(size, p.eyes) {
         put(*x, g.eye_y + dy + off, Px::Dark);
     }
@@ -412,17 +391,17 @@ fn to_lines(status: Status, size: SpriteSize, p: &Pose) -> Vec<Line<'static>> {
     let pal = palette(status);
     let grid = pixels(size, p);
     let glyph = p.glyph.map(|g| glyph_cell(size, g));
-    grid.chunks(2)
-        .enumerate()
-        .map(|(row, pair)| {
-            let spans = (0..pair[0].len())
+    let (cols, rows) = size.cells();
+    (0..usize::from(rows))
+        .map(|row| {
+            let spans = (0..usize::from(cols))
                 .map(|col| {
                     if let Some((gc, gr, text)) = glyph {
                         if gc == col && gr == row {
                             return Span::styled(text, Style::new().fg(pal.accent));
                         }
                     }
-                    cell(pal.color(pair[0][col]), pal.color(pair[1][col]))
+                    braille_cell(&pal, &grid, col, row)
                 })
                 .collect::<Vec<_>>();
             Line::from(spans)
@@ -430,18 +409,32 @@ fn to_lines(status: Status, size: SpriteSize, p: &Pose) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// One half-block cell from its top and bottom pixel colors.
-fn cell(top: Option<Color>, bottom: Option<Color>) -> Span<'static> {
-    match (top, bottom) {
-        (None, None) => Span::raw(" "),
-        (Some(t), None) => Span::styled("▀", Style::new().fg(t)),
-        (None, Some(b)) => Span::styled("▄", Style::new().fg(b)),
-        (Some(t), Some(b)) if t == b => Span::styled("█", Style::new().fg(t)),
-        (Some(t), Some(b)) => Span::styled("▀", Style::new().fg(t).bg(b)),
+/// Braille dot bit of the pixel at (dx, dy) inside a 2×4 cell.
+const DOT_BITS: [[u32; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+
+/// One Braille cell from the 2×4 pixels at cell (`col`, `row`): on dots for
+/// visible non-dark pixels, accent color if any accent pixel, else body.
+fn braille_cell(pal: &Palette, grid: &[Vec<Px>], col: usize, row: usize) -> Span<'static> {
+    let mut bits = 0;
+    let mut accent = false;
+    for (dy, line) in DOT_BITS.iter().enumerate() {
+        for (dx, bit) in line.iter().enumerate() {
+            let px = grid.get(row * 4 + dy).and_then(|r| r.get(col * 2 + dx)).copied().unwrap_or(Px::Clear);
+            if !matches!(px, Px::Clear | Px::Dark) {
+                bits |= bit;
+                accent |= px == Px::Accent;
+            }
+        }
     }
+    if bits == 0 {
+        return Span::raw(" ");
+    }
+    let c = char::from_u32(0x2800 + bits).unwrap_or(' ');
+    let fg = if accent { pal.accent } else { pal.body };
+    Span::styled(c.to_string(), Style::new().fg(fg))
 }
 
-/// Test-only pixel dump: `.` clear, `o` body, `=` shade, `#` dark, `*` accent.
+/// Test-only pixel dump: `.` clear, `o` body, `=` shade, `#` dark, `l` shine, `*` accent.
 #[cfg(test)]
 pub fn gallery_pixels(status: Status, size: SpriteSize, tick: u64) -> Vec<String> {
     let table = poses(status);
@@ -455,6 +448,7 @@ pub fn gallery_pixels(status: Status, size: SpriteSize, tick: u64) -> Vec<String
                     Px::Body => 'o',
                     Px::Shade => '=',
                     Px::Dark => '#',
+                    Px::Light => 'l',
                     Px::Accent => '*',
                 })
                 .collect()
@@ -553,13 +547,89 @@ mod tests {
         }
     }
 
+    /// Braille dots of a cell char as a 2x4 grid `[dy][dx]` (space = none).
+    fn dots(c: char) -> Option<[[bool; 2]; 4]> {
+        if c == ' ' {
+            return Some([[false; 2]; 4]);
+        }
+        let bits = (c as u32).checked_sub(0x2800).filter(|b| *b <= 0xff)?;
+        const BIT: [[u32; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+        let mut g = [[false; 2]; 4];
+        for (dy, row) in BIT.iter().enumerate() {
+            for (dx, b) in row.iter().enumerate() {
+                g[dy][dx] = bits & b != 0;
+            }
+        }
+        Some(g)
+    }
+
+    /// Pixel at (x, y) as drawn: whether its braille dot is on.
+    fn dot_at(lines: &[Line], x: usize, y: usize) -> bool {
+        let c = lines[y / 4].spans[x / 2].content.chars().next().unwrap();
+        dots(c).expect("braille or space")[y % 4][x % 2]
+    }
+
+    #[test]
+    fn sprites_are_braille_dots_at_the_original_resolution() {
+        for size in [SpriteSize::Small, SpriteSize::Large] {
+            for st in ALL {
+                for tick in 0..24 {
+                    for l in sprite(st, size, tick) {
+                        for sp in &l.spans {
+                            let c = sp.content.chars().next().unwrap();
+                            let glyph = matches!(c, '!' | 'z' | 'Z' | '?' | '✓');
+                            assert!(glyph || dots(c).is_some(), "{st:?} {size:?} {tick}: {c:?}");
+                        }
+                    }
+                }
+            }
+        }
+        // 8x8 px in 4x2 cells, 12x12 px in 6x3 cells
+        assert_eq!(gallery_pixels(Status::Running, SpriteSize::Small, 0).len(), 8);
+        assert_eq!(gallery_pixels(Status::Running, SpriteSize::Large, 0).len(), 12);
+        assert!(gallery_pixels(Status::Running, SpriteSize::Large, 0).iter().all(|r| r.chars().count() == 12));
+    }
+
+    #[test]
+    fn braille_dots_follow_the_pixels_and_eyes_are_holes() {
+        for size in [SpriteSize::Small, SpriteSize::Large] {
+            for st in ALL {
+                let px = gallery_pixels(st, size, 0);
+                let lines = sprite(st, size, 0);
+                let glyph_cells: Vec<(usize, usize)> = (0..lines.len())
+                    .flat_map(|r| (0..lines[r].spans.len()).map(move |c| (c, r)))
+                    .filter(|(c, r)| matches!(lines[*r].spans[*c].content.as_ref(), "!" | "z" | "Z" | "?" | "✓"))
+                    .collect();
+                for (y, row) in px.iter().enumerate() {
+                    for (x, p) in row.chars().enumerate() {
+                        if glyph_cells.contains(&(x / 2, y / 4)) {
+                            continue;
+                        }
+                        let on = !matches!(p, '.' | '#');
+                        assert_eq!(dot_at(&lines, x, y), on, "{st:?} {size:?} ({x},{y}) {p}");
+                    }
+                }
+                // the eyes are holes inside the body
+                assert!(px.iter().any(|r| r.contains('#')), "{st:?} {size:?} has eyes");
+            }
+        }
+        // one colour per cell: accent where an accent pixel is, else the body colour
+        let lines = sprite(Status::Running, SpriteSize::Small, 0);
+        let pal = palette(Status::Running);
+        let colors: Vec<_> = lines.iter().flat_map(|l| l.spans.iter().filter_map(|s| s.style.fg)).collect();
+        assert!(colors.contains(&pal.accent) && colors.contains(&pal.body));
+        assert!(colors.iter().all(|c| *c == pal.accent || *c == pal.body), "{colors:?}");
+    }
+
     #[test]
     fn small_sprite_keeps_body_eyes_and_a_free_glyph_column() {
-        // 4x4 px: body + dark eyes in columns 0..=2, column 3 free for glyphs.
+        // 8x8 px: dome body + dark eyes in columns 0..=5, columns 6-7 (the
+        // last cell) free for glyphs.
         for st in ALL {
             let px = gallery_pixels(st, SpriteSize::Small, 0);
-            assert_eq!(px.len(), 4);
-            assert!(px.iter().all(|r| r.chars().count() == 4));
+            assert_eq!(px.len(), 8);
+            assert!(px.iter().all(|r| r.chars().count() == 8));
+            assert!(px.iter().all(|r| r[6..].chars().all(|c| c == '.' || c == '*')), "{st:?}: {px:?}");
             let joined = px.join("");
             assert!(joined.contains('o') && joined.contains('#'), "{st:?}: {px:?}");
         }
@@ -653,8 +723,11 @@ mod tests {
                     if let Some(g) = p.glyph {
                         let (col, row, _) = glyph_cell(size, g);
                         let grid = pixels(size, p);
-                        assert_eq!(grid[row * 2][col], Px::Clear, "{st:?} {size:?} {g:?}");
-                        assert_eq!(grid[row * 2 + 1][col], Px::Clear, "{st:?} {size:?} {g:?}");
+                        for y in row * 4..row * 4 + 4 {
+                            for x in col * 2..col * 2 + 2 {
+                                assert_eq!(grid[y][x], Px::Clear, "{st:?} {size:?} {g:?} ({x},{y})");
+                            }
+                        }
                     }
                 }
             }
