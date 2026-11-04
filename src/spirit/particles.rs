@@ -51,7 +51,7 @@ fn ambient_on() -> bool {
 pub(super) fn simulate(ctx: &Ctx) -> Vec<Particle> {
     let window = element::max_life(ctx.elem) + 1;
     let start = ctx.t.saturating_sub(window);
-    let act = state::activity(ctx.state);
+    let act = state::activity_at(ctx.stage, ctx.state);
     let mut parts: Vec<Particle> = Vec::new();
     for u in start + 1..=ctx.t {
         for p in &mut parts {
@@ -63,7 +63,7 @@ pub(super) fn simulate(ctx: &Ctx) -> Vec<Particle> {
         }
         parts.retain(|p| element::keep(p, ctx.right));
         let mut r = Rng::for_tick(ctx.seed, u);
-        let cy = CY + state::bob(ctx.state, ctx.seed, super::phase_tick(u));
+        let cy = CY + state::bob_at(ctx.stage, ctx.state, ctx.seed, super::phase_tick(u));
         if ambient_on() {
             element::ambient(ctx.elem, act, cy, ctx.floor, &mut r, &mut parts);
         }

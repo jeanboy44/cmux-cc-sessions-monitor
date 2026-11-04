@@ -15,6 +15,9 @@
 //!   dot looks one sub-pixel toward the magic.
 //! - Casting pose (RUNNING): a short wind-up leaning toward the magic before
 //!   each cast and a small recoil on release (see `state::pose`).
+//! - Context stage ([`Stage`], same thresholds as [`Magic`]): relaxed spirits
+//!   barely move, lively ones are the reference look, struggling ones
+//!   tremble, pant and sweat (see `state::bob_at`, `state::sweat`).
 
 mod body;
 mod canvas;
@@ -90,6 +93,29 @@ pub fn magic_for(ctx_percent: Option<f32>) -> Magic {
         Some(p) if p >= MAGIC_NORMAL_AT => Magic::Normal,
         Some(_) => Magic::Small,
         None => Magic::Normal,
+    }
+}
+
+/// How hard the spirit works, driven by context usage with the same
+/// thresholds as [`Magic`] (which still scales the cast particles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Stage {
+    /// stage 1 (< 30 %): slow, tiny bob, calm churn, few ambient bits
+    Relaxed,
+    /// stage 2: the reference motion
+    #[default]
+    Lively,
+    /// stage 3 (>= 70 %): trembling, panting, sweat drops, effortful casts
+    Struggling,
+}
+
+/// Context stage for a context usage (see [`magic_for`]: < 30 % relaxed,
+/// 30..70 % lively, >= 70 % struggling; unknown or invalid usage is lively).
+pub fn stage_for(ctx_percent: Option<f32>) -> Stage {
+    match magic_for(ctx_percent) {
+        Magic::Small => Stage::Relaxed,
+        Magic::Normal => Stage::Lively,
+        Magic::Big => Stage::Struggling,
     }
 }
 
@@ -183,6 +209,8 @@ pub struct SpiritParams {
     pub warning: bool,
     /// strength of the cast magic (context usage)
     pub magic: Magic,
+    /// how hard the spirit works (context usage)
+    pub stage: Stage,
 }
 
 /// One terminal cell: a braille (or mark) glyph and its foreground colour.
@@ -218,6 +246,10 @@ struct Ctx {
     seed: u32,
     t: u64,
     tf: f32,
+    stage: Stage,
+    /// body clock (outline, churn, decorations): `t`/`tf` scaled by the stage
+    bt: u64,
+    btf: f32,
     /// outline animation speed of the state
     sp: f32,
     small: bool,
@@ -237,12 +269,16 @@ fn floor_y(g: &Geom) -> f32 {
 impl Ctx {
     fn new(p: &SpiritParams) -> Self {
         let g = geom_for(p.size, p.magic);
+        let (bt, btf) = state::body_clock(p.stage, p.tick);
         Ctx {
             elem: p.theme,
             state: p.status,
             seed: p.seed,
             t: p.tick,
             tf: phase_tick(p.tick),
+            stage: p.stage,
+            bt,
+            btf,
             sp: state::speed(p.status),
             small: g.small,
             floor: floor_y(&g),
@@ -260,7 +296,16 @@ pub fn render(p: &SpiritParams) -> SpiritGrid {
 
 /// Body bob plus the casting pose's vertical shift, in real sub-pixels.
 fn bob_px(ctx: &Ctx, g: &Geom, pose: &state::Pose) -> f32 {
-    (state::bob(ctx.state, ctx.seed, ctx.tf) * g.ppu).round() + pose.dy
+    (state::bob_at(ctx.stage, ctx.state, ctx.seed, ctx.tf) * g.ppu).round() + pose.dy
+}
+
+/// Casting pose plus the struggling tremble (added to the horizontal shift).
+fn pose_of(ctx: &Ctx) -> state::Pose {
+    let pose = state::pose_at(ctx.stage, ctx.elem, ctx.state, ctx.seed, ctx.t);
+    match ctx.stage {
+        Stage::Struggling => state::Pose { dx: pose.dx + state::tremble(ctx.stage, ctx.state, ctx.seed, ctx.t), ..pose },
+        Stage::Relaxed | Stage::Lively => pose,
+    }
 }
 
 /// Renders one frame; `bubbles: false` leaves the poison bubbles out (a seam
@@ -270,7 +315,7 @@ fn render_with(p: &SpiritParams, bubbles: bool) -> SpiritGrid {
     let ctx = Ctx::new(p);
     let parts = particles::simulate(&ctx);
     let pulse = state::pulse(ctx.state, ctx.tf);
-    let pose = state::pose(ctx.elem, ctx.state, ctx.seed, ctx.t);
+    let pose = pose_of(&ctx);
     let bob_px = bob_px(&ctx, &g, &pose);
     let look = body::Look {
         cy: CY + bob_px / g.ppu,
@@ -281,11 +326,13 @@ fn render_with(p: &SpiritParams, bubbles: bool) -> SpiritGrid {
         dx: pose.dx,
         tilt: pose.tilt,
         swell: pose.swell,
+        squash: state::squash(ctx.stage, ctx.state, ctx.seed, ctx.tf),
     };
     let mut cv = canvas::Canvas::new(g);
     body::draw(&mut cv, &ctx, &look);
     element::decorate(&mut cv, &ctx, look.cy);
     particles::draw(&mut cv, &parts);
+    state::sweat(&mut cv, &ctx, look.cy);
     magic::draw(&mut cv, &ctx, CY + (bob_px - pose.dy) / g.ppu);
     state::sparkles(&mut cv, &ctx);
     if bubbles {
@@ -302,7 +349,7 @@ fn render_with(p: &SpiritParams, bubbles: bool) -> SpiritGrid {
 fn bubble_spots(p: &SpiritParams) -> Vec<(i32, i32, element::Stage)> {
     let g = geom_for(p.size, p.magic);
     let ctx = Ctx::new(p);
-    let pose = state::pose(ctx.elem, ctx.state, ctx.seed, ctx.t);
+    let pose = pose_of(&ctx);
     let cy = CY + bob_px(&ctx, &g, &pose) / g.ppu;
     let cv = canvas::Canvas::new(g);
     element::bubble_spots(&cv, &ctx, CX + pose.dx / g.ppu, cy).into_iter().map(|(x, y, b)| (x, y, b.stage)).collect()
@@ -318,7 +365,7 @@ mod tests {
     const WHITE: Option<(u8, u8, u8)> = Some((255, 255, 255));
 
     fn params(theme: Theme, status: Status, size: Size, tick: u64, seed: u32) -> SpiritParams {
-        SpiritParams { theme, status, size, tick, seed, warning: false, magic: Magic::Normal }
+        SpiritParams { theme, status, size, tick, seed, warning: false, magic: Magic::Normal, stage: Stage::Lively }
     }
 
     fn cell(g: &SpiritGrid, col: u16, row: u16) -> &Cell {
@@ -1514,6 +1561,307 @@ mod tests {
         assert!(ds >= 0.33 * db, "small strike {s} too close vs big {b}");
     }
 
+    /// FNV-1a over every cell's glyph and colour.
+    fn grid_hash(g: &SpiritGrid) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut eat = |v: u32| {
+            for b in v.to_le_bytes() {
+                h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        eat(u32::from(g.cols) << 16 | u32::from(g.rows));
+        for c in &g.cells {
+            eat(c.ch as u32);
+            eat(c.fg.map_or(u32::MAX, |(r, gg, b)| u32::from(r) << 16 | u32::from(gg) << 8 | u32::from(b)));
+        }
+        h
+    }
+
+    /// (size, magic, tick, seed, warning) of the golden frames, rendered for
+    /// every element and state.
+    const GOLDEN_CASES: [(Size, Magic, u64, u32, bool); 8] = [
+        (Size::S, Magic::Normal, 0, 7, false),
+        (Size::S, Magic::Normal, 37, 7, false),
+        (Size::S, Magic::Normal, 121, 706_312_658, false),
+        (Size::M, Magic::Normal, 500, 3, false),
+        (Size::L, Magic::Big, 77, 11, false),
+        (Size::S, Magic::Small, 260, 41, false),
+        (Size::S, Magic::Big, 40_000_013, u32::MAX, false),
+        (Size::S, Magic::Normal, 16, 23, true),
+    ];
+
+    fn golden_params() -> Vec<SpiritParams> {
+        let mut out = Vec::new();
+        for theme in Theme::ALL {
+            for status in STATUSES {
+                for (size, magic, tick, seed, warning) in GOLDEN_CASES {
+                    out.push(SpiritParams { magic, warning, ..params(theme, status, size, tick, seed) });
+                }
+            }
+        }
+        out
+    }
+
+    /// Hashes of the golden frames, captured from the renderer before the
+    /// context stages existed (theme-major, then state, then `GOLDEN_CASES`).
+    #[rustfmt::skip]
+    const GOLDEN: [u64; 160] = [
+        0x3512407e8b3be050, 0x6f05d72037a67389, 0x593d1f6d2cb79959, 0xcbf0e1383ba0fa0f, 0xac4e96eb863a74c1, 0xe4e2d8155b511f11, 0xfc108cd1c4fb901d, 0xb290fc9e4fcf20ff,
+        0xe63151fe9a9034cc, 0x7a8ac6628408efd6, 0xe7c8d4a08b21e8dd, 0xa78308e8344bfc33, 0x593823a0b217a421, 0x3d7198f183a6f699, 0x6b7fdff6fb1ca679, 0x360e578976d6b475,
+        0xef4f5337fe84e25d, 0x9491d9830f79a16d, 0xfade110e02982b10, 0xb3cae76b73ec5f64, 0x1bbf5c77d2e7c756, 0xb35def89ef4ff9c9, 0xe1361db73402ebb5, 0xae106a39f3427582,
+        0xb07554c2511c01b3, 0x7c2ccbca01365697, 0x7324e7ce2c9bce28, 0xa4280c3f454ca467, 0x91eac22fa83d1bcf, 0xddb08feddde44f72, 0x7201e9d0b17de902, 0x0f45b90a4d2df7c3,
+        0x9f8f36f54ef0c55f, 0x3bc34a7c5a30173a, 0x795315231571603c, 0xac841e8c4f701af2, 0x2bd983eaf378328d, 0x4684d7e93e1ecf26, 0x263984a74cd48d43, 0x9033c7cabef7dcce,
+        0xe0f1d9d204dbb53b, 0x75abd2b428f26b72, 0xffff4d2229ca9ff2, 0xf0373225627c8fcd, 0x6226753d399883e4, 0x73ace2a07c91d87f, 0xf040ccee9aabc17c, 0xf80b6d7401705f37,
+        0x623cb10f33e21bd2, 0xb81b2bfc61e53c3b, 0xeba92b71721f1094, 0x856abff4dcb80e08, 0x37d6e13fa7a6f6d8, 0xcee480f5bb3ba604, 0xf74fc0ab09547254, 0x67fdef386bcdef4a,
+        0xd82350e5a41e871f, 0x6eda02e347dd31c1, 0x03f9c0c849cfb49c, 0xc0e10b81431aa916, 0xd021c09188dbd3c3, 0x6b4b5378291cb075, 0x5eab5e9a96b16fcf, 0x3e5bad230a45cfd7,
+        0xa98ffb855054ad80, 0x5e2ff43d23c35201, 0x12d998a33761e63a, 0x47de1dd41ee777b0, 0xdc6417a2c1fe9a9e, 0x97a0921451361b80, 0x4e4fcdacb9d69a47, 0xd63cde832ab3eb0e,
+        0x48397efc5c8c3b41, 0x21da5b3f472a49f0, 0xec21ee809d8c883b, 0x7cc2ad766f426d99, 0xf2c3f4f1bafe3b20, 0x4f3d4438efbd360d, 0x900a07b09bae5fb7, 0xf15983afbd5a66d6,
+        0x17ba577ce79f9d69, 0x30d2128280bd0b64, 0x7914a90bccb3c650, 0x8410f9bcb1a04fb3, 0x030af4f4ad66c349, 0x03d6036ebc155502, 0xec4c2e3ee21489d8, 0xe9de45a4aeac079e,
+        0x6e6f83e990bad121, 0xe8c937a5b5565162, 0x06b998dbd08c3922, 0x1de1bdf0cc3207fa, 0xdd9a20840cdd6d4f, 0xbf9b1e45c6f184c3, 0xfea08ed50dc958b6, 0xbdfa8d0c6164ec15,
+        0xaf99522f19ebd5d3, 0x7ed6f69b81fdce30, 0x59431f82976b233e, 0x153e240a19ecca34, 0xcdddb889d9b805a9, 0x91a61bcdb1643167, 0xb1e025b92ee2cecd, 0x3f47116c7a438ad6,
+        0x7850eb98fd19d4ac, 0x1505f53f641c81d0, 0x8bb55120b1e5e349, 0xebd099f4dc831e14, 0xba8e77ce1e06556f, 0x8244f1770964617e, 0xf70329b6cbe5386c, 0x8649e9e257ac4035,
+        0xc51a594a36d6eb0b, 0x0443307dc0b76eab, 0x86a09c1e3c1e4b46, 0x68408615ea11fe06, 0x25281e71e40a8a8f, 0x0c25d9cff723c5bf, 0x1ee0b525498642a6, 0xb35321a2a8c8dbf8,
+        0xef794c374d54696e, 0xd39652c7a2c18969, 0xba6346cfd3b9e32b, 0x208e0aa92cf22a0b, 0xb532387caa6bdd62, 0xb86910b66f35c897, 0x912f9416f8de1284, 0x4e1be45bde2e41fc,
+        0xfb3713c21a6230d7, 0xb33e274192e20762, 0xe8104ddd4a1dcb9a, 0x05b830092ef9969f, 0x6b76a9168c876604, 0x843fad5de4e5cdd0, 0x94a53e381b28374e, 0xbd018aafa4a4202f,
+        0x4b2bd8f000ed4f8e, 0xc742374a9609c975, 0xe5d5ea037ca3c896, 0xe3f620214d9bf044, 0xac416beafc647659, 0x9a84ac2dd347ba31, 0x8782b9b74e536aac, 0x108a70c8603a8625,
+        0xd722fa259fae0021, 0x769a96d2255c9b88, 0x8063af057cf6a7a6, 0x159cb7e91c52db52, 0x154ed869103fe1b3, 0x596551fe955412ba, 0x3126e2448821be5f, 0xc1d40b4db9a98e9a,
+        0xbdd86d15bb794e41, 0xaa80d38b83ba5833, 0x8b7c9e6147ebb050, 0xeed97e439df07233, 0x3468e1d313da2c43, 0xc9e7612e6d630db6, 0x4d6cbff1a0ca9ea6, 0x3333d3cd9698332f,
+    ];
+
+    #[test]
+    fn stage_two_matches_the_pre_stage_renders() {
+        let hashes: Vec<u64> = golden_params().iter().map(|p| grid_hash(&render(p))).collect();
+        if std::env::var("SPIRIT_GOLDEN_PRINT").is_ok() {
+            for chunk in hashes.chunks(8) {
+                println!("        {},", chunk.iter().map(|h| format!("0x{h:016x}")).collect::<Vec<_>>().join(", "));
+            }
+        }
+        for (i, (p, (got, want))) in golden_params().iter().zip(hashes.iter().zip(GOLDEN)).enumerate() {
+            assert_eq!(*got, want, "golden frame {i}: {p:?}");
+        }
+    }
+
+    fn staged(theme: Theme, status: Status, stage: Stage, tick: u64, seed: u32) -> SpiritParams {
+        SpiritParams { stage, ..params(theme, status, Size::S, tick, seed) }
+    }
+
+    #[test]
+    fn stage_for_thresholds() {
+        let cases: [(Option<f32>, Stage); 11] = [
+            (None, Stage::Lively),
+            (Some(f32::NAN), Stage::Lively),
+            (Some(-5.0), Stage::Lively),
+            (Some(0.0), Stage::Relaxed),
+            (Some(29.9), Stage::Relaxed),
+            (Some(30.0), Stage::Lively),
+            (Some(69.9), Stage::Lively),
+            (Some(70.0), Stage::Struggling),
+            (Some(95.0), Stage::Struggling),
+            (Some(100.0), Stage::Struggling),
+            (Some(f32::INFINITY), Stage::Struggling),
+        ];
+        for (pct, want) in cases {
+            assert_eq!(stage_for(pct), want, "{pct:?}");
+        }
+        assert_eq!(Stage::default(), Stage::Lively);
+        assert_eq!(params(Theme::Fire, Status::Running, Size::S, 0, 1).stage, Stage::Lively, "tests default to stage 2");
+    }
+
+    /// Like [`churn`], at a context stage and for any state: the mean share of
+    /// body cells (columns 0..7) that change between adjacent resting ticks.
+    fn stage_churn(theme: Theme, status: Status, stage: Stage, seed: u32) -> f32 {
+        let body = |t| {
+            let g = render(&staged(theme, status, stage, t, seed));
+            (0..g.rows).flat_map(|r| (0..7).map(move |c| (c, r))).map(|(c, r)| cell(&g, c, r).ch).collect::<Vec<char>>()
+        };
+        let resting = |t| status != Status::Running || state::cast_phase_at(stage, seed, t).is_none();
+        let pairs: Vec<(Vec<char>, Vec<char>)> = (100..340).filter(|&t| resting(t) && resting(t + 1)).map(|t| (body(t), body(t + 1))).collect();
+        let changed: usize = pairs.iter().map(|(a, b)| a.iter().zip(b).filter(|(a, b)| a != b).count()).sum();
+        changed as f32 / (pairs.len() * pairs[0].0.len()) as f32
+    }
+
+    #[test]
+    fn stages_calm_down_and_strain_the_body() {
+        for theme in Theme::ALL {
+            for status in [Status::Running, Status::NeedsInput] {
+                let mean = |stage| [4, 11, 706_312_658].iter().map(|&s| stage_churn(theme, status, stage, s)).sum::<f32>() / 3.0;
+                let (s1, s2, s3) = (mean(Stage::Relaxed), mean(Stage::Lively), mean(Stage::Struggling));
+                println!("{theme:?} {status:?}: churn relaxed {s1:.3} lively {s2:.3} struggling {s3:.3}");
+                assert!(s1 < s2 && s2 < s3, "{theme:?} {status:?}: {s1} < {s2} < {s3}");
+                if status == Status::Running {
+                    assert!(s1 <= 0.6 * s2, "{theme:?}: relaxed {s1} vs lively {s2}");
+                    assert!(s3 >= 1.3 * s2, "{theme:?}: struggling {s3} vs lively {s2}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stages_order_the_bob() {
+        let spread = |v: &[f32]| v.iter().cloned().fold(f32::MIN, f32::max) - v.iter().cloned().fold(f32::MAX, f32::min);
+        for seed in [4, 706_312_658] {
+            for status in [Status::Running, Status::NeedsInput, Status::Idle] {
+                let bob = |stage| (0..400).map(|t| state::bob_at(stage, status, seed, phase_tick(t))).collect::<Vec<f32>>();
+                let (b1, b2, b3) = (bob(Stage::Relaxed), bob(Stage::Lively), bob(Stage::Struggling));
+                assert!(spread(&b1) < spread(&b2) && spread(&b2) < spread(&b3), "{seed} {status:?}: {} {} {}", spread(&b1), spread(&b2), spread(&b3));
+                assert_eq!(b2, (0..400).map(|t| state::bob(status, seed, phase_tick(t))).collect::<Vec<f32>>(), "stage 2 bob unchanged");
+            }
+            // a struggling idle spirit slumps (sits lower on average)
+            let mean = |stage| (0..400).map(|t| state::bob_at(stage, Status::Idle, seed, phase_tick(t))).sum::<f32>() / 400.0;
+            assert!(mean(Stage::Struggling) > mean(Stage::Lively) + 0.3, "{seed}: idle slump");
+            // the panting faster than the lively bob: more direction changes
+            let turns = |stage| {
+                let b: Vec<f32> = (0..400).map(|t| state::bob_at(stage, Status::Running, seed, phase_tick(t))).collect();
+                b.windows(3).filter(|w| (w[1] - w[0]) * (w[2] - w[1]) < 0.0).count()
+            };
+            assert!(turns(Stage::Relaxed) < turns(Stage::Lively) && turns(Stage::Lively) < turns(Stage::Struggling), "{seed}: bob tempo");
+        }
+        // the rendered body: its vertical centroid wanders least when relaxed, most when struggling
+        for theme in Theme::ALL {
+            let centroid = |stage, t| {
+                let d: Vec<f32> = dots(&render(&staged(theme, Status::Running, stage, t, 4))).iter().filter(|p| p.0 < 12).map(|p| p.1 as f32).collect();
+                d.iter().sum::<f32>() / d.len().max(1) as f32
+            };
+            let sd = |stage| {
+                let v: Vec<f32> = (100..300).map(|t| centroid(stage, t)).collect();
+                let m = v.iter().sum::<f32>() / v.len() as f32;
+                (v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / v.len() as f32).sqrt()
+            };
+            let (r1, r2, r3) = (sd(Stage::Relaxed), sd(Stage::Lively), sd(Stage::Struggling));
+            println!("{theme:?}: body centroid sd relaxed {r1:.3} lively {r2:.3} struggling {r3:.3}");
+            assert!(r1 < r2 && r2 < r3, "{theme:?}: body bob relaxed {r1} < lively {r2} < struggling {r3}");
+        }
+    }
+
+    #[test]
+    fn struggling_spirits_sweat_drops_that_fall_and_fade() {
+        for seed in [4, 11, 706_312_658] {
+            for status in [Status::Running, Status::NeedsInput] {
+                let mut lives = 0;
+                let mut run: Vec<(i32, i32)> = Vec::new();
+                for t in 0..400u64 {
+                    let p = staged(Theme::Water, status, Stage::Struggling, t, seed);
+                    let drops = state::sweat_drops(&Ctx::new(&p), &geom_for(p.size, p.magic), CY);
+                    assert!(drops.len() <= 1, "{seed} {t}: one drop at a time");
+                    match drops.first() {
+                        Some(&(x, y, _)) => run.push((x, y)),
+                        None if !run.is_empty() => {
+                            // a whole drop: it slides down the side and is gone
+                            assert!(run.windows(2).all(|w| w[1].1 >= w[0].1), "{seed} {status:?}: {run:?}");
+                            assert!(run.last().unwrap().1 >= run[0].1 + 3, "{seed} {status:?}: falls {run:?}");
+                            lives += 1;
+                            run.clear();
+                        }
+                        None => {}
+                    }
+                    for stage in [Stage::Relaxed, Stage::Lively] {
+                        let q = SpiritParams { stage, ..p };
+                        assert!(state::sweat_drops(&Ctx::new(&q), &geom_for(q.size, q.magic), CY).is_empty(), "{stage:?}: no sweat");
+                    }
+                }
+                assert!(lives >= 10, "{seed} {status:?}: {lives} drops");
+            }
+            // on the grid: a drop paints its dot left of the body in a pale blue-white
+            let mut seen = 0;
+            for t in 0..200u64 {
+                for theme in Theme::ALL {
+                    let p = staged(theme, Status::Running, Stage::Struggling, t, seed);
+                    let g = render(&p);
+                    let ctx = Ctx::new(&p);
+                    let gm = geom_for(p.size, p.magic);
+                    let pose = state::pose_at(p.stage, ctx.elem, ctx.state, ctx.seed, ctx.t);
+                    let cy = CY + bob_px(&ctx, &gm, &pose) / gm.ppu;
+                    for (x, y, _) in state::sweat_drops(&ctx, &gm, cy) {
+                        let c = cell(&g, (x / 2) as u16, (y / 4) as u16);
+                        if dots(&g).contains(&(x, y)) && c.fg.is_some_and(|(r, gg, b)| b > r && b >= gg && b < 255) {
+                            seen += 1;
+                        }
+                    }
+                }
+            }
+            assert!(seen > 30, "{seed}: sweat drops on the grid ({seen})");
+        }
+    }
+
+    #[test]
+    fn struggling_casts_wind_up_longer_and_recoil_harder() {
+        for seed in [4, 11, 706_312_658] {
+            let c = (20..).find(|&t| state::casts_at(seed, t)).expect("cast");
+            assert_eq!(state::cast_phase_at(Stage::Struggling, seed, c - 5), Some(state::CastPhase::WindUp(0)), "{seed}: five wind-up frames");
+            assert_eq!(state::cast_phase_at(Stage::Lively, seed, c - 5), None);
+            for theme in Theme::ALL {
+                let recoil = |stage| state::pose_at(stage, theme, Status::Running, seed, c).dx;
+                assert!(recoil(Stage::Struggling) < recoil(Stage::Lively), "{theme:?}: stronger recoil");
+                for t in c - 3..c + 2 {
+                    assert_eq!(state::cast_phase_at(Stage::Lively, seed, t), state::cast_phase(seed, t));
+                    assert_eq!(state::pose_at(Stage::Lively, theme, Status::Running, seed, t), state::pose(theme, Status::Running, seed, t));
+                }
+            }
+        }
+        // relaxed: the pose comes on some casts only, and gentler
+        for theme in Theme::ALL {
+            let (mut posed, mut casts) = (0, 0);
+            for seed in 1..40u32 {
+                for c in (1..300).filter(|&t| state::casts_at(seed, t)) {
+                    casts += 1;
+                    let p = state::pose_at(Stage::Relaxed, theme, Status::Running, seed, c);
+                    if p.facing {
+                        posed += 1;
+                        assert!(p.dx.abs() < state::pose(theme, Status::Running, seed, c).dx.abs(), "{theme:?}: gentler recoil");
+                    }
+                }
+            }
+            assert!(posed * 10 >= casts * 2 && posed * 10 <= casts * 7, "{theme:?}: posed on {posed} of {casts} casts");
+        }
+    }
+
+    #[test]
+    fn eyes_keep_their_structure_in_every_stage() {
+        for seed in [1, 9, 706_312_658] {
+            for stage in [Stage::Relaxed, Stage::Lively, Stage::Struggling] {
+                for (theme, status) in Theme::ALL.into_iter().flat_map(|t| STATUSES.map(|s| (t, s))) {
+                    for t in (0..160).filter(|&t| !eyes::blinking(seed, t)) {
+                        let g = render(&staged(theme, status, stage, t, seed));
+                        let white = white_cells(&g);
+                        assert_eq!(white.len(), 2, "{theme:?} {status:?} {stage:?} {t}: {white:?}");
+                        assert_eq!(white[0].1, white[1].1, "eyes on one row");
+                        let base = white_cells(&render(&staged(theme, Status::Idle, Stage::Lively, t, seed)));
+                        let cells = |w: &[(u16, u16, char)]| w.iter().map(|&(c, r, _)| (c, r)).collect::<Vec<_>>();
+                        assert_eq!(cells(&white), cells(&base), "{theme:?} {status:?} {stage:?} {t}: same eye cells");
+                        assert!(white.iter().all(|w| matches!(w.2, '\u{2802}' | '\u{2810}')), "{white:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stages_keep_the_cues_and_never_panic() {
+        let ticks = [0, 1, 2, 3, 37, 4_000_000_000, u64::MAX - 3, u64::MAX - 1, u64::MAX];
+        for stage in [Stage::Relaxed, Stage::Lively, Stage::Struggling] {
+            for (theme, status) in Theme::ALL.into_iter().flat_map(|t| STATUSES.map(|s| (t, s))) {
+                for size in Size::ALL {
+                    for magic in Magic::ALL {
+                        for (tick, seed) in ticks.iter().flat_map(|&t| [0, 1, u32::MAX].map(|s| (t, s))) {
+                            let p = SpiritParams { stage, magic, warning: tick % 2 == 0, ..params(theme, status, size, tick, seed) };
+                            let g = render(&p);
+                            assert_eq!(g, render(&p), "deterministic");
+                            assert_eq!((g.cols, g.rows), grid_size_for(size, magic), "{p:?}: inside the canvas");
+                            assert_eq!(g.cells.len(), usize::from(g.cols) * usize::from(g.rows));
+                        }
+                    }
+                }
+            }
+            for (theme, size) in Theme::ALL.into_iter().flat_map(|t| Size::ALL.map(|s| (t, s))) {
+                for t in 0..60 {
+                    let q = |status| chars(&render(&SpiritParams { stage, ..params(theme, status, size, t, 2) }));
+                    assert_eq!(q(Status::NeedsInput).iter().filter(|c| c.2 == '?').count(), 1, "{stage:?} {theme:?} {size:?} {t}: ?");
+                    assert!(q(Status::Idle).iter().any(|c| c.2 == 'z' || c.2 == 'Z'), "{stage:?} {theme:?} {size:?} {t}: z");
+                }
+            }
+        }
+    }
+
     /// Every element x state as ANSI text. Run with
     /// `cargo test dump_spirits -- --ignored --nocapture` (env `SPIRIT_TICK`, `SPIRIT_SIZE` = 0..2).
     #[test]
@@ -1579,6 +1927,38 @@ mod tests {
             for magic in [Magic::Normal, Magic::Big] {
                 let frames: Vec<(String, SpiritGrid)> = [c + 3, c + 6, c + 10].iter().map(|&t| (format!("{magic:?} t{t}"), at(t, magic))).collect();
                 show(&format!("{theme:?} {magic:?}"), &frames);
+            }
+        }
+    }
+
+    /// Prints running frames of every element at each context stage (stage
+    /// and magic follow the same ctx level), several ticks apart
+    /// (`cargo test dump_stages -- --ignored --nocapture`; `SPIRIT_STATUS=idle|input|done`,
+    /// `SPIRIT_COLS=…` for the card's magic area).
+    #[test]
+    #[ignore]
+    fn dump_stages() {
+        let status = match std::env::var("SPIRIT_STATUS").as_deref() {
+            Ok("idle") => Status::Idle,
+            Ok("input") => Status::NeedsInput,
+            Ok("done") => Status::Done,
+            _ => Status::Running,
+        };
+        let ticks = [60u64, 61, 62, 63, 64, 66];
+        for theme in Theme::ALL {
+            for (stage, magic) in [(Stage::Relaxed, Magic::Small), (Stage::Lively, Magic::Normal), (Stage::Struggling, Magic::Big)] {
+                println!("{theme:?} {stage:?} {status:?}");
+                let grids: Vec<SpiritGrid> = ticks.iter().map(|&t| render(&SpiritParams { stage, magic, ..params(theme, status, Size::S, t, 4) })).collect();
+                for row in 0..4 {
+                    let mut line = String::new();
+                    for g in &grids {
+                        for col in 0..g.cols {
+                            line.push(cell(g, col, row).ch);
+                        }
+                        line += &" ".repeat(19 - usize::from(g.cols));
+                    }
+                    println!("{line}");
+                }
             }
         }
     }

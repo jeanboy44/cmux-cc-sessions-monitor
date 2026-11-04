@@ -25,6 +25,8 @@ pub(super) struct Look {
     pub dx: f32,
     pub tilt: f32,
     pub swell: f32,
+    /// vertical stretch (1: none; a struggling spirit pants), narrower as it stretches
+    pub squash: f32,
 }
 
 /// Shade tone (index into the ramp) of a body dot.
@@ -83,7 +85,7 @@ pub(super) fn draw(cv: &mut Canvas, ctx: &Ctx, look: &Look) {
         for rx in 0..g.w {
             let u = CX + (rx as f32 + 0.5 - g.rcx - shift) / g.ppu;
             let v = CY + (ry as f32 + 0.5 - g.rcy) / g.ppu;
-            let (dx, dy) = (u - CX, v - cy);
+            let (dx, dy) = ((u - CX) * look.squash, (v - cy) / look.squash);
             let dist = (dx * dx + dy * dy).sqrt();
             let th = dy.atan2(dx);
             let r = element::radius(ctx, th) * look.swell;

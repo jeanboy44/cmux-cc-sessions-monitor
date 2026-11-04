@@ -158,6 +158,7 @@ fn render_full(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: b
         seed: seed_for(s),
         warning: spirit::warning(s.ctx_percent),
         magic: spirit::magic_for(s.ctx_percent),
+        stage: spirit::stage_for(s.ctx_percent),
     };
     draw_spirit(f.buffer_mut(), band, &params);
 
@@ -445,7 +446,7 @@ mod tests {
         for size in Size::ALL {
             for magic in Magic::ALL {
                 for tick in [0, 30, 61] {
-                    let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick, seed: 1, warning: false, magic };
+                    let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick, seed: 1, warning: false, magic, stage: Default::default() };
                     let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
                     let at = draw_spirit(&mut buf, band, &params);
                     let (w, h) = spirit::grid_size_for(size, magic);
@@ -464,7 +465,7 @@ mod tests {
         }
         // a band too narrow for the pad still draws inside it
         let narrow = Rect::new(1, 1, 5, SCENE_ROWS);
-        let params = SpiritParams { theme: Theme::Fire, status: Status::Running, size: Size::S, tick: 30, seed: 1, warning: false, magic: Magic::Big };
+        let params = SpiritParams { theme: Theme::Fire, status: Status::Running, size: Size::S, tick: 30, seed: 1, warning: false, magic: Magic::Big, stage: Default::default() };
         let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
         let at = draw_spirit(&mut buf, narrow, &params);
         assert!(at.x >= narrow.x && at.right() <= narrow.right());
@@ -476,7 +477,7 @@ mod tests {
         for theme in Theme::ALL {
             for status in [Status::Idle, Status::Running] {
                 for magic in Magic::ALL {
-                    let params = SpiritParams { theme, status, size: Size::S, tick: 3, seed: 1, warning: false, magic };
+                    let params = SpiritParams { theme, status, size: Size::S, tick: 3, seed: 1, warning: false, magic, stage: Default::default() };
                     let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
                     draw_spirit(&mut buf, band, &params);
                     let lo = (0..CARD_W)
@@ -508,7 +509,8 @@ mod tests {
             s.ctx_percent = pct;
             s
         };
-        // Idle casts nothing: the spirit is the same at every ctx level
+        // Idle casts nothing: the spirit covers the same columns at every ctx level
+        // (the ctx stage changes how it moves, not where it sits)
         let idle: Vec<_> = [None, Some(10.0), Some(50.0), Some(80.0)].into_iter().map(|p| lit_cols(&with(Status::Idle, p), 0)).collect();
         assert!(idle.windows(2).all(|w| w[0] == w[1]), "body unchanged: {idle:?}");
         // Running: the magic reaches farther as ctx grows; unknown ctx = normal magic

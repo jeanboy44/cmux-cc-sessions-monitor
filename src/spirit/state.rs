@@ -3,10 +3,10 @@
 
 use crate::model::Status;
 
-use super::canvas::{lerp, mul, Canvas, Rgb, CARD_BG};
-use super::noise::{seed_phase, slot};
+use super::canvas::{lerp, mul, Canvas, Geom, Rgb, CARD_BG};
+use super::noise::{hf, seed_phase, slot};
 use super::theme::Theme;
-use super::{Ctx, SpiritGrid, BASE_R};
+use super::{Ctx, SpiritGrid, Stage, BASE_R, CY};
 
 /// Animation speed of the body outline.
 pub(super) fn speed(s: Status) -> f32 {
@@ -30,6 +30,28 @@ pub(super) fn activity(s: Status) -> f32 {
     }
 }
 
+/// Ambient particle rate multiplier at a context stage: a relaxed spirit
+/// gives off half as many bits.
+pub(super) fn activity_at(stage: Stage, s: Status) -> f32 {
+    match stage {
+        Stage::Relaxed => activity(s) * 0.5,
+        Stage::Lively | Stage::Struggling => activity(s),
+    }
+}
+
+/// The body clock (integer tick, f32 phase) that drives the outline, the
+/// element's churn and its decorations: real time at stage 2, 0.4x when
+/// relaxed and 2x when struggling. Cast schedules, blinks and marks keep
+/// real time.
+pub(super) fn body_clock(stage: Stage, t: u64) -> (u64, f32) {
+    let tf = super::phase_tick(t);
+    match stage {
+        Stage::Lively => (t, tf),
+        Stage::Relaxed => (t / 5 * 2 + t % 5 * 2 / 5, tf * 0.4),
+        Stage::Struggling => (t.wrapping_mul(2), tf * 2.0),
+    }
+}
+
 /// Vertical body offset in design units.
 pub(super) fn bob(s: Status, seed: u32, tf: f32) -> f32 {
     let ph = seed_phase(seed, 0xB0B);
@@ -39,6 +61,46 @@ pub(super) fn bob(s: Status, seed: u32, tf: f32) -> f32 {
         Status::Idle => (tf * 0.05 + ph).sin(),
         Status::Done => 0.6 - 1.2 * (tf * 0.12 + ph).sin().abs(),
         Status::Unknown => 0.6 * (tf * 0.04 + ph).sin(),
+    }
+}
+
+/// Vertical body offset in design units at a context stage: stage 2 is
+/// [`bob`]; relaxed is a slow, tiny bob; struggling pants (faster, deeper)
+/// and, when idle, slumps low with heavy slow breaths.
+pub(super) fn bob_at(stage: Stage, s: Status, seed: u32, tf: f32) -> f32 {
+    let ph = seed_phase(seed, 0xB0B);
+    match (stage, s) {
+        (Stage::Lively, _) | (_, Status::Unknown) => bob(s, seed, tf),
+        (Stage::Relaxed, Status::Running) => 0.4 * (tf * 0.12 + ph).sin(),
+        (Stage::Relaxed, Status::NeedsInput) => 0.4 * (tf * 0.1 + ph).sin(),
+        (Stage::Relaxed, Status::Idle) => 0.5 * (tf * 0.035 + ph).sin(),
+        (Stage::Relaxed, Status::Done) => 0.3 - 0.6 * (tf * 0.08 + ph).sin().abs(),
+        (Stage::Struggling, Status::Running) => 1.5 * (tf * 0.62 + ph).sin(),
+        (Stage::Struggling, Status::NeedsInput) => 1.4 * (tf * 0.45 + ph).sin(),
+        (Stage::Struggling, Status::Idle) => 0.7 + 1.2 * (tf * 0.06 + ph).sin(),
+        (Stage::Struggling, Status::Done) => bob(s, seed, tf),
+    }
+}
+
+/// Vertical stretch of the body (1: none): a struggling spirit squashes and
+/// stretches a little with each pant or heavy breath.
+pub(super) fn squash(stage: Stage, s: Status, seed: u32, tf: f32) -> f32 {
+    let ph = seed_phase(seed, 0xB0B);
+    match (stage, s) {
+        (Stage::Struggling, Status::Running) => 1.0 + 0.07 * (tf * 0.62 + ph).cos(),
+        (Stage::Struggling, Status::NeedsInput) => 1.0 + 0.06 * (tf * 0.45 + ph).cos(),
+        (Stage::Struggling, Status::Idle) => 1.0 + 0.05 * (tf * 0.06 + ph).cos(),
+        _ => 1.0,
+    }
+}
+
+/// Horizontal trembling of a struggling, busy body in real sub-pixels (0 or 1).
+pub(super) fn tremble(stage: Stage, s: Status, seed: u32, t: u64) -> f32 {
+    let busy = matches!(s, Status::Running | Status::NeedsInput);
+    if stage == Stage::Struggling && busy && hf(seed ^ 0x7E3B, t as u32 ^ (t >> 32) as u32) >= 0.5 {
+        1.0
+    } else {
+        0.0
     }
 }
 
@@ -69,9 +131,19 @@ pub(super) fn casts_at(seed: u32, t: u64) -> bool {
     t % CAST_WINDOW == slot(seed, 0xCA57, t / CAST_WINDOW, CAST_JITTER)
 }
 
-/// Frames of the casting wind-up before each cast and of the release from it.
+/// Frames of the casting wind-up before each cast and of the release from it
+/// (stage 2; a struggling spirit strains longer, see [`timing`]).
 const WIND_UP: u64 = 3;
 const RELEASE: u64 = 2;
+
+/// (wind-up, release) frames at a context stage. Casts are at least 12 ticks
+/// apart, so the phases of two casts never overlap.
+fn timing(stage: Stage) -> (u64, u64) {
+    match stage {
+        Stage::Struggling => (5, 3),
+        Stage::Relaxed | Stage::Lively => (WIND_UP, RELEASE),
+    }
+}
 
 /// Where a running spirit is in its cast timeline (the same schedule that
 /// spawns the magic: the magic appears on `Release(0)`).
@@ -87,12 +159,19 @@ pub(super) enum CastPhase {
 /// Casts are at least 12 ticks apart, so phases never overlap. Tick 0 never
 /// casts (the magic and particles start at tick 1).
 pub(super) fn cast_phase(seed: u32, t: u64) -> Option<CastPhase> {
-    for k in 0..RELEASE {
+    cast_phase_at(Stage::Lively, seed, t)
+}
+
+/// [`cast_phase`] at a context stage (a struggling spirit winds up for 5
+/// frames and recoils for 3).
+pub(super) fn cast_phase_at(stage: Stage, seed: u32, t: u64) -> Option<CastPhase> {
+    let (wind_up, release) = timing(stage);
+    for k in 0..release {
         if t >= k + 1 && casts_at(seed, t - k) {
             return Some(CastPhase::Release(k as u8));
         }
     }
-    (1..=WIND_UP).find(|&k| casts_at(seed, t + k)).map(|k| CastPhase::WindUp((WIND_UP - k) as u8))
+    (1..=wind_up).find(|&k| t.checked_add(k).is_some_and(|u| casts_at(seed, u))).map(|k| CastPhase::WindUp((wind_up - k) as u8))
 }
 
 /// Body pose while casting, in real sub-pixels.
@@ -116,11 +195,51 @@ impl Pose {
 
 /// Casting pose of a running spirit: a short wind-up leaning toward the
 /// magic, then a one sub-pixel recoil on release, flavoured per element.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn pose(elem: Theme, status: Status, seed: u32, t: u64) -> Pose {
     if status != Status::Running {
         return Pose::REST;
     }
-    let Some(phase) = cast_phase(seed, t) else { return Pose::REST };
+    match cast_phase(seed, t) {
+        Some(phase) => phase_pose(elem, phase),
+        None => Pose::REST,
+    }
+}
+
+/// [`pose`] at a context stage. Relaxed: on about half the casts only, at
+/// half strength. Struggling: the wind-up holds its first (gathering) look
+/// for two extra frames, and the recoil is twice as strong.
+pub(super) fn pose_at(stage: Stage, elem: Theme, status: Status, seed: u32, t: u64) -> Pose {
+    if status != Status::Running {
+        return Pose::REST;
+    }
+    let Some(phase) = cast_phase_at(stage, seed, t) else { return Pose::REST };
+    match stage {
+        Stage::Lively => phase_pose(elem, phase),
+        Stage::Relaxed => {
+            let cast = match phase {
+                CastPhase::WindUp(f) => t.saturating_add(WIND_UP - u64::from(f)),
+                CastPhase::Release(k) => t - u64::from(k),
+            };
+            if hf(seed ^ 0xCA11, cast as u32 ^ (cast >> 32) as u32) >= 0.5 {
+                return Pose::REST;
+            }
+            let p = phase_pose(elem, phase);
+            Pose { dx: p.dx * 0.5, dy: p.dy * 0.5, tilt: p.tilt * 0.5, swell: 1.0 + (p.swell - 1.0) * 0.5, ..p }
+        }
+        Stage::Struggling => match phase {
+            CastPhase::WindUp(f) => phase_pose(elem, CastPhase::WindUp(f.saturating_sub(2))),
+            CastPhase::Release(k @ (0 | 1)) => {
+                let p = phase_pose(elem, CastPhase::Release(k));
+                Pose { dx: p.dx * 2.0, dy: p.dy * 2.0, tilt: p.tilt * 1.5, swell: 1.0 + (p.swell - 1.0) * 2.0, ..p }
+            }
+            CastPhase::Release(_) => phase_pose(elem, CastPhase::Release(1)),
+        },
+    }
+}
+
+/// Stage-2 pose for one cast phase, flavoured per element.
+fn phase_pose(elem: Theme, phase: CastPhase) -> Pose {
     let p = Pose { facing: true, ..Pose::REST };
     match (elem, phase) {
         // fire: leans in mouth-first, the top of the body ahead
@@ -136,6 +255,43 @@ pub(super) fn pose(elem: Theme, status: Status, seed: u32, t: u64) -> Pose {
         // lightning: crouches, then jolts up and back
         (Theme::Lightning, CastPhase::WindUp(_)) => Pose { dx: 1.0, dy: 1.0, ..p },
         (Theme::Lightning, CastPhase::Release(f)) => Pose { dx: -1.0, dy: if f == 0 { -1.0 } else { 0.0 }, ..p },
+    }
+}
+
+/// Pale blue-white of a sweat drop (never pure white: the eyes stay unique).
+const SWEAT: Rgb = [175., 215., 250.];
+/// A struggling spirit sweats one drop per window, at a seeded offset.
+const SWEAT_WINDOW: u64 = 19;
+const SWEAT_LIFE: u64 = 7;
+
+/// Sweat drops of a struggling, busy spirit as (x, y, fade in [0, 1]) in
+/// real sub-pixels: a drop starts on the upper left of the body and slides
+/// down its side (about one and a half cells) while it fades. `cy`: body
+/// centre y in design units. Empty at the other stages and states.
+pub(super) fn sweat_drops(ctx: &Ctx, g: &Geom, cy: f32) -> Vec<(i32, i32, f32)> {
+    if ctx.stage != Stage::Struggling || !matches!(ctx.state, Status::Running | Status::NeedsInput) {
+        return Vec::new();
+    }
+    let shifted = ctx.t.wrapping_add(slot(ctx.seed, 0x5E7, 0, SWEAT_WINDOW as u32));
+    let (cycle, age) = (shifted / SWEAT_WINDOW, shifted % SWEAT_WINDOW);
+    if age >= SWEAT_LIFE {
+        return Vec::new();
+    }
+    let rr = BASE_R * g.ppu;
+    let cy_px = g.rcy + (cy - CY) * g.ppu;
+    let start = 0.75 - 0.15 * hf(ctx.seed ^ 0x5E8, cycle as u32 ^ (cycle >> 32) as u32);
+    let y = cy_px - rr * start + 0.8 * age as f32;
+    // just outside the round outline at that height
+    let up = ((cy_px - y) / rr).clamp(-1.0, 1.0);
+    let x = g.rcx - rr * (1.0 - up * up).sqrt() - 1.2;
+    vec![(x.floor() as i32, y.floor() as i32, age as f32 / SWEAT_LIFE as f32)]
+}
+
+/// Paints the sweat drops beside the body (never over it).
+pub(super) fn sweat(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
+    let g = cv.g;
+    for (x, y, fade) in sweat_drops(ctx, &g, cy) {
+        cv.set_px(x, y, lerp(SWEAT, CARD_BG, fade * fade * 0.8), 1, true);
     }
 }
 

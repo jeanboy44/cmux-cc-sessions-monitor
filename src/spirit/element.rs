@@ -25,7 +25,7 @@ pub(super) fn ramp(e: Theme) -> [Rgb; 4] {
 
 /// Lightning: rotation of the spike star.
 pub(super) fn bolt_rot(ctx: &Ctx) -> f32 {
-    seed_phase(ctx.seed, 0xB01) + ctx.tf * 0.01 * ctx.sp
+    seed_phase(ctx.seed, 0xB01) + ctx.btf * 0.01 * ctx.sp
 }
 
 /// Poison: slow horizontal sway of the body in design units (0 for other
@@ -34,14 +34,14 @@ pub(super) fn sway(ctx: &Ctx) -> f32 {
     if ctx.elem != Theme::Poison {
         return 0.0;
     }
-    let s = ctx.sp.clamp(0.8, 1.6) * ctx.tf;
+    let s = ctx.sp.clamp(0.8, 1.6) * ctx.btf;
     0.55 * (s * 0.03 + seed_phase(ctx.seed, 0x5A7)).sin() + 0.2 * (s * 0.017 + seed_phase(ctx.seed, 0x5A8)).sin()
 }
 
 /// Lightning: round core radius + star-burst spike length at angle `th`.
 /// Long and short spikes alternate; their lengths flicker every few frames.
 pub(super) fn bolt_shape(ctx: &Ctx, th: f32) -> (f32, f32) {
-    let (t, tf, sp) = (ctx.t, ctx.tf, ctx.sp);
+    let (t, tf, sp) = (ctx.bt, ctx.btf, ctx.sp);
     let n = 8.0;
     let seg = TAU / n;
     let rot = bolt_rot(ctx);
@@ -67,7 +67,7 @@ pub(super) fn bolt_shape(ctx: &Ctx, th: f32) -> (f32, f32) {
 
 /// Outline radius (design units) at angle `th` (screen coords, +y down).
 pub(super) fn radius(ctx: &Ctx, th: f32) -> f32 {
-    let (tf, sp) = (ctx.tf, ctx.sp);
+    let (tf, sp) = (ctx.btf, ctx.sp);
     let wob = 0.6 * (3.0 * th + 0.07 * tf * sp).sin()
         + 0.4 * (5.0 * th - 0.11 * tf * sp + 1.3).sin()
         + 0.3 * (2.0 * th + 0.05 * tf * sp + 2.0).sin();
@@ -102,12 +102,12 @@ pub(super) fn flashing(ctx: &Ctx) -> bool {
         return false;
     }
     let (window, jitter) = if ctx.state == Status::Running { (32, 14) } else { (95, 45) };
-    [ctx.t, ctx.t.wrapping_sub(1)].iter().any(|&t| t % window == slot(ctx.seed, 0xF1A5, t / window, jitter))
+    [ctx.bt, ctx.bt.wrapping_sub(1)].iter().any(|&t| t % window == slot(ctx.seed, 0xF1A5, t / window, jitter))
 }
 
 /// Body tone override for one lit sub-pixel (rx, ry) of tone `tone`.
 pub(super) fn tint(ctx: &Ctx, ramp: &[Rgb; 4], tone: usize, c: Rgb, d: f32, th: f32, rx: usize, ry: usize, flash: bool) -> Rgb {
-    let t = ctx.t;
+    let t = ctx.bt;
     match ctx.elem {
         Theme::Water if d > 0.48 && d < 0.66 && th > -2.75 && th < -1.95 => [235., 248., 255.],
         Theme::Lightning => {
@@ -209,7 +209,7 @@ pub(super) fn bubbles(ctx: &Ctx) -> Vec<Bubble> {
     for k in 0..slots {
         let key = ctx.seed.wrapping_add(k.wrapping_mul(0x9E37));
         let period = 18 + slot(key, 0xBB1, 0, 14);
-        let shifted = ctx.t + slot(key, 0xBB2, 0, period as u32);
+        let shifted = ctx.t.wrapping_add(slot(key, 0xBB2, 0, period as u32));
         let (cycle, age) = (shifted / period, shifted % period);
         let Some((stage, frame)) = stage_at(age) else { continue };
         let c = cycle as u32 ^ (cycle >> 32) as u32;
@@ -308,7 +308,7 @@ pub(super) fn draw_bubbles(cv: &mut Canvas, ctx: &Ctx, cx: f32, cy: f32) {
 /// (water). Poison bubbles are drawn later, over the magic (see [`draw_bubbles`]).
 /// `cy`: body centre y in design units (after bobbing and the casting pose).
 pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
-    let (tf, sp) = (ctx.tf, ctx.sp);
+    let (tf, sp) = (ctx.btf, ctx.sp);
     let ramp = ramp(ctx.elem);
     match ctx.elem {
         Theme::Water => {

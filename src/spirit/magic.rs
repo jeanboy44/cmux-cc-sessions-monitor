@@ -131,7 +131,7 @@ fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u6
     for k in 0..smokes {
         let key = ctx.seed ^ (k as u32).wrapping_mul(0x5A0C);
         let period = 14;
-        let shifted = ctx.t + slot(key, 0x5A1, 0, period as u32);
+        let shifted = ctx.t.wrapping_add(slot(key, 0x5A1, 0, period as u32));
         let (cycle, age) = (shifted / period, shifted % period);
         if age > since_start {
             continue;
@@ -180,7 +180,7 @@ fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u6
     for k in 0..embers as u32 {
         let key = ctx.seed ^ k.wrapping_mul(0x2F1B);
         let period = 8 + u64::from(k % 3);
-        let shifted = ctx.t + slot(key, 0xE1, 0, period as u32);
+        let shifted = ctx.t.wrapping_add(slot(key, 0xE1, 0, period as u32));
         let (cycle, age) = (shifted / period, shifted % period);
         if age > since_start {
             continue;
