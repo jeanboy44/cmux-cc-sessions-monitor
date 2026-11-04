@@ -289,7 +289,7 @@ fn render_with(p: &SpiritParams, bubbles: bool) -> SpiritGrid {
     magic::draw(&mut cv, &ctx, CY + (bob_px - pose.dy) / g.ppu);
     state::sparkles(&mut cv, &ctx);
     if bubbles {
-        element::draw_bubbles(&mut cv, &ctx, CX + pose.dx / g.ppu, look.cy, look.bright);
+        element::draw_bubbles(&mut cv, &ctx, CX + pose.dx / g.ppu, look.cy);
     }
     eyes::draw(&mut cv, pose.facing, eyes::blinking(ctx.seed, ctx.t), element::ramp(ctx.elem)[1], look.bright);
     let mut grid = cv.cells();
@@ -325,13 +325,15 @@ mod tests {
         &g.cells[usize::from(row) * usize::from(g.cols) + usize::from(col)]
     }
 
-    /// (col, row, char) of every cell drawn in pure white.
+    /// (col, row, char) of every eye catchlight: a cell drawn in pure white
+    /// with a single dot. Poison bubbles may be pure white too, but never a
+    /// lone dot (see `only_eyes_and_poison_bubbles_are_pure_white`).
     fn white_cells(g: &SpiritGrid) -> Vec<(u16, u16, char)> {
         let mut out = Vec::new();
         for row in 0..g.rows {
             for col in 0..g.cols {
                 let c = cell(g, col, row);
-                if c.fg == WHITE {
+                if c.fg == WHITE && bits(c).count_ones() == 1 {
                     out.push((col, row, c.ch));
                 }
             }
@@ -825,7 +827,9 @@ mod tests {
             for status in [Status::Running, Status::NeedsInput, Status::Idle] {
                 for t in [0, 17, 33, 90, 141] {
                     let g = render(&params(Theme::Poison, status, Size::S, t, seed));
-                    let body = body_cells(&g);
+                    // body cells a bubble does not touch
+                    let bare = render_with(&params(Theme::Poison, status, Size::S, t, seed), false);
+                    let body: Vec<Cell> = body_cells(&g).into_iter().filter(|c| body_cells(&bare).contains(c)).collect();
                     assert!(body.len() >= 10, "{status:?} {t}: {} body cells", body.len());
                     let green = body.iter().filter(|c| c.fg.is_some_and(|(r, gg, b)| gg > r && gg > b)).count();
                     assert!(green * 10 >= body.len() * 9, "{status:?} {t}: {green} of {} cells green", body.len());
@@ -947,26 +951,89 @@ mod tests {
         });
     }
 
+    fn neutral((r, g, b): (u8, u8, u8)) -> bool {
+        r.abs_diff(g) <= 8 && g.abs_diff(b) <= 8
+    }
+
     #[test]
-    fn poison_bubble_rings_are_light_green_not_white() {
-        let mut lit = 0;
+    fn poison_bubble_rings_and_sparkles_are_white() {
+        let (mut rings, mut sparkles) = (0, 0);
         bubble_frames(|p, with, without| {
             let b = element::bubbles(&Ctx::new(p));
-            if b.iter().any(|b| b.stage == element::Stage::Pop) {
-                return;
-            }
-            for (i, (a, o)) in with.cells.iter().zip(&without.cells).enumerate() {
-                if a == o || o.fg == WHITE {
+            let swell = b.iter().any(|b| b.stage == element::Stage::Swell);
+            let pop0 = b.iter().all(|b| b.stage == element::Stage::Pop && b.frame == 0);
+            for (a, o) in with.cells.iter().zip(&without.cells) {
+                if a == o {
                     continue;
                 }
                 let fa = a.fg.expect("a bubble cell is painted");
-                assert!(a.fg != WHITE && fa.0.max(fa.1).max(fa.2) <= 250, "{p:?} cell {i}: {fa:?} too white");
-                assert!(lum(fa) > o.fg.map_or(0.0, lum), "{p:?} cell {i}: ring {fa:?} not lighter than {:?}", o.fg);
-                assert!(fa.1 > fa.0 && fa.1 > fa.2, "{p:?} cell {i}: ring {fa:?} not green");
-                lit += 1;
+                // a bubble on an empty spot is drawn in white tones alone
+                if o.fg.is_none() {
+                    assert!(neutral(fa), "{p:?}: bubble dots {fa:?} on the card are not neutral white");
+                    if pop0 && !b.is_empty() {
+                        assert!(lum(fa) >= 200.0, "{p:?}: sparkle {fa:?} too dim");
+                        sparkles += 1;
+                    }
+                }
+                // the swelling ring with its glint turns its cells white
+                if swell && neutral(fa) && fa.0.min(fa.1).min(fa.2) >= 250 {
+                    rings += 1;
+                }
             }
         });
-        assert!(lit > 1000, "rings light the body ({lit} cells)");
+        assert!(rings > 300, "white ring cells ({rings})");
+        assert!(sparkles > 30, "white pop sparkles on the card ({sparkles})");
+    }
+
+    #[test]
+    fn poison_bubbles_have_no_warm_tint() {
+        let mut lit = 0;
+        bubble_frames(|p, with, without| {
+            for (i, (a, o)) in with.cells.iter().zip(&without.cells).enumerate() {
+                if a == o {
+                    continue;
+                }
+                let (r, g, b) = a.fg.expect("a bubble cell is painted");
+                match o.fg {
+                    // white blended into the green body: lighter, never warmer
+                    // than the body, never redder than green
+                    Some((or, og, ob)) => {
+                        assert!(lum((r, g, b)) + 0.5 >= lum((or, og, ob)), "{p:?} cell {i}: {:?} -> {:?} darker", o.fg, a.fg);
+                        let warm = i32::from(r) - i32::from(b);
+                        let warm0 = (i32::from(or) - i32::from(ob)).max(0);
+                        assert!(warm <= warm0 + 8, "{p:?} cell {i}: {:?} -> {:?} turns warm", o.fg, a.fg);
+                        assert!(r <= g.saturating_add(8), "{p:?} cell {i}: {:?} -> {:?} redder than green", o.fg, a.fg);
+                        lit += 1;
+                    }
+                    None => assert!(neutral((r, g, b)), "{p:?} cell {i}: {:?} not neutral", a.fg),
+                }
+            }
+        });
+        assert!(lit > 1000, "bubbles light the body ({lit} cells)");
+    }
+
+    #[test]
+    fn only_eyes_and_poison_bubbles_are_pure_white() {
+        for seed in [3, 41, 706_312_658] {
+            for (theme, size) in Theme::ALL.into_iter().flat_map(|t| Size::ALL.map(|s| (t, s))) {
+                for status in STATUSES {
+                    for t in 0..120 {
+                        let p = params(theme, status, size, t, seed);
+                        let (g, bare) = (render_with(&p, true), render_with(&p, false));
+                        let cv = canvas::Canvas::new(geom_for(size, p.magic));
+                        let eye_bottom = eyes::boxes(&cv).iter().map(|b| b.1 + b.3).max().unwrap_or(0) as u16;
+                        for (i, c) in g.cells.iter().enumerate().filter(|(_, c)| c.fg == WHITE) {
+                            if bits(c).count_ones() == 1 && bare.cells[i] == *c {
+                                continue; // an eye catchlight
+                            }
+                            let row = i as u16 / g.cols;
+                            assert!(theme == Theme::Poison && bare.cells[i] != *c, "{p:?} cell {i}: {c:?} pure white outside the eyes");
+                            assert!(bits(c).count_ones() >= 2 && row >= eye_bottom, "{p:?} cell {i}: bubble {c:?} could pass for an eye");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

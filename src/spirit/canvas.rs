@@ -14,7 +14,9 @@ pub(super) const CARD_BG: Rgb = [22., 23., 32.];
 pub(super) const WHITE: Rgb = [255., 255., 255.];
 /// Priority of the eye catchlight; the only dots allowed to stay pure white.
 pub(super) const EYE_PRIO: u8 = 3;
-/// Brightest channel value for anything that is not the eye catchlight.
+/// Brightest channel value for anything that is not the eye catchlight or
+/// a poison bubble (whose white dots may reach pure white; they never sit on
+/// the eye rows and never show as a lone dot, so the eyes stay unique).
 const MAX_NON_EYE: f32 = 250.0;
 
 const BRAILLE_BITS: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
@@ -22,11 +24,6 @@ const BRAILLE_BITS: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20
 pub(super) fn lerp(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
-}
-
-/// Perceived brightness (Rec. 709 luma).
-pub(super) fn luma(c: Rgb) -> f32 {
-    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
 pub(super) fn mul(c: Rgb, m: f32) -> Rgb {
@@ -51,11 +48,13 @@ pub(super) struct Canvas {
     pub g: Geom,
     px: Vec<Option<(Rgb, u8)>>,
     body: Vec<bool>,
+    /// dots painted fully white by a poison bubble (exempt from the clamp)
+    bubble: Vec<bool>,
 }
 
 impl Canvas {
     pub(super) fn new(g: Geom) -> Self {
-        Canvas { g, px: vec![None; g.w * g.h], body: vec![false; g.w * g.h] }
+        Canvas { g, px: vec![None; g.w * g.h], body: vec![false; g.w * g.h], bubble: vec![false; g.w * g.h] }
     }
 
     fn idx(&self, x: i32, y: i32) -> Option<usize> {
@@ -79,12 +78,14 @@ impl Canvas {
         let i = y * self.g.w + x;
         self.px[i] = Some((c, prio));
         self.body[i] = body;
+        self.bubble[i] = false;
     }
 
     pub(super) fn set_px(&mut self, x: i32, y: i32, c: Rgb, prio: u8, skip_body: bool) {
         if let Some(i) = self.idx(x, y) {
             if !(skip_body && self.body[i]) {
                 self.px[i] = Some((c, prio));
+                self.bubble[i] = false;
             }
         }
     }
@@ -93,6 +94,7 @@ impl Canvas {
         if let Some(i) = self.idx(x, y) {
             self.px[i] = None;
             self.body[i] = false;
+            self.bubble[i] = false;
         }
     }
 
@@ -110,13 +112,14 @@ impl Canvas {
         Some((top, [sum[0] / n, sum[1] / n, sum[2] / n]))
     }
 
-    /// Lightens sub-pixel (x, y) by `m` toward `light` as an overlay: a dot
-    /// that is there keeps its place, priority and body flag and only gets
-    /// lighter; an empty spot gets a new low-priority dot blended from what
-    /// its cell shows (or the card). Never darkens, never erases, and leaves
-    /// cells won by higher-priority dots (magic, sparkles) alone. `spawn`:
-    /// whether a dot may appear in a cell that is empty.
-    pub(super) fn overlay_px(&mut self, x: i32, y: i32, light: Rgb, m: f32, spawn: bool) {
+    /// Paints sub-pixel (x, y) as a white bubble dot over what is there: the
+    /// dot moves by `m` toward a neutral grey of level `tone` (raised to the
+    /// dot's own brightness, so it never darkens). A dot that is there keeps
+    /// its place and body flag; an empty spot gets a new low-priority dot
+    /// blended from what its cell shows (or the card). Never erases, and
+    /// leaves cells won by higher-priority dots (magic, sparkles) alone.
+    /// `spawn`: whether a dot may appear in a cell that is empty.
+    pub(super) fn whiten_px(&mut self, x: i32, y: i32, tone: f32, m: f32, spawn: bool) {
         let Some(i) = self.idx(x, y) else { return };
         let (top, avg) = match self.cell_top(x, y) {
             Some(t) => t,
@@ -127,8 +130,27 @@ impl Canvas {
             return;
         }
         let under = self.px[i].map_or(avg, |(c, _)| c);
-        let c = if luma(light) > luma(under) { lerp(under, light, m) } else { under };
-        self.px[i] = Some((c, 1));
+        self.px[i] = Some((lerp(under, grey(tone, under), m), 1));
+        self.bubble[i] = m >= 1.0;
+    }
+
+    /// Moves every other dot of the braille cell holding (x, y) by `m` toward
+    /// a neutral grey of level `tone` (never darker than the dot), so a
+    /// bubble's cell reads white rather than as a few light dots in a green
+    /// block. Leaves cells won by higher-priority dots alone.
+    pub(super) fn whiten_cell(&mut self, x: i32, y: i32, tone: f32, m: f32) {
+        if self.cell_top(x, y).is_none_or(|(top, _)| top > 1) {
+            return;
+        }
+        let (x0, y0) = (x.div_euclid(2) * 2, y.div_euclid(4) * 4);
+        for (xx, yy) in (y0..y0 + 4).flat_map(|yy| (x0..x0 + 2).map(move |xx| (xx, yy))) {
+            if let Some(i) = self.idx(xx, yy) {
+                if let (Some((c, p)), false) = (self.px[i], self.bubble[i]) {
+                    self.px[i] = Some((lerp(c, grey(tone, c), m), p));
+                    self.bubble[i] = m >= 1.0;
+                }
+            }
+        }
     }
 
     /// Rightmost body sub-pixel column over all rows, if any body is drawn.
@@ -159,11 +181,12 @@ impl Canvas {
                     cells.push(Cell { ch: ' ', fg: None });
                     continue;
                 };
-                let (mut bits, mut sum, mut n) = (0u32, [0f32; 3], 0f32);
+                let (mut bits, mut sum, mut n, mut white) = (0u32, [0f32; 3], 0f32, false);
                 for dy in 0..4 {
                     for dx in 0..2 {
                         if let Some((c, p)) = at(dx, dy) {
                             if p == maxp {
+                                white |= self.bubble[(cy * 4 + dy) * self.g.w + cx * 2 + dx];
                                 bits |= BRAILLE_BITS[dx][dy];
                                 sum = [sum[0] + c[0], sum[1] + c[1], sum[2] + c[2]];
                                 n += 1.0;
@@ -171,13 +194,20 @@ impl Canvas {
                         }
                     }
                 }
-                let top = if maxp == EYE_PRIO { 255.0 } else { MAX_NON_EYE };
+                let top = if maxp == EYE_PRIO || white { 255.0 } else { MAX_NON_EYE };
                 let ch = char::from_u32(0x2800 + bits).unwrap_or(' ');
                 cells.push(Cell { ch, fg: Some(to_rgb([sum[0] / n, sum[1] / n, sum[2] / n], top)) });
             }
         }
         SpiritGrid { cols: cols as u16, rows: rows as u16, cells }
     }
+}
+
+/// Neutral grey of level `tone`, raised to the brightest channel of `c` (so
+/// moving `c` toward it never lowers a channel).
+fn grey(tone: f32, c: Rgb) -> Rgb {
+    let v = tone.max(c[0]).max(c[1]).max(c[2]).min(255.0);
+    [v, v, v]
 }
 
 pub(super) fn to_rgb(c: Rgb, top: f32) -> (u8, u8, u8) {

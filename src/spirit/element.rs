@@ -5,7 +5,7 @@ use std::f32::consts::{PI, TAU};
 
 use crate::model::Status;
 
-use super::canvas::{lerp, mul, Canvas, Rgb, CARD_BG, WHITE};
+use super::canvas::{lerp, Canvas, Rgb, CARD_BG};
 use super::noise::{hf, seed_phase, slot, Rng};
 use super::particles::Particle;
 use super::theme::Theme;
@@ -132,17 +132,31 @@ pub(super) fn tint(ctx: &Ctx, ramp: &[Rgb; 4], tone: usize, c: Rgb, d: f32, th: 
     }
 }
 
-/// How far a poison bubble's dots blend from the colour under them toward
-/// the pale lime highlight: the bead, ring and swell brighten as they grow,
-/// the gloss dot is brighter still, and the pop sparkles fade back into
-/// their surroundings frame by frame.
-const BEAD_MIX: f32 = 0.4;
-const RING_MIX: f32 = 0.5;
-const SWELL_MIX: f32 = 0.62;
-const GLOSS_MIX: f32 = 0.85;
-const POP_MIX: [f32; 3] = [0.7, 0.4, 0.08];
+/// How a poison bubble paints: its dots move fully to a neutral grey-white
+/// of level `tone`, and the rest of each cell it touches moves by `cell`
+/// toward the same white, so a one- or two-cell bubble reads as a white
+/// bubble rather than a few light dots in a green block. White only: no tint.
+struct Paint {
+    tone: f32,
+    /// how far the bubble's own dots move toward the white (1: all the way)
+    dot: f32,
+    /// how far the other dots of its cells follow
+    cell: f32,
+}
+
+/// Forming: a dim grey-white bead.
+const BEAD: Paint = Paint { tone: 220., dot: 1., cell: 0.5 };
+/// Growing: a near-white ring.
+const RING: Paint = Paint { tone: 235., dot: 1., cell: 0.75 };
+/// Full size: a pure white ring whose cells turn white.
+const SWELL: Paint = Paint { tone: 255., dot: 1., cell: 1. };
+/// The specular glint on the ring.
+const GLINT: Paint = Paint { tone: 255., dot: 1., cell: 0. };
+/// Pop sparkles flying out: white, then grey-white, then faded into their
+/// surroundings (no new dots on empty cells on the last frame).
+const POP: [Paint; 3] = [Paint { tone: 240., dot: 1., cell: 0.45 }, Paint { tone: 215., dot: 1., cell: 0.2 }, Paint { tone: 200., dot: 0.08, cell: 0. }];
 /// Last frame of a pop (the sparkles have faded into their surroundings).
-pub(super) const LAST_POP_FRAME: u8 = POP_MIX.len() as u8 - 1;
+pub(super) const LAST_POP_FRAME: u8 = POP.len() as u8 - 1;
 
 /// Life stage of a poison bubble; each lasts one to three ticks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,44 +259,48 @@ pub(super) fn bubble_spots(cv: &Canvas, ctx: &Ctx, cx: f32, cy: f32) -> Vec<(i32
         .collect()
 }
 
-/// Draws one bubble centred on sub-pixel (px, py) as an overlay: every dot
-/// lightens what is under it toward `light` (the body keeps its dots), so a
-/// bubble is a glossy ring on the body and a faint ring off it, never a hole.
-fn draw_bubble(cv: &mut Canvas, px: i32, py: i32, b: &Bubble, light: Rgb) {
-    const DIAMOND: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-    const RING: [(i32, i32); 8] = [(-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, -1), (-1, 1), (1, 1)];
+/// Draws one bubble at sub-pixel (px, py) as a white overlay snapped to the
+/// braille cell holding that point: a bead and a ring in that cell, a swell
+/// over it and the cell to its right, then sparkles flying 1-2 cells out
+/// sideways and down (never up, toward the eyes; less far toward the magic). Every dot lightens what is
+/// under it (the body keeps its dots), so a bubble is never a hole.
+fn draw_bubble(cv: &mut Canvas, px: i32, py: i32, b: &Bubble) {
+    let (x0, y0) = (px.div_euclid(2) * 2, py.div_euclid(4) * 4);
     // the last pop frame has faded into the card: no new dots on empty cells
     let spawn = !(b.stage == Stage::Pop && b.frame >= LAST_POP_FRAME);
-    let mut put = |dots: &[(i32, i32)], m: f32| {
+    let mut put = |dots: &[(i32, i32)], p: &Paint| {
         for &(x, y) in dots {
-            cv.overlay_px(px + x, py + y, light, m, spawn);
+            cv.whiten_px(x0 + x, y0 + y, p.tone, p.dot, spawn);
+        }
+        if p.cell > 0.0 {
+            for &(x, y) in dots {
+                cv.whiten_cell(x0 + x, y0 + y, p.tone, p.cell);
+            }
         }
     };
     match b.stage {
-        Stage::Bead => put(&[(0, 0)], BEAD_MIX),
+        Stage::Bead => put(&[(0, 1), (1, 1), (0, 2), (1, 2)], &BEAD),
         Stage::Ring => {
-            put(&DIAMOND, RING_MIX);
-            put(&[(-1, -1)], GLOSS_MIX);
+            put(&[(0, 0), (1, 0), (0, 1), (0, 2), (0, 3), (1, 2), (1, 3)], &RING);
+            put(&[(1, 1)], &GLINT);
         }
         Stage::Swell => {
-            put(&RING, SWELL_MIX);
-            put(&[(-1, -1)], GLOSS_MIX);
+            put(&[(1, 0), (2, 0), (0, 1), (3, 1), (0, 2), (3, 2), (1, 3), (2, 3)], &SWELL);
+            put(&[(1, 1)], &GLINT);
         }
         Stage::Pop => {
-            // the ring breaks into sparkles that fly 1-2 cells out and fade
             let k = usize::from(b.frame.min(LAST_POP_FRAME));
-            let (d, h, v) = ([2, 3, 4][k], [3, 4, 5][k], [2, 3, 3][k]);
-            put(&[(-d, -v), (d, -v), (-d, v), (d, v), (-h, 0), (h, 0)], POP_MIX[k]);
+            let dots = [[(-2, 0), (4, 0), (-1, 3), (5, 3)], [(-3, 0), (5, 0), (-2, 5), (5, 5)], [(-4, 1), (5, 1), (-3, 6), (5, 6)]];
+            put(&dots[k], &POP[k]);
         }
     }
 }
 
-/// Poison: bubbles forming and popping on the body, drawn over everything
-/// but the eyes. `cx`/`cy`: body centre in design units.
-pub(super) fn draw_bubbles(cv: &mut Canvas, ctx: &Ctx, cx: f32, cy: f32, bright: f32) {
-    let light = mul(lerp(ramp(ctx.elem)[3], WHITE, 0.45), bright);
+/// Poison: white bubbles forming and popping on the body, drawn over
+/// everything but the eyes. `cx`/`cy`: body centre in design units.
+pub(super) fn draw_bubbles(cv: &mut Canvas, ctx: &Ctx, cx: f32, cy: f32) {
     for (px, py, b) in bubble_spots(cv, ctx, cx, cy) {
-        draw_bubble(cv, px, py, &b, light);
+        draw_bubble(cv, px, py, &b);
     }
 }
 
