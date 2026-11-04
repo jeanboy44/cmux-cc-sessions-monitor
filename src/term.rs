@@ -3,7 +3,7 @@
 //! Panic policy: a panic on the main (UI) thread restores the terminal first
 //! and then prints the message to stderr, so it is readable after the alternate
 //! screen is gone. Panics on any other thread (refresh, PR poller, cmux reader
-//! threads) are appended to `~/.cache/magigent/panic.log` and never
+//! threads) are appended to `~/.cache/cmux-magigent/panic.log` and never
 //! written to the screen; those threads catch their panics and keep going.
 
 use std::io::{stdout, Stdout, Write};
@@ -62,7 +62,7 @@ pub fn restore() {
 }
 
 pub fn panic_log_path() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".cache").join("magigent").join("panic.log")
+    dirs::home_dir().unwrap_or_default().join(".cache").join("cmux-magigent").join("panic.log")
 }
 
 fn log_panic(msg: &str) {
@@ -82,7 +82,7 @@ pub fn install_panic_hook() {
         let name = thread.name().unwrap_or("<unnamed>");
         if name == "main" {
             restore();
-            eprintln!("magigent panicked: {info}");
+            eprintln!("cmux-magigent panicked: {info}");
         } else {
             log_panic(&format!("[thread {name}] {info}"));
         }

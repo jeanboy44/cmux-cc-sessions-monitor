@@ -167,9 +167,9 @@ fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// `<home>/.config/magigent/config.toml`: where the config is written.
+/// `<home>/.config/cmux-magigent/config.toml`: where the config is written.
 pub fn config_path_in(home: &Path) -> PathBuf {
-    home.join(".config").join("magigent").join("config.toml")
+    home.join(".config").join("cmux-magigent").join("config.toml")
 }
 
 /// The config location of the app's former name (read-only fallback).
@@ -204,9 +204,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_paths_use_magigent_with_legacy_beside() {
+    fn config_paths_use_cmux_magigent_with_legacy_beside() {
         let home = Path::new("/h");
-        assert_eq!(config_path_in(home), Path::new("/h/.config/magigent/config.toml"));
+        assert_eq!(config_path_in(home), Path::new("/h/.config/cmux-magigent/config.toml"));
         assert_eq!(legacy_config_path_in(home), Path::new("/h/.config/cmux-cc-monitor/config.toml"));
     }
 
@@ -520,6 +520,6 @@ mod tests {
 
     #[test]
     fn default_path_ends_with_expected_suffix() {
-        assert!(default_path().ends_with("magigent/config.toml"));
+        assert!(default_path().ends_with("cmux-magigent/config.toml"));
     }
 }

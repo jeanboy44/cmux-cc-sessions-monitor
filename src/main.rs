@@ -15,7 +15,7 @@ mod term;
 mod ui;
 mod worktree;
 
-const USAGE: &str = "magigent — Claude Code sessions in cmux as tiles (hjkl move, Enter focus, p preview, i settings, q quit)";
+const USAGE: &str = "cmux-magigent — Claude Code sessions in cmux as tiles (hjkl move, Enter focus, p preview, i settings, q quit)";
 
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("-V" | "--version") => {
-            println!("magigent {}", env!("CARGO_PKG_VERSION"));
+            println!("cmux-magigent {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Some(other) => {

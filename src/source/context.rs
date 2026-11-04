@@ -1,7 +1,7 @@
 //! Context-window usage of a session, as a percentage (0..=100).
 //!
 //! Primary source: the statusline script writes
-//! `~/.cache/magigent/ctx/<session_id>.json` (or the former
+//! `~/.cache/cmux-magigent/ctx/<session_id>.json` (or the former
 //! `~/.cache/cmux-cc-monitor/ctx/`; the freshest valid file wins) with
 //! `{"session_id": "...", "used_percentage": NN}`; it is used only while the
 //! file is fresh (mtime within the configured age). Fallback: the last
@@ -33,7 +33,7 @@ pub const MAX_CTX_FILE_BYTES: u64 = 4096;
 /// writing there).
 pub fn ctx_dirs_in(home: &Path) -> Vec<PathBuf> {
     let cache = home.join(".cache");
-    vec![cache.join("magigent").join("ctx"), cache.join("cmux-cc-monitor").join("ctx")]
+    vec![cache.join("cmux-magigent").join("ctx"), cache.join("cmux-cc-monitor").join("ctx")]
 }
 
 /// Default directories of the statusline context files.
@@ -287,11 +287,11 @@ mod tests {
     }
 
     #[test]
-    fn ctx_dirs_are_magigent_first_then_legacy() {
+    fn ctx_dirs_are_cmux_magigent_first_then_legacy() {
         let home = Path::new("/h");
         assert_eq!(
             ctx_dirs_in(home),
-            vec![PathBuf::from("/h/.cache/magigent/ctx"), PathBuf::from("/h/.cache/cmux-cc-monitor/ctx")]
+            vec![PathBuf::from("/h/.cache/cmux-magigent/ctx"), PathBuf::from("/h/.cache/cmux-cc-monitor/ctx")]
         );
     }
 

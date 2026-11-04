@@ -1,4 +1,4 @@
-# Magigent
+# cmux-magigent
 
 [![ci](https://github.com/jeanboy44/cmux-cc-sessions-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/jeanboy44/cmux-cc-sessions-monitor/actions/workflows/ci.yml) ![license MIT](https://img.shields.io/badge/license-MIT-blue) ![platform macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
 
@@ -22,7 +22,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 cargo install --git https://github.com/jeanboy44/cmux-cc-sessions-monitor
 ```
 
-Then run `magigent` in a cmux pane. Requires a Rust toolchain (1.89 or newer).
+Then run `cmux-magigent` in a cmux pane. Requires a Rust toolchain (1.89 or newer).
 
 ## Usage
 
@@ -38,7 +38,7 @@ The selected card has a blue border. In settings, `j` `k` move, `Enter` or `Spac
 
 ## Configuration
 
-The config file is `~/.config/magigent/config.toml` (if it does not exist yet, the old `~/.config/cmux-cc-monitor/config.toml` is read; saving always writes the new path and never touches the old file). It is optional, missing keys use the defaults, and the settings screen (`i`) writes it for you.
+The config file is `~/.config/cmux-magigent/config.toml` (if it does not exist yet, the old `~/.config/cmux-cc-monitor/config.toml` is read; saving always writes the new path and never touches the old file). It is optional, missing keys use the defaults, and the settings screen (`i`) writes it for you.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -53,11 +53,11 @@ The config file is `~/.config/magigent/config.toml` (if it does not exist yet, t
 
 ## Context usage setup
 
-Magigent reads context usage from `~/.cache/magigent/ctx/<session_id>.json`, containing `{"session_id":"...","used_percentage":NN}`. Claude Code's statusline script receives this data on stdin, so add a few lines to yours:
+cmux-magigent reads context usage from `~/.cache/cmux-magigent/ctx/<session_id>.json`, containing `{"session_id":"...","used_percentage":NN}`. Claude Code's statusline script receives this data on stdin, so add a few lines to yours:
 
 ```sh
 input=$(cat)
-dir="$HOME/.cache/magigent/ctx"; mkdir -p "$dir"
+dir="$HOME/.cache/cmux-magigent/ctx"; mkdir -p "$dir"
 pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
 if [ -n "$pct" ]; then
   echo "$input" | jq -c '{session_id: .session_id, used_percentage: .context_window.used_percentage}' \
@@ -67,7 +67,7 @@ fi
 
 The file is written only once Claude Code reports a percentage, so no 0% is recorded before the first reply.
 
-The old `~/.cache/cmux-cc-monitor/ctx/` is still read too (the freshest valid file wins), so a statusline script that already writes there keeps working. Without any file, Magigent falls back to the last usage recorded in the session transcript divided by `context_limit_tokens` (set it to `1000000` for 1M-context models).
+The old `~/.cache/cmux-cc-monitor/ctx/` is still read too (the freshest valid file wins), so a statusline script that already writes there keeps working. Without any file, cmux-magigent falls back to the last usage recorded in the session transcript divided by `context_limit_tokens` (set it to `1000000` for 1M-context models).
 
 ## How status is detected
 
