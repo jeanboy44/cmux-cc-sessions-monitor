@@ -22,6 +22,7 @@ use crate::source::claude_sessions::read_claude_sessions;
 use crate::source::context::{default_ctx_dirs, read_ctx_latest, resolve_ctx, safe_id, CtxCalibration, TranscriptCache};
 use crate::source::cmux::{Cmux, CmuxCli, CmuxSessionRef, SCREEN_LINES};
 use crate::source::hook_sessions::read_hook_sessions;
+use crate::source::subagents::{self, SubagentCache};
 use crate::status::resolve_status;
 
 /// How often the refresh thread rebuilds the snapshot.
@@ -57,6 +58,8 @@ pub struct Snapshot {
     /// Per session id: the transcript tokens seen while its statusline file
     /// was fresh (see [`resolve_ctx`]); pruned to the sessions of the round.
     pub(crate) ctx_calibration: HashMap<String, CtxCalibration>,
+    /// Subagent folder listings and metas, pruned to the sessions of the round.
+    pub(crate) subagents: SubagentCache,
 }
 
 impl Snapshot {
@@ -223,6 +226,8 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
     let mut ctx_calibration = HashMap::new();
     let max_age = Duration::from_secs(deps.config.ctx_fresh_seconds);
     let mut used = Vec::new();
+    let mut sub_cache = prev.subagents.clone();
+    let mut sub_dirs = Vec::new();
     for s in sessions.iter_mut() {
         let t = transcript_for(s, &deps.projects_dir);
         let tail = t.as_deref().and_then(|p| transcripts.tail(p));
@@ -240,10 +245,34 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
             ctx_calibration.insert(s.id.clone(), c);
         }
         s.model = tail.and_then(|t| t.model);
+        // Subagents live next to the transcript; a finished session has none running.
+        s.subagents = match t.as_deref().map(subagents::subagents_dir) {
+            Some(dir) => {
+                let mut list = subagents::scan(&dir, deps.now, deps.config.subagent_active_seconds, &mut sub_cache);
+                if s.status == Status::Done {
+                    list.iter_mut().for_each(|a| a.running = false);
+                }
+                sub_dirs.push(dir);
+                list
+            }
+            None => Vec::new(),
+        };
         used.extend(t);
     }
     transcripts.retain(&used);
-    Snapshot { sessions, message, pr_note: note, window_order, current_window, cmux_refs, seq, transcripts, ctx_calibration }
+    sub_cache.retain(&sub_dirs);
+    Snapshot {
+        sessions,
+        message,
+        pr_note: note,
+        window_order,
+        current_window,
+        cmux_refs,
+        seq,
+        transcripts,
+        ctx_calibration,
+        subagents: sub_cache,
+    }
 }
 
 /// Starts the refresh thread: a snapshot every [`REFRESH_INTERVAL`] (first one
@@ -758,6 +787,65 @@ mod tests {
         let again = build_snapshot(&d, &snap);
         assert_eq!(again.transcripts.reads(), 2, "no re-read of unchanged transcripts");
         assert_eq!(get(&again, "b"), (Some("claude-opus-4-5".into()), Some(50.0)));
+    }
+
+    /// A synthetic subagent of session `id` (encoded-cwd transcript layout),
+    /// its transcript last written `age` seconds before `now`.
+    fn write_subagent(d: &RefreshDeps, id: &str, agent: &str, now: SystemTime, age: u64) {
+        let dir = d.projects_dir.join(format!("-home-user-{id}")).join(id).join("subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        let jsonl = dir.join(format!("agent-{agent}.jsonl"));
+        std::fs::write(&jsonl, "{}\n").unwrap();
+        std::fs::File::options().write(true).open(&jsonl).unwrap().set_modified(now - Duration::from_secs(age)).unwrap();
+        std::fs::write(dir.join(format!("agent-{agent}.meta.json")), r#"{"agentType":"Explore","description":"look around","model":"sonnet"}"#).unwrap();
+    }
+
+    #[test]
+    fn build_snapshot_fills_subagents_and_done_sessions_count_none() {
+        let dir = setup();
+        for (pid, id) in [(11, "a"), (12, "b"), (13, "c")] {
+            write_claude(&dir.path().join("sessions"), pid, id, "busy");
+        }
+        let mut cmux = FakeCmux::new(vec![cref("a", true), cref("b", true), cref("c", true)]);
+        let d = deps(dir.path(), &cmux);
+        let now = d.now;
+        // a: two running and one stale subagent; b: none; c: one running
+        write_subagent(&d, "a", "x1", now, 2);
+        write_subagent(&d, "a", "x2", now, 5);
+        write_subagent(&d, "a", "x3", now, 600);
+        write_subagent(&d, "c", "y1", now, 1);
+        let snap = build_snapshot(&d, &Snapshot::default());
+        let by = |s: &Snapshot, id: &str| s.sessions.iter().find(|x| x.id == id).unwrap().subagents.clone();
+        let a = by(&snap, "a");
+        assert_eq!(a.iter().map(|x| (x.id.as_str(), x.running)).collect::<Vec<_>>(), [("x1", true), ("x2", true), ("x3", false)]);
+        assert_eq!((a[0].kind.as_str(), a[0].description.as_str(), a[0].model_family.as_deref()), ("Explore", "look around", Some("sonnet")));
+        assert!(by(&snap, "b").is_empty());
+        assert_eq!(crate::source::subagents::running_count(&by(&snap, "c")), 1);
+        assert_eq!(snap.subagents.len(), 2, "one cached folder per session that has one");
+        // the window comes from the config
+        let mut wide = deps(dir.path(), &cmux);
+        wide.now = now;
+        wide.config.subagent_active_seconds = 3600;
+        assert_eq!(crate::source::subagents::running_count(&by(&build_snapshot(&wide, &snap), "a")), 3);
+        // c finishes (Done): its subagents never count as running
+        cmux.sessions_result = Ok(vec![cref("a", true), cref("b", true), cref("c", false)]);
+        cmux.tree_result = Ok(tree_of(&[("SF-A", ""), ("SF-B", ""), ("SF-C", "")]));
+        let mut d = deps(dir.path(), &cmux);
+        d.now = now;
+        let done = build_snapshot(&d, &snap);
+        let c = done.sessions.iter().find(|s| s.id == "c").unwrap();
+        assert_eq!(c.status, Status::Done);
+        assert_eq!(c.subagents.len(), 1);
+        assert_eq!(crate::source::subagents::running_count(&c.subagents), 0);
+        // c's tab closes: its folder is pruned from the cache
+        std::fs::remove_file(dir.path().join("sessions").join("13.json")).unwrap();
+        cmux.sessions_result = Ok(vec![cref("a", true), cref("b", true), cref("c", false)]);
+        cmux.tree_result = Ok(tree_of(&[("SF-A", ""), ("SF-B", "")]));
+        let mut d = deps(dir.path(), &cmux);
+        d.now = now;
+        let closed = build_snapshot(&d, &done);
+        assert_eq!(ids(&closed), vec!["a", "b"]);
+        assert_eq!(closed.subagents.len(), 1);
     }
 
     #[test]

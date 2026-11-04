@@ -76,6 +76,9 @@ pub struct Config {
     /// `view` key, which older files may still hold and is ignored.)
     #[serde(deserialize_with = "lenient_layout")]
     pub card_layout: CardLayout,
+    /// A subagent counts as running while its transcript was written within
+    /// this many seconds (and it is not marked finished).
+    pub subagent_active_seconds: u64,
 }
 
 impl Default for Extras {
@@ -102,6 +105,7 @@ impl Default for Config {
             context_limit_tokens: 0,
             ctx_fresh_seconds: 300,
             card_layout: CardLayout::default(),
+            subagent_active_seconds: 30,
         }
     }
 }
@@ -317,6 +321,20 @@ mod tests {
         Config::default().save(&path).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains("context_limit_tokens = 0"));
         assert_eq!(Config::load(&path), Config::default());
+    }
+
+    #[test]
+    fn subagent_window_defaults_to_30s_and_old_configs_load() {
+        assert_eq!(Config::default().subagent_active_seconds, 30);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"water\"\npr_poll_seconds = 30\n").unwrap();
+        let (c, err) = Config::load_checked(&path);
+        assert_eq!((c.subagent_active_seconds, c.pr_poll_seconds, err), (30, 30, None));
+        std::fs::write(&path, "subagent_active_seconds = 90\n").unwrap();
+        assert_eq!(Config::load(&path).subagent_active_seconds, 90);
+        Config::default().save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("subagent_active_seconds = 30"));
     }
 
     #[test]

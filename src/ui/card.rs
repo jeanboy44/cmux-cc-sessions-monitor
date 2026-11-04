@@ -26,6 +26,12 @@
 //! ([`render_wide_card`]): same height, the body stays on the left and the
 //! extra columns go to the text rows and the magic's room on the right.
 //!
+//! Running Claude Code subagents (see [`crate::source::subagents`]): a
+//! [`SUBAGENT_GLYPH`]`×N` marker at the end of the standard card's badge row,
+//! `◇N` on compact cards, one `◇ kind · description` row each (at most three,
+//! then `+N`) in the large card's leftover rows, and one small dot each in
+//! the spirit band in the subagent model's element (see `spirit::subdots`).
+//!
 //! When a card of the configured layout does not fit a compact one-line card
 //! is drawn instead ([`render_compact`]). Empty areas draw nothing; no size
 //! panics.
@@ -41,9 +47,10 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::{CardLayout, Config};
-use crate::model::{model_family, PrState, Session, Status};
+use crate::model::{model_family, PrState, Session, Status, SubagentInfo};
+use crate::source::subagents::running_count;
 use crate::spirit::theme::Theme;
-use crate::spirit::{self, max_grid_size, Magic, Size, SpiritParams};
+use crate::spirit::{self, max_grid_size, Magic, Size, SpiritParams, SubagentDot, MAX_DOTS};
 use crate::ui::scene::draw_grid;
 use crate::ui::style::{self, fmt_duration, truncate_to_width};
 
@@ -68,6 +75,12 @@ pub const LARGE_H: u16 = 14;
 pub const LARGE_SCENE_ROWS: u16 = spirit::grid_size(Size::S).1;
 /// Summary lines of the large card.
 const LARGE_SUMMARY_ROWS: usize = 3;
+/// Running-subagent rows of the large card at most (then `+N`).
+const LARGE_SUBAGENT_ROWS: usize = 3;
+/// Marker of running subagents (`◇×2` on the badge row, `◇2` on compact
+/// cards, `◇ kind · description` rows on the large card). A plain geometric
+/// shape, not an emoji, one column wide like the other card glyphs.
+pub const SUBAGENT_GLYPH: &str = "◇";
 const _: () = assert!(
     spirit::grid_size_for(Size::S, Magic::Big).0 + SPIRIT_LEFT_PAD <= LARGE_W - 2,
     "big magic fits right of the padded S body"
@@ -104,6 +117,18 @@ fn theme_for(s: &Session, cfg: &Config) -> Theme {
     cfg.theme_for_model(s.model.as_deref())
 }
 
+/// One dot per running subagent (newest first, at most [`MAX_DOTS`]) in the
+/// element of its model family; an unknown model takes the card's element.
+fn subagent_dots(s: &Session, cfg: &Config) -> Vec<SubagentDot> {
+    let parent = theme_for(s, cfg);
+    s.subagents
+        .iter()
+        .filter(|a| a.running)
+        .take(MAX_DOTS)
+        .map(|a| SubagentDot { theme: a.model_family.as_deref().and_then(model_family).map_or(parent, |f| cfg.model_theme(f)) })
+        .collect()
+}
+
 /// Stable per-session seed (FNV-1a of the session id).
 fn seed_for(s: &Session) -> u32 {
     s.id.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193))
@@ -138,10 +163,10 @@ const _: () = assert!(
 /// the band). User decision: the body sits on the left so the cast magic,
 /// which shows the context usage, has the rest of the card to the right
 /// (this replaced the centred body of the first spirit cards).
-fn draw_spirit(buf: &mut Buffer, band: Rect, params: &SpiritParams) -> Rect {
+fn draw_spirit(buf: &mut Buffer, band: Rect, params: &SpiritParams, dots: &[SubagentDot]) -> Rect {
     #[cfg(test)]
     SPIRIT_RENDERS.with(|c| c.set(c.get() + 1));
-    let grid = spirit::render(params);
+    let grid = spirit::render_dots(params, dots);
     let pad = if band.width > SPIRIT_LEFT_PAD { SPIRIT_LEFT_PAD } else { 0 };
     let x = band.x + pad;
     let (cols, rows) = (grid.cols.min(band.right().saturating_sub(x)), grid.rows.min(band.height));
@@ -214,13 +239,13 @@ fn render_full(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: b
         stage: spirit::stage_for(s.ctx_percent),
         cols: band.width.saturating_sub(SPIRIT_LEFT_PAD),
     };
-    draw_spirit(f.buffer_mut(), band, &params);
+    draw_spirit(f.buffer_mut(), band, &params, &subagent_dots(s, cfg));
 
     let text_area = Rect::new(inner.x, inner.y + band.height, inner.width, inner.height - band.height);
     let (width, now) = (usize::from(text_area.width), SystemTime::now());
     let mut lines = match layout {
         CardLayout::Standard => text_lines(s, cfg, width, now),
-        CardLayout::Large => large_text_lines(s, cfg, width, now),
+        CardLayout::Large => large_text_lines(s, cfg, width, usize::from(text_area.height), now),
     };
     lines.truncate(usize::from(text_area.height));
     let mut para = Paragraph::new(lines);
@@ -256,17 +281,23 @@ pub fn render_compact(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, sele
     }
     let tag = format!(" {} ", style::status_tag(s.status));
     let elapsed = cfg.extras.elapsed.then(|| elapsed_text(s, SystemTime::now())).flatten().map(|d| format!(" {d}"));
+    let running = running_count(&s.subagents);
+    let marker = (running > 0).then(|| format!(" {SUBAGENT_GLYPH}{running}"));
     let name_w = s.name.width();
     // Keep at least a few name columns before adding the badge and elapsed.
     let need = name_w.min(6) + 1;
     let tag_w = tag.width();
     let el_w = elapsed.as_deref().map_or(0, str::width);
-    let (show_tag, show_el) = if need + tag_w + el_w <= avail {
-        (true, true)
+    let mk_w = marker.as_deref().map_or(0, str::width);
+    // Dropped when too narrow: elapsed first, then the marker, then the badge.
+    let (show_tag, show_el, show_mk) = if need + tag_w + el_w + mk_w <= avail {
+        (true, true, true)
+    } else if need + tag_w + mk_w <= avail {
+        (true, false, true)
     } else {
-        (need + tag_w <= avail, false)
+        (need + tag_w <= avail, false, false)
     };
-    let tail_w = if show_tag { 1 + tag_w } else { 0 } + if show_el { el_w } else { 0 };
+    let tail_w = if show_tag { 1 + tag_w } else { 0 } + if show_el { el_w } else { 0 } + if show_mk { mk_w } else { 0 };
     let name = truncate_to_width(&s.name, avail - tail_w);
     let name_style = Style::new().fg(color).add_modifier(Modifier::BOLD);
     spans.push(Span::styled(name, name_style));
@@ -279,6 +310,9 @@ pub fn render_compact(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, sele
     }
     if let Some(e) = elapsed.filter(|_| show_el) {
         spans.push(Span::styled(e, Style::new().fg(style::TEXT)));
+    }
+    if let Some(m) = marker.filter(|_| show_mk) {
+        spans.push(Span::styled(m, subagent_style()));
     }
     let mut para = Paragraph::new(Line::from(spans));
     if s.status == Status::Done {
@@ -318,7 +352,9 @@ fn pr_label(state: PrState) -> &'static str {
 /// with no summary the next extra (e.g. the branch the PR took the row from)
 /// takes its place.
 fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Line<'static>> {
-    let mut lines = vec![name_line(s, width), Line::from(badge_spans(s, cfg, width, now))];
+    let running = running_count(&s.subagents);
+    let marker = (running > 0).then(|| format!(" {SUBAGENT_GLYPH}×{running}"));
+    let mut lines = vec![name_line(s, width), Line::from(badge_spans(s, cfg, width, now, marker))];
     let mut extras = extra_lines(s, cfg, width);
     let summary = s.summary.as_ref().filter(|_| cfg.extras.summary).map(|sum| Line::styled(truncate_to_width(sum, width), dim()));
     if !extras.is_empty() {
@@ -331,11 +367,12 @@ fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<L
 
 /// Info lines of the large card: name, status badge (+ elapsed / last
 /// activity) with the model family word on the right when it fits, branch,
-/// PR chip (or `PR ?`), and the summary on up to three lines. Rows of disabled
-/// or unknown extras collapse.
-fn large_text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Line<'static>> {
+/// PR chip (or `PR ?`), the summary on up to three lines, then the running
+/// subagents in the rows left of `rows` ([`subagent_lines`]). Rows of
+/// disabled or unknown extras collapse.
+fn large_text_lines(s: &Session, cfg: &Config, width: usize, rows: usize, now: SystemTime) -> Vec<Line<'static>> {
     let ex = &cfg.extras;
-    let mut badge = badge_spans(s, cfg, width, now);
+    let mut badge = badge_spans(s, cfg, width, now, None);
     let used: usize = badge.iter().map(Span::width).sum();
     if let Some(word) = s.model.as_deref().and_then(model_family).map(|f| f.as_key()) {
         // the badge keeps its tokens; the word goes when there is no room
@@ -350,7 +387,48 @@ fn large_text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) ->
     if let Some(sum) = s.summary.as_ref().filter(|_| ex.summary) {
         lines.extend(summary_lines(sum, width, LARGE_SUMMARY_ROWS).into_iter().map(|l| Line::styled(l, dim())));
     }
+    let free = rows.saturating_sub(lines.len());
+    lines.extend(subagent_lines(s, width, free));
     lines
+}
+
+fn subagent_style() -> Style {
+    Style::new().fg(style::SELECTED)
+}
+
+/// Rows of the running subagents (newest first), at most `rows` and
+/// [`LARGE_SUBAGENT_ROWS`]: `◇ kind · description` cut to the width
+/// (CJK-aware) with the model family word on the right when it fits; when
+/// more are running than shown, the last row ends with `+N` instead.
+fn subagent_lines(s: &Session, width: usize, rows: usize) -> Vec<Line<'static>> {
+    let running: Vec<&SubagentInfo> = s.subagents.iter().filter(|a| a.running).collect();
+    let shown = running.len().min(rows).min(LARGE_SUBAGENT_ROWS);
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(shown);
+    for (i, a) in running.iter().take(shown).enumerate() {
+        let more = running.len() - shown;
+        let right = if i + 1 == shown && more > 0 { Some(format!("+{more}")) } else { a.model_family.clone() };
+        let left = if a.description.is_empty() {
+            format!("{SUBAGENT_GLYPH} {}", a.kind)
+        } else {
+            format!("{SUBAGENT_GLYPH} {} · {}", a.kind, a.description)
+        };
+        let mut spans = Vec::new();
+        match right.filter(|r| r.width() + 4 <= width) {
+            Some(r) => {
+                let text = truncate_to_width(&left, width - r.width() - 1);
+                let pad = width - text.width() - r.width();
+                spans.push(Span::styled(text, Style::new().fg(style::TEXT)));
+                spans.push(Span::raw(" ".repeat(pad)));
+                spans.push(Span::styled(r, dim()));
+            }
+            None => spans.push(Span::styled(truncate_to_width(&left, width), Style::new().fg(style::TEXT))),
+        }
+        out.push(Line::from(spans));
+    }
+    out
 }
 
 fn dim() -> Style {
@@ -361,30 +439,32 @@ fn name_line(s: &Session, width: usize) -> Line<'static> {
     Line::styled(truncate_to_width(&s.name, width), Style::new().fg(style::TEXT).add_modifier(Modifier::BOLD))
 }
 
-/// Badge row: whole tokens only. When too narrow, last activity goes first,
-/// then elapsed; the badge itself is truncated as a last resort.
-fn badge_spans(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Span<'static>> {
+/// Badge row: whole tokens only, then the subagent `marker` at the end. When
+/// too narrow, last activity goes first, then the marker, then elapsed; the
+/// badge itself is truncated as a last resort.
+fn badge_spans(s: &Session, cfg: &Config, width: usize, now: SystemTime, marker: Option<String>) -> Vec<Span<'static>> {
     let ex = &cfg.extras;
     let text = Style::new().fg(style::TEXT);
     let tag = truncate_to_width(&format!(" {} ", style::status_tag(s.status)), width);
-    let mut used = tag.width();
+    let used = tag.width();
     let color = style::status_color(s.status);
     let mut badge = vec![Span::styled(tag, Style::new().fg(style::BADGE_FG).bg(color).add_modifier(Modifier::BOLD))];
     let elapsed = ex.elapsed.then(|| elapsed_text(s, now)).flatten().map(|d| format!(" {d}"));
     let last = ex.last_activity.then(|| since(s.updated_at, now)).flatten().map(|d| format!(" ·{d} ago"));
     let ew = elapsed.as_deref().map_or(0, str::width);
     let lw = last.as_deref().map_or(0, str::width);
-    let (keep_elapsed, keep_last) = if used + ew + lw <= width {
-        (true, true)
-    } else {
-        (used + ew <= width, false)
-    };
+    let mw = marker.as_deref().map_or(0, str::width);
+    let keep_elapsed = used + ew <= width;
+    let keep_marker = used + if keep_elapsed { ew } else { 0 } + mw <= width;
+    let keep_last = keep_elapsed && used + ew + lw + if keep_marker { mw } else { 0 } <= width;
     if let Some(e) = elapsed.filter(|_| keep_elapsed) {
-        used += ew;
         badge.push(Span::styled(e, text));
     }
-    if let Some(l) = last.filter(|_| keep_last && used + lw <= width) {
+    if let Some(l) = last.filter(|_| keep_last) {
         badge.push(Span::styled(l, dim()));
+    }
+    if let Some(m) = marker.filter(|_| keep_marker) {
+        badge.push(Span::styled(m, subagent_style()));
     }
     badge
 }
@@ -502,6 +582,7 @@ mod tests {
             ctx_percent: None,
             model: None,
             unread_notification: false,
+            subagents: Vec::new(),
         }
     }
 
@@ -609,7 +690,7 @@ mod tests {
                 for tick in [0, 30, 61] {
                     let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick, seed: 1, warning: false, magic, stage: Default::default(), cols: 0 };
                     let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
-                    let at = draw_spirit(&mut buf, band, &params);
+                    let at = draw_spirit(&mut buf, band, &params, &[]);
                     let (w, h) = spirit::grid_size_for(size, magic);
                     assert!(at.width <= w && at.height == h, "{size:?} {magic:?}");
                     assert!(at.x >= band.x && at.right() <= band.right(), "{size:?} {magic:?}: grid inside the band (clipped)");
@@ -628,7 +709,7 @@ mod tests {
         let narrow = Rect::new(1, 1, 5, SCENE_ROWS);
         let params = SpiritParams { theme: Theme::Fire, status: Status::Running, size: Size::S, tick: 30, seed: 1, warning: false, magic: Magic::Big, stage: Default::default(), cols: 0 };
         let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
-        let at = draw_spirit(&mut buf, narrow, &params);
+        let at = draw_spirit(&mut buf, narrow, &params, &[]);
         assert!(at.x >= narrow.x && at.right() <= narrow.right());
     }
 
@@ -641,7 +722,7 @@ mod tests {
                     let size = spirit_size(CardLayout::Standard);
                     let params = SpiritParams { theme, status, size, tick: 3, seed: 1, warning: false, magic, stage: Default::default(), cols: 0 };
                     let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
-                    draw_spirit(&mut buf, band, &params);
+                    draw_spirit(&mut buf, band, &params, &[]);
                     let lo = (0..CARD_W)
                         .find(|&x| (0..CARD_H).any(|y| buf[(x, y)].symbol().chars().any(is_braille)))
                         .expect("painted");
@@ -1331,7 +1412,7 @@ mod tests {
             assert!(large_info(&x, &large_cfg())[1].ends_with(w), "{m}");
         }
         // a narrow badge row drops the model word rather than cutting the badge
-        let lines = large_text_lines(&s, &all_extras(), 18, SystemTime::now());
+        let lines = large_text_lines(&s, &all_extras(), 18, 8, SystemTime::now());
         let badge: String = lines[1].spans.iter().map(|sp| sp.content.as_ref()).collect();
         assert_eq!(badge, " RUN  3h ·2m ago", "{badge:?}");
         // the standard card still never names the model
@@ -1433,6 +1514,201 @@ mod tests {
                 assert_eq!(row(4).width(), usize::from(cw - 2), "w={cw}: the summary uses the extra columns");
                 assert!(row(6).ends_with('…'), "w={cw}: {:?}", row(6));
             }
+        }
+    }
+
+    // ---- subagents ----
+
+    fn sub(id: &str, kind: &str, desc: &str, family: Option<&str>, running: bool) -> SubagentInfo {
+        SubagentInfo { id: id.into(), kind: kind.into(), description: desc.into(), model_family: family.map(String::from), running, last_activity_secs: 1 }
+    }
+
+    fn with_subs(mut s: Session, running: usize, stale: usize) -> Session {
+        let fams = ["sonnet", "opus", "haiku", "fable"];
+        s.subagents = (0..running)
+            .map(|i| sub(&format!("r{i}"), "Explore", &format!("task {i}"), Some(fams[i % 4]), true))
+            .chain((0..stale).map(|i| sub(&format!("s{i}"), "Plan", "old", None, false)))
+            .collect();
+        s
+    }
+
+    #[test]
+    fn standard_card_badge_shows_the_subagent_marker_only_while_running() {
+        assert_eq!(SUBAGENT_GLYPH, "◇");
+        let badge = |s: &Session, cfg: &Config| info(&card(s, cfg, false)[1 + SCENE_ROWS as usize + 1]);
+        let two = with_subs(session("proj-a", Status::Running), 2, 1);
+        assert_eq!(badge(&two, &Config::default()), " RUN  3h ◇×2");
+        // last activity makes room for the marker first
+        assert_eq!(badge(&two, &all_extras()), " RUN  3h ◇×2");
+        let none = with_subs(session("proj-a", Status::Running), 0, 3);
+        assert_eq!(badge(&none, &Config::default()), " RUN  3h");
+        assert!(!card(&none, &all_extras(), false).join("").contains('◇'));
+        // the other rows and the geometry are unchanged
+        let rows = card(&two, &Config::default(), false);
+        assert_eq!(rows.len(), usize::from(CARD_H));
+        assert!(rows.iter().all(|r| r.width() == usize::from(CARD_W)), "{rows:?}");
+        assert_eq!(info(&rows[1 + SCENE_ROWS as usize + 3]), "fixing the parser");
+        // a Done session never shows it (its subagents are not running)
+        let mut done = with_subs(session("proj-a", Status::Done), 0, 2);
+        done.ended_at = done.started_at;
+        assert!(!card(&done, &Config::default(), false).join("").contains('◇'));
+        // narrow badge rows keep whole tokens only
+        let now = SystemTime::now();
+        let flat = |w: usize| -> String { text_lines(&two, &all_extras(), w, now)[1].spans.iter().map(|sp| sp.content.as_ref()).collect() };
+        assert_eq!(flat(12), " RUN  3h ◇×2");
+        assert_eq!(flat(11), " RUN  3h");
+        assert_eq!(flat(9), " RUN  3h");
+    }
+
+    #[test]
+    fn compact_card_shows_the_subagent_marker() {
+        let line = |s: &Session, w: u16| rows(&draw(w, 1, |f| render_compact(f, f.area(), s, &Config::default(), false, 0)))[0].trim_end().to_string();
+        let two = with_subs(session("proj-a", Status::Running), 2, 0);
+        assert_eq!(line(&two, 30), "  proj-a  RUN  3h ◇2");
+        assert_eq!(line(&with_subs(session("proj-a", Status::Running), 0, 2), 30), "  proj-a  RUN  3h");
+        // too narrow: elapsed goes first, then the marker
+        assert_eq!(line(&two, 17), "  proj-a  RUN  ◇2");
+        assert_eq!(line(&two, 14), "  proj-a  RUN");
+        for w in [0, 1, 2, 3, 5] {
+            draw(w.max(1), 1, |f| render_compact(f, Rect::new(0, 0, w, 1), &two, &Config::default(), true, 0));
+        }
+    }
+
+    #[test]
+    fn large_card_lists_running_subagents_below_the_summary() {
+        let cfg = large_cfg();
+        let s = with_subs(opus("proj-a", Status::Running), 2, 1);
+        let rows = large_info(&s, &cfg);
+        assert_eq!(rows[..5].to_vec(), large_info(&opus("proj-a", Status::Running), &cfg)[..5].to_vec(), "priority rows intact");
+        assert!(rows[5].starts_with("◇ Explore · task 0") && rows[5].ends_with("sonnet"), "{:?}", rows[5]);
+        assert!(rows[6].starts_with("◇ Explore · task 1") && rows[6].ends_with("opus"), "{:?}", rows[6]);
+        assert_eq!(rows[5].width(), usize::from(LARGE_W - 2));
+        assert_eq!(rows[7], "", "the stale one is not listed");
+        // no badge marker on the large card: the rows say it
+        assert!(!rows[1].contains('◇'));
+        // five running: three rows, the last ends with +2
+        let five = with_subs(opus("proj-a", Status::Running), 5, 0);
+        let rows = large_info(&five, &cfg);
+        assert!(rows[5].starts_with("◇ Explore · task 0") && rows[6].starts_with("◇ Explore · task 1"));
+        assert!(rows[7].starts_with("◇ Explore · task 2") && rows[7].ends_with("+2"), "{:?}", rows[7]);
+        // a three-line summary leaves one row: one subagent and +N
+        let mut long = five.clone();
+        long.summary = Some("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau".into());
+        let rows = large_info(&long, &cfg);
+        assert_eq!(rows[..7].to_vec(), large_info(&Session { subagents: Vec::new(), ..long.clone() }, &cfg)[..7].to_vec());
+        assert!(rows[7].starts_with("◇ Explore · task 0") && rows[7].ends_with("+4"), "{:?}", rows[7]);
+        // none running: no rows
+        let idle = with_subs(opus("proj-a", Status::Running), 0, 4);
+        assert!(large_info(&idle, &cfg)[5..].iter().all(String::is_empty));
+        // empty description: just the kind; unknown model: no word
+        let mut bare = opus("proj-a", Status::Running);
+        bare.subagents = vec![sub("z", "general-purpose", "", None, true)];
+        assert_eq!(large_info(&bare, &cfg)[5], "◇ general-purpose");
+    }
+
+    #[test]
+    fn large_card_subagent_rows_cut_cjk_descriptions_inside_the_card() {
+        let cfg = large_cfg();
+        let mut s = opus("proj-a", Status::Running);
+        s.subagents = vec![sub("k", "Explore", "한글 설명이 아주 길어서 카드 폭을 넘으면 잘려야 합니다", Some("haiku"), true)];
+        let rows = large_rows(&s, &cfg);
+        assert!(rows.iter().all(|r| r.width() == usize::from(LARGE_W)), "borders intact: {rows:?}");
+        let row = &large_info(&s, &cfg)[5];
+        assert!(row.starts_with("◇ Explore · 한글") && row.contains('…') && row.ends_with("haiku"), "{row:?}");
+        assert_eq!(row.width(), usize::from(LARGE_W - 2));
+        // a stretched card and a bigger area: nothing drawn outside the card
+        let five = with_subs(opus("proj-a", Status::Running), 5, 0);
+        let rect = Rect::new(3, 2, 40, LARGE_H);
+        let buf = draw(48, LARGE_H + 5, |f| render_wide_card(f, rect, &five, &cfg, false, 0));
+        for y in 0..LARGE_H + 5 {
+            for x in 0..48 {
+                assert!(rect.contains((x, y).into()) || buf[(x, y)].symbol() == " ", "({x},{y})");
+            }
+        }
+        // a narrow width drops the model word and +N rather than overflowing
+        for w in [0usize, 1, 3, 8, 12] {
+            for l in subagent_lines(&five, w, 3) {
+                assert!(l.width() <= w, "{w}: {l:?}");
+            }
+        }
+        for (w, h) in [(0, 0), (1, 1), (31, 14), (32, 13), (5, 2)] {
+            draw(w, h, |f| render_card(f, f.area(), &five, &cfg, true, 0));
+            draw(w, h, |f| render_card(f, f.area(), &five, &Config::default(), true, 0));
+        }
+    }
+
+    #[test]
+    fn running_subagents_add_coloured_dots_inside_the_spirit_band() {
+        // sonnet = lightning, opus = fire, haiku = poison, fable = water (defaults)
+        let cfg_for = |layout| Config { card_layout: layout, ..all_extras() };
+        for (layout, (w, h), band_rows) in [(CardLayout::Standard, (CARD_W, CARD_H), SCENE_ROWS), (CardLayout::Large, (LARGE_W, LARGE_H), LARGE_SCENE_ROWS)] {
+            let cfg = cfg_for(layout);
+            for status in [Status::Idle, Status::NeedsInput, Status::Running] {
+                for t in [0, 17, 44] {
+                    let plain = session("proj-a", status);
+                    let busy = with_subs(plain.clone(), 5, 2);
+                    let (a, b) = (draw(w, h, |f| render_card(f, f.area(), &plain, &cfg, false, t)), draw(w, h, |f| render_card(f, f.area(), &busy, &cfg, false, t)));
+                    let diff: Vec<(u16, u16)> = (1..=band_rows).flat_map(|y| (1..w - 1).map(move |x| (x, y))).filter(|&p| a[p] != b[p]).collect();
+                    if status != Status::Running {
+                        assert_eq!(diff.len(), MAX_DOTS, "{layout:?} {status:?} t={t}: four dots for five running: {diff:?}");
+                    }
+                    assert!(!diff.is_empty() && diff.iter().all(|&(_, y)| y == band_rows), "{layout:?} {status:?}: bottom band row: {diff:?}");
+                    // the border is untouched
+                    for x in 0..w {
+                        assert_eq!(a[(x, 0)], b[(x, 0)]);
+                        assert_eq!(a[(x, h - 1)], b[(x, h - 1)]);
+                    }
+                    for y in 0..h {
+                        assert_eq!(a[(0, y)], b[(0, y)]);
+                        assert_eq!(a[(w - 1, y)], b[(w - 1, y)]);
+                    }
+                }
+            }
+            // a stale-only or finished session draws exactly the plain spirit
+            let stale = with_subs(session("proj-a", Status::Idle), 0, 3);
+            let plain = session("proj-a", Status::Idle);
+            assert_eq!(draw(w, h, |f| render_card(f, f.area(), &stale, &cfg, false, 3)), draw(w, h, |f| render_card(f, f.area(), &plain, &cfg, false, 3)));
+            let done = with_subs(session("proj-a", Status::Done), 2, 0);
+            let done_plain = session("proj-a", Status::Done);
+            let band = |s: &Session| rows(&draw(w, h, |f| render_card(f, f.area(), s, &cfg, false, 3)))[1..=usize::from(band_rows)].to_vec();
+            assert_eq!(band(&done), band(&done_plain), "{layout:?}: no dots when done");
+        }
+        // the dot colour is the subagent model's element
+        let cfg = Config::default();
+        let s = Session { subagents: vec![sub("w", "Explore", "x", Some("fable"), true)], ..session("proj-a", Status::Idle) };
+        let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &cfg, false, 0));
+        let plain = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &session("proj-a", Status::Idle), &cfg, false, 0));
+        let cell = (1..CARD_W - 1).map(|x| (x, SCENE_ROWS)).find(|&p| buf[p] != plain[p]).expect("a dot");
+        let Color::Rgb(r, g, b) = buf[cell].fg else { panic!("rgb") };
+        assert!(b > r && b > g, "fable = water = blue: {:?}", buf[cell].fg);
+        // unknown model: the parent's element (fire by default)
+        let s = Session { subagents: vec![sub("u", "Explore", "x", None, true)], ..session("proj-a", Status::Idle) };
+        let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &cfg, false, 0));
+        let Color::Rgb(r, g, b) = buf[cell].fg else { panic!("rgb") };
+        assert!(r > g && r > b, "parent's fire: {:?}", buf[cell].fg);
+    }
+
+    /// Plain-text look of the standard and large cards with two running subagents.
+    /// Run with `cargo test dump_subagent_cards -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_subagent_cards() {
+        let mut s = opus("proj-a", Status::Running);
+        s.ctx_percent = Some(35.0);
+        s.subagents = vec![
+            sub("a1", "Explore", "파서 위치 찾기", Some("sonnet"), true),
+            sub("a2", "general-purpose", "write the tests for the scanner", Some("haiku"), true),
+            sub("a3", "Plan", "old plan", Some("opus"), false),
+        ];
+        for (layout, (w, h)) in [(CardLayout::Standard, (CARD_W, CARD_H)), (CardLayout::Large, (LARGE_W, LARGE_H))] {
+            let cfg = Config { card_layout: layout, ..Config::default() };
+            println!("{layout:?}:");
+            for r in rows(&draw(w, h, |f| render_card(f, f.area(), &s, &cfg, false, 30))) {
+                println!("{r}");
+            }
+        }
+        for r in rows(&draw(30, 1, |f| render_compact(f, f.area(), &s, &Config::default(), false, 0))) {
+            println!("{r}");
         }
     }
 

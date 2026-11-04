@@ -2,6 +2,7 @@ pub mod cmux;
 pub mod claude_sessions;
 pub mod context;
 pub mod hook_sessions;
+pub mod subagents;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};

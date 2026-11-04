@@ -3,6 +3,8 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::source::subagents::SubagentInfo;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Running,
@@ -59,6 +61,9 @@ pub struct Session {
     /// cmux holds an unread notification for this session's surface
     /// (`cmux list-notifications`); the card border blinks while it does.
     pub unread_notification: bool,
+    /// The newest Claude Code subagents of the session (see
+    /// [`crate::source::subagents`]); filled by every refresh round.
+    pub subagents: Vec<SubagentInfo>,
 }
 
 /// Claude model family; each one maps to a spirit element in the config.

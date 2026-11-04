@@ -111,6 +111,7 @@ fn build(c: Option<&ClaudeSessionRecord>, h: Option<&HookRecord>, x: &CmuxSessio
         ctx_percent: None,
         model: None,
         unread_notification: false,
+        subagents: Vec::new(),
     }
 }
 

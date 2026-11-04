@@ -15,6 +15,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 - The card border blinks blue while the session has unread cmux notifications, for example when it finished.
 - `Enter` (or `Space`) jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
 - Cards are grouped by cmux window. An optional PR chip shows the open pull request for the branch.
+- Running Claude Code subagents show on the card: a `◇×N` marker on the standard card's badge row, one `◇ kind · description` row each on the large card, and one small dot each at the spirit's lower right in the colour of the subagent model's element (see [Subagents](#subagents)).
 
 ## Install
 
@@ -35,7 +36,7 @@ Then run `cmux-magigent` in a cmux pane. Requires a Rust toolchain (1.89 or newe
 | `i` | Open settings |
 | `q` / `Ctrl-C` | Quit |
 
-The selected card has a blue border. In settings, `j` `k` move, `Enter` or `Space` changes a value (saved immediately), and `Esc` closes.
+The selected card has a blue border. `◇×2` after the elapsed time (`◇2` on a one-line card) means two subagents of that session are running. In settings, `j` `k` move, `Enter` or `Space` changes a value (saved immediately), and `Esc` closes.
 
 ## Configuration
 
@@ -51,6 +52,7 @@ The config file is `~/.config/cmux-magigent/config.toml` (if it does not exist y
 | `guess_worktree` | `true` | Guess the worktree of sessions started in the main repository |
 | `done_retention_minutes` | `10` | How long finished sessions stay on screen |
 | `card_layout` | `"standard"` | `"standard"`: 20x10 cards (spirit, name, badge, branch or PR, one-line summary); `"large"`: 32x14 cards (stretched to fill the row) with a bigger spirit and more text (model, branch, PR, summary on up to three lines). Any other value loads as `"standard"`. Also switched with `v` and in settings |
+| `subagent_active_seconds` | `30` | A subagent counts as running while its transcript was written within this many seconds (see [Subagents](#subagents)) |
 | `[extras]` | `branch`, `elapsed`, `summary` on; `last_activity`, `pr` off | Extra info shown on cards |
 
 ## Context usage setup
@@ -80,6 +82,17 @@ The usage drives three stages, on the same thresholds as the magic size:
 The water vortex, poison fog and lightning bolts are centred in the magic area, the columns from just right of the body to the card's inner right edge (a stretched card, in the grid or the preview column, gives them its full width); the fire breath leaves the mouth, and at big magic it roars to the card's inner right edge. At normal magic the water vortex turns very slowly (about one turn every 8 s) and four thin lightning bolts strike at random spots a tick or two apart; at big magic one thick bolt strikes in the centre among three thin ones, and the poison fog of each cast settles into a skull that lingers for about half a second before it fades.
 
 The card size picks the spirit size: the standard card (and the standard cards of the preview column) draws a small spirit, a round body of about 5x3 cells in a 7x4 grid, and the large card draws the bigger 11x4 spirit, whose magic gets an area of about 22 columns to its right. The small spirit has the same state cues, element looks, pose and stages; its eyes are two single white dots in proportion to its body, and its magic is drawn simpler and bolder so it reads at that size: a short bright flame, a solid disc with a clear highlight, dense round puffs (Big poison still settles into the skull, which fits the standard card), and the same bolts as the bigger spirit.
+
+## Subagents
+
+Claude Code keeps each session's subagents next to its transcript, in `~/.claude/projects/<project>/<session id>/subagents/`: per subagent an `agent-<id>.meta.json` (type, task description, model) and an `agent-<id>.jsonl` transcript that grows while it works. cmux-magigent lists that folder (only for the sessions on screen, and only again when the folder changes), parses each meta file once, and never reads the subagent transcripts, only their modification times. At most the eight newest subagents of a session are kept.
+
+A subagent counts as running when its transcript was written within `subagent_active_seconds` (default 30) and its meta does not say `finished`; a finished (Done) session has none running. Only running subagents are shown. Older Claude Code versions write no finished flag, so there a subagent that just finished may still show as running for up to the window (about 30 s).
+
+- Standard card: `◇×N` at the end of the badge row (last activity makes room for it first). Nothing when none is running.
+- Large card: below the summary, one row per running subagent, newest first, `◇ kind · description` with the model family on the right; at most three rows, the last ending in `+N` when more are running. The name, badge, branch, PR and summary rows always come first.
+- One-line cards: `◇N` after the elapsed time.
+- Spirit: one small dot per running subagent (at most four) on the bottom row right of the body, in the base colour of the element its model maps to (the same `model_themes` mapping as the spirit; an unknown model takes the spirit's own element). The dots bob a little behind the spirit and move with its stage, pulse while it runs, are dim while it is idle and are gone once it is done.
 
 ## How status is detected
 

@@ -27,10 +27,12 @@ mod magic;
 mod noise;
 mod particles;
 mod state;
+mod subdots;
 pub mod theme;
 
 use crate::model::Status;
 use canvas::Geom;
+pub use subdots::{SubagentDot, MAX_DOTS};
 use theme::Theme;
 
 /// Design space (the reference x1 canvas in sub-pixels: 17 x 7 terminal
@@ -320,9 +322,16 @@ impl Ctx {
     }
 }
 
-/// Renders one frame of a spirit.
+/// Renders one frame of a spirit (no subagent dots).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render(p: &SpiritParams) -> SpiritGrid {
     render_with(p, true)
+}
+
+/// Renders one frame with a small dot per running subagent at the body's
+/// lower right (see `subdots`); no dots renders exactly like [`render`].
+pub fn render_dots(p: &SpiritParams, dots: &[SubagentDot]) -> SpiritGrid {
+    render_frame(p, true, dots)
 }
 
 /// Sub-pixels per design unit of bob of a small body: its real scale would
@@ -347,8 +356,19 @@ fn pose_of(ctx: &Ctx) -> state::Pose {
 
 /// Renders one frame; `bubbles: false` leaves the poison bubbles out (a seam
 /// for tests: bubbles only ever lighten and add to the frame without them).
+#[cfg_attr(not(test), allow(dead_code))]
 fn render_with(p: &SpiritParams, bubbles: bool) -> SpiritGrid {
-    let g = geom_of(p);
+    render_frame(p, bubbles, &[])
+}
+
+fn render_frame(p: &SpiritParams, bubbles: bool, dots: &[SubagentDot]) -> SpiritGrid {
+    // a finished spirit shows no subagents; at most MAX_DOTS dots
+    let dots = if p.status == Status::Done { &[][..] } else { &dots[..dots.len().min(MAX_DOTS)] };
+    let mut g = geom_of(p);
+    let base_cols = (g.w / 2) as u16;
+    if !dots.is_empty() {
+        g.w = g.w.max(subdots::width_for(&g, dots.len()));
+    }
     let ctx = Ctx::new(p);
     let parts = particles::simulate(&ctx);
     let pulse = state::pulse(ctx.state, ctx.tf);
@@ -375,9 +395,11 @@ fn render_with(p: &SpiritParams, bubbles: bool) -> SpiritGrid {
     if bubbles {
         element::draw_bubbles(&mut cv, &ctx, CX + pose.dx / g.ppu, look.cy);
     }
+    subdots::draw(&mut cv, &ctx, dots);
     eyes::draw(&mut cv, pose.facing, eyes::blinking(ctx.seed, ctx.t), element::ramp(ctx.elem)[1], look.bright);
     let mut grid = cv.cells();
     state::marks(&mut grid, &cv, &ctx, pulse);
+    subdots::keep_only_dots_past(&mut grid, &cv.g, base_cols, dots.len());
     grid
 }
 
