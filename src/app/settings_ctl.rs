@@ -244,6 +244,29 @@ mod tests {
     }
 
     #[test]
+    fn model_rows_cycle_with_keys_and_persist() {
+        use crate::model::ModelFamily;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(&dir);
+        let path = app.config_path.clone().unwrap();
+        for f in ModelFamily::ALL {
+            let row = ALL_ITEMS.iter().position(|i| *i == SettingsItem::ModelTheme(f)).unwrap();
+            app.settings_cursor = 0;
+            for _ in 0..row {
+                press(&mut app, KeyCode::Char('j'));
+            }
+            let before = app.config.model_theme(f);
+            press(&mut app, KeyCode::Enter);
+            assert_eq!(app.config.model_theme(f), before.next(), "{f:?}");
+            assert_eq!(Config::load(&path).model_theme(f), before.next(), "{f:?} saved");
+        }
+        let loaded = Config::load(&path);
+        assert_eq!(loaded, app.config);
+        assert_eq!(loaded.theme, Theme::Fire, "default theme untouched");
+        assert_eq!(app.footer_message(Instant::now()), None);
+    }
+
+    #[test]
     fn first_save_after_failed_load_backs_up_the_original_once() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_in(&dir);

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Running,
@@ -51,4 +53,80 @@ pub struct Session {
     pub window_id: Option<String>,
     /// Context-window usage in percent (0..=100), `None` when unknown.
     pub ctx_percent: Option<f32>,
+    /// Model of the last main-chain assistant reply in the transcript
+    /// (e.g. `claude-opus-4-5`), `None` when unknown.
+    pub model: Option<String>,
+}
+
+/// Claude model family; each one maps to a spirit element in the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelFamily {
+    Fable,
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+impl ModelFamily {
+    pub const ALL: [ModelFamily; 4] = [ModelFamily::Fable, ModelFamily::Opus, ModelFamily::Sonnet, ModelFamily::Haiku];
+
+    /// Lowercase name, used as the config key.
+    pub fn as_key(self) -> &'static str {
+        match self {
+            ModelFamily::Fable => "fable",
+            ModelFamily::Opus => "opus",
+            ModelFamily::Sonnet => "sonnet",
+            ModelFamily::Haiku => "haiku",
+        }
+    }
+}
+
+/// Family of a model id: a case-insensitive search for the family word, so
+/// dated ids, provider prefixes (`us.anthropic.…`) and suffixes (`[1m]`) all
+/// work. Anything else (empty, `<synthetic>`, other vendors) is `None`.
+pub fn model_family(model: &str) -> Option<ModelFamily> {
+    let lower = model.to_ascii_lowercase();
+    ModelFamily::ALL.into_iter().find(|f| lower.contains(f.as_key()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_family_detects_every_spelling() {
+        use ModelFamily::*;
+        let cases: &[(&str, Option<ModelFamily>)] = &[
+            ("claude-opus-4-5", Some(Opus)),
+            ("claude-opus-4-1-20250805", Some(Opus)),
+            ("claude-fable-5-1", Some(Fable)),
+            ("claude-sonnet-5-5", Some(Sonnet)),
+            ("claude-haiku-5-5", Some(Haiku)),
+            ("us.anthropic.claude-opus-4-5-v1:0", Some(Opus)),
+            ("claude-sonnet-5-5[1m]", Some(Sonnet)),
+            ("CLAUDE-HAIKU-5-5", Some(Haiku)),
+            ("Opus", Some(Opus)),
+            ("fable", Some(Fable)),
+            ("claude-3-5-sonnet-20241022", Some(Sonnet)),
+            ("", None),
+            ("   ", None),
+            ("<synthetic>", None),
+            ("gpt-5", None),
+            ("claude-mystery-9", None),
+        ];
+        for (model, want) in cases {
+            assert_eq!(model_family(model), *want, "{model:?}");
+        }
+    }
+
+    #[test]
+    fn model_family_keys_are_lowercase_names() {
+        let keys: Vec<&str> = ModelFamily::ALL.iter().map(|f| f.as_key()).collect();
+        assert_eq!(keys, ["fable", "opus", "sonnet", "haiku"]);
+        for f in ModelFamily::ALL {
+            assert_eq!(serde_json::to_string(&f).unwrap(), format!("\"{}\"", f.as_key()));
+            assert_eq!(model_family(f.as_key()), Some(f));
+        }
+    }
 }

@@ -109,6 +109,7 @@ fn build(c: Option<&ClaudeSessionRecord>, h: Option<&HookRecord>, x: &CmuxSessio
         transcript: h.and_then(|h| h.transcript_path.clone()),
         window_id: None,
         ctx_percent: None,
+        model: None,
     }
 }
 

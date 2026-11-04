@@ -209,21 +209,23 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
             note = pr_note(&reasons, pending);
         }
     }
-    // Context usage: a small file per session, else a cached transcript tail.
+    // Model and context usage. The transcript tail (cached, read once per
+    // change) gives the model; usage prefers the small statusline file.
     let mut transcripts = prev.transcripts.clone();
     let max_age = Duration::from_secs(deps.config.ctx_fresh_seconds);
     let mut used = Vec::new();
     for s in sessions.iter_mut() {
         let t = transcript_for(s, &deps.projects_dir);
+        let tail = t.as_deref().and_then(|p| transcripts.tail(p));
         s.ctx_percent = context_percent(
             &deps.ctx_dir,
             &s.id,
-            t.as_deref(),
+            tail.as_ref(),
             deps.config.context_limit_tokens,
             max_age,
             deps.now,
-            &mut transcripts,
         );
+        s.model = tail.and_then(|t| t.model);
         used.extend(t);
     }
     transcripts.retain(&used);
@@ -617,6 +619,41 @@ mod tests {
         assert_eq!(snap.transcripts.len(), 1);
         let again = build_snapshot(&d, &snap);
         assert_eq!(again.sessions.iter().find(|s| s.id == "b").unwrap().ctx_percent, Some(50.0));
+    }
+
+    #[test]
+    fn build_snapshot_fills_model_with_one_transcript_read() {
+        let dir = setup();
+        for (pid, id) in [(11, "a"), (12, "b"), (13, "c")] {
+            write_claude(&dir.path().join("sessions"), pid, id, "busy");
+        }
+        let cmux = FakeCmux::new(vec![cref("a", true), cref("b", true), cref("c", true)]);
+        let d = deps(dir.path(), &cmux);
+        // a: fresh statusline file and a transcript; b: transcript only; c: nothing
+        std::fs::create_dir_all(&d.ctx_dir).unwrap();
+        std::fs::write(d.ctx_dir.join("a.json"), r#"{"session_id":"a","used_percentage":72}"#).unwrap();
+        for (id, model) in [("a", "claude-haiku-5-5"), ("b", "claude-opus-4-5")] {
+            let proj = d.projects_dir.join(format!("-home-user-{id}"));
+            std::fs::create_dir_all(&proj).unwrap();
+            std::fs::write(
+                proj.join(format!("{id}.jsonl")),
+                format!("{{\"type\":\"assistant\",\"message\":{{\"model\":\"{model}\",\"usage\":{{\"input_tokens\":100000}}}}}}\n"),
+            )
+            .unwrap();
+        }
+        let snap = build_snapshot(&d, &Snapshot::default());
+        let get = |snap: &Snapshot, id: &str| {
+            let s = snap.sessions.iter().find(|s| s.id == id).unwrap();
+            (s.model.clone(), s.ctx_percent)
+        };
+        assert_eq!(get(&snap, "a"), (Some("claude-haiku-5-5".into()), Some(72.0)), "model even when the ctx file wins");
+        assert_eq!(get(&snap, "b"), (Some("claude-opus-4-5".into()), Some(50.0)));
+        assert_eq!(get(&snap, "c"), (None, None));
+        assert_eq!(snap.transcripts.reads(), 2, "one read per transcript for both usage and model");
+        // unchanged files: the next round is all cache hits
+        let again = build_snapshot(&d, &snap);
+        assert_eq!(again.transcripts.reads(), 2, "no re-read of unchanged transcripts");
+        assert_eq!(get(&again, "b"), (Some("claude-opus-4-5".into()), Some(50.0)));
     }
 
     #[test]

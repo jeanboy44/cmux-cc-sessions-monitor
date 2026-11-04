@@ -47,11 +47,10 @@ pub fn compact_mode(one_column: bool, area: Rect) -> bool {
     one_column || area.width < CARD_W || area.height < CARD_H
 }
 
-/// The card's element: a per-card choice (keyed by project dir, then session
-/// id) or the configured default.
+/// The card's element: the one mapped to the session's model family, or the
+/// configured default when the model is unknown (see [`Config::theme_for_model`]).
 fn theme_for(s: &Session, cfg: &Config) -> Theme {
-    let cwd = s.cwd.to_string_lossy();
-    cfg.card_themes.get(cwd.as_ref()).or_else(|| cfg.card_themes.get(&s.id)).copied().unwrap_or(cfg.theme)
+    cfg.theme_for_model(s.model.as_deref())
 }
 
 /// Stable per-session seed (FNV-1a of the session id).
@@ -304,6 +303,7 @@ mod tests {
             transcript: None,
             window_id: None,
             ctx_percent: None,
+            model: None,
         }
     }
 
@@ -537,9 +537,37 @@ mod tests {
             (1..=SCENE_ROWS).flat_map(|y| (1..CARD_W - 1).map(move |x| (x, y))).map(|p| buf[p].fg).collect()
         };
         let mut water = Config::default();
-        water.card_themes.insert("/home/user/proj-a".into(), Theme::Water);
-        assert_ne!(fg(&Config::default()), fg(&water), "per-card theme by project dir");
+        water.theme = Theme::Water;
+        assert_ne!(fg(&Config::default()), fg(&water), "unknown model: the default theme");
         assert!((1..30).any(|t| scene(&Config::default(), t) != scene(&Config::default(), 0)), "tick moves the spirit");
+    }
+
+    #[test]
+    fn card_spirit_follows_the_session_model() {
+        let with_model = |m: Option<&str>| {
+            let mut s = session("proj-a", Status::Running);
+            s.model = m.map(String::from);
+            s
+        };
+        let fg = |s: &Session, cfg: &Config| -> Vec<Color> {
+            let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, cfg, false, 3));
+            (1..=SCENE_ROWS).flat_map(|y| (1..CARD_W - 1).map(move |x| (x, y))).map(|p| buf[p].fg).collect()
+        };
+        let cfg = Config::default();
+        let (opus, haiku) = (with_model(Some("claude-opus-4-5")), with_model(Some("claude-haiku-5-5")));
+        assert_eq!(theme_for(&opus, &cfg), Theme::Fire);
+        assert_eq!(theme_for(&haiku, &cfg), Theme::Poison);
+        assert_ne!(fg(&opus, &cfg), fg(&haiku, &cfg), "opus and haiku spirits differ");
+        // unknown model: same spirit as the default theme (fire)
+        assert_eq!(fg(&with_model(None), &cfg), fg(&opus, &cfg));
+        // a custom mapping changes the spirit
+        let mut custom = Config::default();
+        custom.model_themes.insert("haiku".into(), Theme::Fire);
+        assert_eq!(theme_for(&haiku, &custom), Theme::Fire);
+        assert_eq!(fg(&haiku, &custom), fg(&opus, &cfg));
+        // the model name never shows in the card text
+        let text = rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &opus, &cfg, false, 3))).join("\n");
+        assert!(!text.contains("opus") && !text.contains("claude"), "{text}");
     }
 
     #[test]

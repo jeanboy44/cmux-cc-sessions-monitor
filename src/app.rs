@@ -540,6 +540,7 @@ pub(crate) fn fake_session(id: &str, status: Status) -> Session {
         transcript: None,
         window_id: None,
         ctx_percent: None,
+        model: None,
     }
 }
 

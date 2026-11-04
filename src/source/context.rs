@@ -7,6 +7,10 @@
 //! `message.usage` of the session transcript (only its last [`TAIL_BYTES`]
 //! are read), `input + cache_read + cache_creation` tokens over the configured
 //! context limit. Anything malformed or out of range yields `None`.
+//!
+//! The same tail read also yields the session's model (`message.model` of the
+//! last main-chain assistant record), so a transcript is read at most once per
+//! change ([`TranscriptCache`]).
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -78,13 +82,38 @@ fn usage_tokens(usage: &Value) -> Option<u64> {
     any.then_some(total)
 }
 
-/// Usage percentage from the last main-chain `message.usage` in the last
-/// [`TAIL_BYTES`] of `path`, over `limit` tokens. A first line cut by the
-/// window, unparsable lines and malformed usage records are skipped.
-pub fn read_transcript_usage(path: &Path, limit: u64) -> Option<f32> {
-    if limit == 0 {
-        return None;
+/// What the tail of a transcript tells: the context tokens of the last
+/// main-chain usage record and the model of the last main-chain assistant
+/// reply. Each is searched on its own, so they may come from different records.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranscriptTail {
+    pub tokens: Option<u64>,
+    pub model: Option<String>,
+}
+
+impl TranscriptTail {
+    /// Usage in percent of `limit` tokens (clamped to 100); `None` without a
+    /// usage record or with a zero limit.
+    pub fn usage_percent(&self, limit: u64) -> Option<f32> {
+        if limit == 0 {
+            return None;
+        }
+        percent(self.tokens? as f64 / limit as f64 * 100.0)
     }
+}
+
+/// A real model id: a non-empty string that is not a placeholder like
+/// `<synthetic>` (written for locally generated replies).
+fn real_model(v: &Value) -> Option<&str> {
+    let m = v.as_str()?.trim();
+    (!m.is_empty() && !m.starts_with('<')).then_some(m)
+}
+
+/// Reads the last [`TAIL_BYTES`] of `path` once and extracts the last
+/// main-chain usage and model. A first line cut by the window, unparsable
+/// lines, sidechain and non-assistant records, malformed usage and
+/// placeholder models are skipped. `None` when the file cannot be read.
+pub fn read_transcript_tail(path: &Path) -> Option<TranscriptTail> {
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let start = len.saturating_sub(TAIL_BYTES);
@@ -97,7 +126,11 @@ pub fn read_transcript_usage(path: &Path, limit: u64) -> Option<f32> {
         // The first line is probably cut in the middle: drop it.
         body = body.split_once('\n').map_or("", |(_, rest)| rest);
     }
+    let mut tail = TranscriptTail::default();
     for line in body.lines().rev() {
+        if tail.tokens.is_some() && tail.model.is_some() {
+            break;
+        }
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -107,38 +140,57 @@ pub fn read_transcript_usage(path: &Path, limit: u64) -> Option<f32> {
         if v.get("type").and_then(Value::as_str).is_some_and(|t| t != "assistant") {
             continue;
         }
-        let Some(usage) = v.pointer("/message/usage") else {
-            continue;
-        };
-        // A malformed usage falls back to the next older record.
-        let Some(tokens) = usage_tokens(usage) else {
-            continue;
-        };
-        return percent(tokens as f64 / limit as f64 * 100.0);
+        if tail.tokens.is_none() {
+            // A malformed usage falls back to the next older record.
+            tail.tokens = v.pointer("/message/usage").and_then(usage_tokens);
+        }
+        if tail.model.is_none() {
+            tail.model = v.pointer("/message/model").and_then(real_model).map(String::from);
+        }
     }
-    None
+    Some(tail)
 }
 
-/// Transcript results keyed by path, reused while the file's (mtime, length)
-/// and the limit are unchanged. Carried from one refresh round to the next.
+/// Usage percentage from the last main-chain `message.usage` in the last
+/// [`TAIL_BYTES`] of `path`, over `limit` tokens (see [`read_transcript_tail`]).
+#[cfg(test)]
+pub fn read_transcript_usage(path: &Path, limit: u64) -> Option<f32> {
+    read_transcript_tail(path)?.usage_percent(limit)
+}
+
+/// Transcript tails keyed by path, reused while the file's (mtime, length)
+/// is unchanged. Carried from one refresh round to the next.
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptCache {
-    entries: HashMap<PathBuf, (SystemTime, u64, u64, Option<f32>)>,
+    entries: HashMap<PathBuf, (SystemTime, u64, TranscriptTail)>,
+    /// Tail reads done (cache misses), for tests.
+    #[cfg(test)]
+    reads: usize,
 }
 
 impl TranscriptCache {
-    /// [`read_transcript_usage`], cached.
-    pub fn usage(&mut self, path: &Path, limit: u64) -> Option<f32> {
+    /// [`read_transcript_tail`], cached. `None` when the file is missing or unreadable.
+    pub fn tail(&mut self, path: &Path) -> Option<TranscriptTail> {
         let meta = std::fs::metadata(path).ok()?;
-        let key = (meta.modified().ok()?, meta.len(), limit);
-        if let Some(&(m, l, lim, v)) = self.entries.get(path) {
-            if (m, l, lim) == key {
-                return v;
+        let key = (meta.modified().ok()?, meta.len());
+        if let Some((m, l, tail)) = self.entries.get(path) {
+            if (*m, *l) == key {
+                return Some(tail.clone());
             }
         }
-        let v = read_transcript_usage(path, limit);
-        self.entries.insert(path.to_path_buf(), (key.0, key.1, key.2, v));
-        v
+        #[cfg(test)]
+        {
+            self.reads += 1;
+        }
+        let tail = read_transcript_tail(path)?;
+        self.entries.insert(path.to_path_buf(), (key.0, key.1, tail.clone()));
+        Some(tail)
+    }
+
+    /// Usage percentage of `path` over `limit` tokens, through [`TranscriptCache::tail`].
+    #[cfg(test)]
+    pub fn usage(&mut self, path: &Path, limit: u64) -> Option<f32> {
+        self.tail(path)?.usage_percent(limit)
     }
 
     /// Keeps only the entries of `paths`.
@@ -150,20 +202,24 @@ impl TranscriptCache {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    #[cfg(test)]
+    pub fn reads(&self) -> usize {
+        self.reads
+    }
 }
 
 /// Context usage of one session: the fresh statusline file, else the
-/// transcript (through `cache`), else `None`.
+/// transcript tail's usage, else `None`.
 pub fn context_percent(
     ctx_dir: &Path,
     session_id: &str,
-    transcript: Option<&Path>,
+    tail: Option<&TranscriptTail>,
     limit: u64,
     max_age: Duration,
     now: SystemTime,
-    cache: &mut TranscriptCache,
 ) -> Option<f32> {
-    read_ctx_file(ctx_dir, session_id, now, max_age).or_else(|| cache.usage(transcript?, limit))
+    read_ctx_file(ctx_dir, session_id, now, max_age).or_else(|| tail?.usage_percent(limit))
 }
 
 #[cfg(test)]
@@ -349,11 +405,114 @@ mod tests {
         let p = write_ctx(dir.path(), "s", r#"{"used_percentage":80}"#);
         let m = mtime(&p);
         let mut cache = TranscriptCache::default();
-        assert_eq!(context_percent(dir.path(), "s", Some(&t), 200_000, FRESH, m, &mut cache), Some(80.0));
+        let tail = cache.tail(&t);
+        assert_eq!(context_percent(dir.path(), "s", tail.as_ref(), 200_000, FRESH, m), Some(80.0));
         let stale = m + FRESH + Duration::from_secs(60);
-        assert_eq!(context_percent(dir.path(), "s", Some(&t), 200_000, FRESH, stale, &mut cache), Some(25.0));
-        assert_eq!(context_percent(dir.path(), "s", None, 200_000, FRESH, stale, &mut cache), None);
-        assert_eq!(context_percent(dir.path(), "zz", Some(&dir.path().join("none")), 200_000, FRESH, m, &mut cache), None);
+        assert_eq!(context_percent(dir.path(), "s", tail.as_ref(), 200_000, FRESH, stale), Some(25.0));
+        assert_eq!(context_percent(dir.path(), "s", None, 200_000, FRESH, stale), None);
+        let none = cache.tail(&dir.path().join("none"));
+        assert_eq!(none, None, "missing transcript");
+        assert_eq!(context_percent(dir.path(), "zz", none.as_ref(), 200_000, FRESH, m), None);
+    }
+
+    fn assistant_model(model: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":false,"message":{{"role":"assistant","model":"{model}","usage":{{"input_tokens":20000}}}}}}"#
+        )
+    }
+
+    fn model_of(path: &Path) -> Option<String> {
+        read_transcript_tail(path).and_then(|t| t.model)
+    }
+
+    #[test]
+    fn transcript_model_is_the_last_main_chain_assistant_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(
+            &t,
+            &[
+                assistant_model("claude-haiku-5-5"),
+                assistant_model("claude-opus-4-5"),
+                r#"{"type":"user","message":{"role":"user","content":"hi"}}"#.into(),
+            ],
+        );
+        let tail = read_transcript_tail(&t).unwrap();
+        assert_eq!(tail.model.as_deref(), Some("claude-opus-4-5"));
+        assert_eq!(tail.tokens, Some(20_000), "usage and model come from the same read");
+        assert_eq!(tail.usage_percent(200_000), Some(10.0));
+        assert_eq!(tail.usage_percent(0), None);
+    }
+
+    #[test]
+    fn transcript_model_none_without_assistant_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(&t, &[r#"{"type":"user","message":{"model":"claude-opus-4-5","content":"x"}}"#.into(), "garbage".into()]);
+        assert_eq!(model_of(&t), None);
+        // usage without a model: tokens only
+        write_lines(&t, &[assistant(1000, 0, 0)]);
+        assert_eq!(read_transcript_tail(&t), Some(TranscriptTail { tokens: Some(1000), model: None }));
+        assert_eq!(read_transcript_tail(&dir.path().join("missing.jsonl")), None);
+    }
+
+    #[test]
+    fn transcript_model_skips_sidechain_synthetic_and_broken_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(
+            &t,
+            &[
+                assistant_model("claude-sonnet-5-5"),
+                r#"{"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-5-5"}}"#.into(),
+                r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#.into(),
+                r#"{"type":"assistant","message":{"model":""}}"#.into(),
+                r#"{"type":"assistant","message":{"model":42}}"#.into(),
+                r#"{"type":"assistant","message":{"model":"claude-fable-5-1","usage":{"input_tok"#.into(), // cut
+            ],
+        );
+        assert_eq!(model_of(&t), Some("claude-sonnet-5-5".into()));
+    }
+
+    #[test]
+    fn transcript_model_line_cut_by_the_window_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        // a model line straddling the 64 KB window start is cut mid-line and
+        // skipped; the earlier one inside the window is used
+        let big = format!(r#"{{"type":"assistant","message":{{"model":"claude-haiku-5-5","content":"{}"}}}}"#, "y".repeat(300));
+        let mid = assistant_model("claude-opus-4-5");
+        let (pre, post) = (r#"{"type":"user","message":{"content":""#, r#""}}"#);
+        let fill = TAIL_BYTES as usize - 50 - (mid.len() + 1) - (pre.len() + post.len() + 1);
+        let last = format!("{pre}{}{post}", "z".repeat(fill));
+        write_lines(&t, &[big.clone(), mid, last]);
+        let len = std::fs::metadata(&t).unwrap().len();
+        assert_eq!(len - TAIL_BYTES, big.len() as u64 + 1 - 50, "test setup: cut inside the big line");
+        assert_eq!(model_of(&t), Some("claude-opus-4-5".into()));
+        // only a cut model line in reach: no model
+        let mut lines = vec![big];
+        let filler = format!(r#"{{"type":"user","message":{{"content":"{}"}}}}"#, "x".repeat(1000));
+        lines.extend(std::iter::repeat_n(filler.clone(), (TAIL_BYTES as usize / filler.len()) + 2));
+        write_lines(&t, &lines);
+        assert_eq!(model_of(&t), None, "head is not read");
+    }
+
+    #[test]
+    fn transcript_cache_reads_each_unchanged_file_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(&t, &[assistant_model("claude-opus-4-5")]);
+        let mut cache = TranscriptCache::default();
+        let first = cache.tail(&t).unwrap();
+        assert_eq!(first.model.as_deref(), Some("claude-opus-4-5"));
+        assert_eq!(cache.usage(&t, 200_000), Some(10.0));
+        assert_eq!(cache.tail(&t), Some(first));
+        assert_eq!(cache.reads(), 1, "model and usage share one read");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&t).unwrap();
+        writeln!(f, "{}", assistant_model("claude-haiku-5-5")).unwrap();
+        drop(f);
+        assert_eq!(cache.tail(&t).unwrap().model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(cache.reads(), 2, "a changed file is read again");
     }
 
     #[test]

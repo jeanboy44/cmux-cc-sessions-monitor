@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::{model_family, ModelFamily};
 use crate::spirit::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,15 +19,18 @@ pub struct Extras {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Default card theme. Files written before themes existed may still hold
-    /// a `view` key; unknown keys are ignored, so they load fine.
+    /// Theme of sessions whose model is unknown. Files written before themes
+    /// existed may still hold a `view` key; unknown keys are ignored, so they
+    /// load fine.
     pub theme: Theme,
     pub extras: Extras,
     pub pr_poll_seconds: u64,
     pub guess_worktree: bool,
     pub done_retention_minutes: u64,
-    /// Per-card theme overrides, keyed by the session's cwd (its id when the cwd is empty).
-    pub card_themes: BTreeMap<String, Theme>,
+    /// Spirit element per model family, keyed by [`ModelFamily::as_key`]. A
+    /// family missing from the map uses its default ([`default_model_theme`]).
+    /// Older files may hold a `card_themes` table; it is ignored.
+    pub model_themes: BTreeMap<String, Theme>,
     /// Context window size used when usage comes from the transcript.
     pub context_limit_tokens: u64,
     /// The statusline context file is trusted for this long after it was written.
@@ -53,11 +57,27 @@ impl Default for Config {
             pr_poll_seconds: 45,
             guess_worktree: true,
             done_retention_minutes: 10,
-            card_themes: BTreeMap::new(),
+            model_themes: default_model_themes(),
             context_limit_tokens: 200_000,
             ctx_fresh_seconds: 300,
         }
     }
+}
+
+/// Built-in element of a model family (user decision: fable = water,
+/// opus = fire, sonnet = lightning, haiku = poison).
+pub fn default_model_theme(family: ModelFamily) -> Theme {
+    match family {
+        ModelFamily::Fable => Theme::Water,
+        ModelFamily::Opus => Theme::Fire,
+        ModelFamily::Sonnet => Theme::Lightning,
+        ModelFamily::Haiku => Theme::Poison,
+    }
+}
+
+/// The full default mapping, as written to a fresh config file.
+pub fn default_model_themes() -> BTreeMap<String, Theme> {
+    ModelFamily::ALL.into_iter().map(|f| (f.as_key().to_string(), default_model_theme(f))).collect()
 }
 
 /// Footer note when the config file exists but cannot be read or parsed.
@@ -66,6 +86,17 @@ pub const LOAD_FAILED: &str = "설정 파일을 읽지 못해 기본값을 씁�
 pub const MAX_BACKUPS: usize = 5;
 
 impl Config {
+    /// Element of a model family: the configured one, else its default.
+    pub fn model_theme(&self, family: ModelFamily) -> Theme {
+        self.model_themes.get(family.as_key()).copied().unwrap_or_else(|| default_model_theme(family))
+    }
+
+    /// Element of a session running `model`: its family's element, or
+    /// [`Config::theme`] when the model is missing or not a known family.
+    pub fn theme_for_model(&self, model: Option<&str>) -> Theme {
+        model.and_then(model_family).map_or(self.theme, |f| self.model_theme(f))
+    }
+
     /// Loads the config; a missing or unparsable file yields the defaults.
     /// The app itself uses [`Config::load_checked`] to report the failure.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -148,7 +179,7 @@ mod tests {
     fn config_defaults_match_spec() {
         let c = Config::default();
         assert_eq!(c.theme, Theme::Fire);
-        assert!(c.card_themes.is_empty());
+        assert_eq!(c.model_themes, default_model_themes());
         assert!(!c.extras.pr);
         assert!(!c.extras.last_activity);
         assert!(c.extras.summary);
@@ -303,7 +334,7 @@ mod tests {
         let (c, err) = Config::load_checked(&path);
         assert_eq!(err, None, "the removed view key is ignored");
         assert_eq!(c.theme, Theme::default());
-        assert!(c.card_themes.is_empty());
+        assert_eq!(c.model_themes, default_model_themes());
         assert_eq!(c.pr_poll_seconds, 30);
         assert!(c.extras.pr);
     }
@@ -318,8 +349,8 @@ mod tests {
         assert_eq!(c, Config::default());
         assert_eq!(err.as_deref(), Some(LOAD_FAILED));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "loading never rewrites the file");
-        // a bad per-card theme is the same kind of failure
-        std::fs::write(&path, "[card_themes]\n\"/w/proj\" = \"plasma\"\n").unwrap();
+        // a bad per-model theme is the same kind of failure
+        std::fs::write(&path, "[model_themes]\nopus = \"plasma\"\n").unwrap();
         assert_eq!(Config::load_checked(&path), (Config::default(), Some(LOAD_FAILED.into())));
     }
 
@@ -332,8 +363,81 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         assert_eq!(Config::load_checked(&path), (Config::default(), Some(LOAD_FAILED.into())));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "loading never rewrites the file");
-        std::fs::write(&path, "[card_themes]\n\"/w/proj\" = \"ice\"\n").unwrap();
+        std::fs::write(&path, "[model_themes]\nhaiku = \"ice\"\n").unwrap();
         assert_eq!(Config::load_checked(&path), (Config::default(), Some(LOAD_FAILED.into())));
+    }
+
+    #[test]
+    fn removed_melee_theme_is_an_unknown_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for text in ["theme = \"melee\"\n", "[model_themes]\nopus = \"melee\"\n"] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(Config::load_checked(&path), (Config::default(), Some(LOAD_FAILED.into())), "{text}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "loading never rewrites the file");
+        }
+    }
+
+    #[test]
+    fn default_model_mapping() {
+        let c = Config::default();
+        let want = [
+            (ModelFamily::Fable, Theme::Water),
+            (ModelFamily::Opus, Theme::Fire),
+            (ModelFamily::Sonnet, Theme::Lightning),
+            (ModelFamily::Haiku, Theme::Poison),
+        ];
+        for (f, t) in want {
+            assert_eq!(c.model_themes.get(f.as_key()), Some(&t), "{f:?}");
+            assert_eq!(c.model_theme(f), t, "{f:?}");
+        }
+        assert_eq!(c.model_themes.len(), 4);
+    }
+
+    #[test]
+    fn theme_for_model_uses_mapping_then_fallback() {
+        let mut c = Config::default();
+        assert_eq!(c.theme_for_model(Some("claude-opus-4-5")), Theme::Fire);
+        assert_eq!(c.theme_for_model(Some("claude-fable-5-1")), Theme::Water);
+        assert_eq!(c.theme_for_model(Some("claude-sonnet-5-5")), Theme::Lightning);
+        assert_eq!(c.theme_for_model(Some("claude-haiku-5-5")), Theme::Poison);
+        // unknown or missing model: the configured default theme
+        c.theme = Theme::Water;
+        for m in [None, Some(""), Some("<synthetic>"), Some("gpt-5")] {
+            assert_eq!(c.theme_for_model(m), Theme::Water, "{m:?}");
+        }
+        // a custom mapping is honored
+        c.model_themes.insert("opus".into(), Theme::Lightning);
+        assert_eq!(c.theme_for_model(Some("us.anthropic.claude-opus-4-5")), Theme::Lightning);
+        // a missing family entry falls back to that family's default, not cfg.theme
+        c.model_themes.remove("haiku");
+        assert_eq!(c.theme_for_model(Some("claude-haiku-5-5")), Theme::Poison);
+    }
+
+    #[test]
+    fn partial_model_map_falls_back_per_family() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"water\"\n[model_themes]\nopus = \"poison\"\nfuture-model = \"fire\"\n").unwrap();
+        let (c, err) = Config::load_checked(&path);
+        assert_eq!(err, None);
+        assert_eq!(c.model_theme(ModelFamily::Opus), Theme::Poison);
+        assert_eq!(c.model_theme(ModelFamily::Fable), Theme::Water);
+        assert_eq!(c.model_theme(ModelFamily::Sonnet), Theme::Lightning);
+        assert_eq!(c.model_theme(ModelFamily::Haiku), Theme::Poison);
+        assert_eq!(c.theme_for_model(Some("claude-sonnet-5-5")), Theme::Lightning);
+    }
+
+    #[test]
+    fn old_config_with_card_themes_loads() {
+        // card_themes (per-card overrides) was removed: the key is ignored
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"lightning\"\n[card_themes]\n\"/w/proj\" = \"water\"\nsess-1 = \"fire\"\n").unwrap();
+        let (c, err) = Config::load_checked(&path);
+        assert_eq!(err, None);
+        assert_eq!(c.theme, Theme::Lightning);
+        assert_eq!(c.model_themes, default_model_themes());
     }
 
     #[test]
@@ -342,11 +446,12 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut c = Config::default();
         c.theme = Theme::Poison;
-        c.card_themes.insert("/w/proj-a".into(), Theme::Lightning);
-        c.card_themes.insert("sess-1".into(), Theme::Water);
+        c.model_themes.insert("opus".into(), Theme::Lightning);
+        c.model_themes.insert("fable".into(), Theme::Fire);
         c.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("theme = \"poison\""), "{text}");
+        assert!(text.contains("[model_themes]") && text.contains("opus = \"lightning\""), "{text}");
         assert_eq!(Config::load(&path), c);
     }
 

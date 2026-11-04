@@ -12,12 +12,15 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::Config;
+use crate::model::ModelFamily;
 use crate::spirit::theme::Theme;
 use crate::ui::style::{self, cursor_visible, window_block, CURSOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsItem {
     Theme,
+    /// Spirit element of one model family.
+    ModelTheme(ModelFamily),
     ExtraBranch,
     ExtraElapsed,
     ExtraLastActivity,
@@ -26,8 +29,12 @@ pub enum SettingsItem {
     GuessWorktree,
 }
 
-pub const ALL_ITEMS: [SettingsItem; 7] = [
+pub const ALL_ITEMS: [SettingsItem; 11] = [
     SettingsItem::Theme,
+    SettingsItem::ModelTheme(ModelFamily::Fable),
+    SettingsItem::ModelTheme(ModelFamily::Opus),
+    SettingsItem::ModelTheme(ModelFamily::Sonnet),
+    SettingsItem::ModelTheme(ModelFamily::Haiku),
     SettingsItem::ExtraBranch,
     SettingsItem::ExtraElapsed,
     SettingsItem::ExtraLastActivity,
@@ -40,10 +47,16 @@ pub const HELP: &str = "j/k 이동  Enter/Space 변경  Esc 닫기";
 pub const PR_UNAVAILABLE: &str = "사용 불가";
 const TITLE: &str = " ⚙ SETTINGS ";
 
-/// The default theme cycles (see [`Theme::next`]); every other item flips its flag.
+/// Theme items cycle (see [`Theme::next`]); every other item flips its flag.
+/// A model row cycles from the family's current element, so a family missing
+/// from a hand-edited map starts from its default.
 pub fn toggle(cfg: &mut Config, item: SettingsItem) {
     match item {
         SettingsItem::Theme => cfg.theme = cfg.theme.next(),
+        SettingsItem::ModelTheme(f) => {
+            let next = cfg.model_theme(f).next();
+            cfg.model_themes.insert(f.as_key().to_string(), next);
+        }
         SettingsItem::ExtraBranch => cfg.extras.branch = !cfg.extras.branch,
         SettingsItem::ExtraElapsed => cfg.extras.elapsed = !cfg.extras.elapsed,
         SettingsItem::ExtraLastActivity => cfg.extras.last_activity = !cfg.extras.last_activity,
@@ -56,6 +69,10 @@ pub fn toggle(cfg: &mut Config, item: SettingsItem) {
 pub fn item_label(item: SettingsItem) -> &'static str {
     match item {
         SettingsItem::Theme => "기본 테마",
+        SettingsItem::ModelTheme(ModelFamily::Fable) => "fable 모델",
+        SettingsItem::ModelTheme(ModelFamily::Opus) => "opus 모델",
+        SettingsItem::ModelTheme(ModelFamily::Sonnet) => "sonnet 모델",
+        SettingsItem::ModelTheme(ModelFamily::Haiku) => "haiku 모델",
         SettingsItem::ExtraBranch => "브랜치",
         SettingsItem::ExtraElapsed => "경과 시간",
         SettingsItem::ExtraLastActivity => "마지막 활동",
@@ -65,10 +82,10 @@ pub fn item_label(item: SettingsItem) -> &'static str {
     }
 }
 
-/// Boolean state of a flag item; `None` for [`SettingsItem::Theme`].
+/// Boolean state of a flag item; `None` for the theme items.
 fn flag(cfg: &Config, item: SettingsItem) -> Option<bool> {
     match item {
-        SettingsItem::Theme => None,
+        SettingsItem::Theme | SettingsItem::ModelTheme(_) => None,
         SettingsItem::ExtraBranch => Some(cfg.extras.branch),
         SettingsItem::ExtraElapsed => Some(cfg.extras.elapsed),
         SettingsItem::ExtraLastActivity => Some(cfg.extras.last_activity),
@@ -82,6 +99,7 @@ pub fn item_value(cfg: &Config, item: SettingsItem) -> String {
     match (item, flag(cfg, item)) {
         (_, Some(true)) => "켜짐".into(),
         (_, Some(false)) => "꺼짐".into(),
+        (SettingsItem::ModelTheme(f), None) => theme_label(cfg.model_theme(f)).into(),
         (_, None) => theme_label(cfg.theme).into(),
     }
 }
@@ -177,7 +195,7 @@ mod tests {
     #[test]
     fn toggle_extra_flips_flag() {
         let mut c = Config::default();
-        for item in ALL_ITEMS.into_iter().filter(|i| *i != SettingsItem::Theme) {
+        for item in ALL_ITEMS.into_iter().filter(|i| flag(&Config::default(), *i).is_some()) {
             let before = flag(&c, item).unwrap();
             toggle(&mut c, item);
             assert_eq!(flag(&c, item), Some(!before), "{item:?}");
@@ -210,7 +228,8 @@ mod tests {
     fn settings_render_shows_cursor_and_values() {
         let mut cfg = Config::default();
         cfg.theme = Theme::Poison;
-        let text = screen(&cfg, 2, 0, None);
+        let elapsed = ALL_ITEMS.iter().position(|i| *i == SettingsItem::ExtraElapsed).unwrap();
+        let text = screen(&cfg, elapsed, 0, None);
         let all = text.join("\n");
         for item in ALL_ITEMS {
             assert!(all.contains(item_label(item)), "{item:?}\n{all}");
@@ -225,13 +244,60 @@ mod tests {
         assert!(!all.contains("뷰"), "the A/B view row is gone");
         assert!(row("PR 상태").contains("꺼짐"));
         // hidden half of the blink: no cursor
-        let hidden = screen(&cfg, 2, 6, None).join("\n");
+        let hidden = screen(&cfg, elapsed, 6, None).join("\n");
         assert!(!hidden.contains(CURSOR), "{hidden}");
         assert!(hidden.contains("경과 시간"));
         // v2-only extras do not exist
         for v2 in ["토큰", "CPU", "도구 호출", "메모리"] {
             assert!(!all.contains(v2), "{v2}");
         }
+    }
+
+    #[test]
+    fn model_rows_cycle_each_family_independently() {
+        use crate::model::ModelFamily;
+        let mut c = Config::default();
+        let rows: Vec<SettingsItem> = ModelFamily::ALL.into_iter().map(SettingsItem::ModelTheme).collect();
+        for item in &rows {
+            assert!(ALL_ITEMS.contains(item), "{item:?} is a settings row");
+        }
+        let labels: Vec<&str> = rows.iter().map(|i| item_label(*i)).collect();
+        assert_eq!(labels, ["fable 모델", "opus 모델", "sonnet 모델", "haiku 모델"]);
+        let values: Vec<String> = rows.iter().map(|i| item_value(&c, *i)).collect();
+        assert_eq!(values, ["물", "불", "번개", "독"], "default mapping shown");
+        // opus cycles through all four elements and back; others stay put
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            toggle(&mut c, SettingsItem::ModelTheme(ModelFamily::Opus));
+            seen.push(c.model_theme(ModelFamily::Opus));
+        }
+        assert_eq!(seen, [Theme::Water, Theme::Poison, Theme::Lightning, Theme::Fire]);
+        for f in ModelFamily::ALL {
+            toggle(&mut c, SettingsItem::ModelTheme(f));
+        }
+        assert_eq!(
+            ModelFamily::ALL.map(|f| c.model_theme(f)),
+            [Theme::Poison, Theme::Water, Theme::Fire, Theme::Lightning],
+            "each row cycles its own family from its current element"
+        );
+        assert_eq!(c.theme, Theme::Fire, "the default theme row is untouched");
+        // a family missing from a hand-edited map cycles from its default
+        c.model_themes.clear();
+        toggle(&mut c, SettingsItem::ModelTheme(ModelFamily::Haiku));
+        assert_eq!(c.model_themes.get("haiku"), Some(&Theme::Lightning));
+    }
+
+    #[test]
+    fn settings_render_shows_model_rows() {
+        let mut cfg = Config::default();
+        cfg.model_themes.insert("sonnet".into(), Theme::Fire);
+        let text = screen(&cfg, 0, 0, None);
+        let row = |label: &str| text.iter().find(|l| l.contains(label)).unwrap_or_else(|| panic!("{label}: {text:?}")).clone();
+        let end = |label: &str| row(label).trim_end_matches(['│', ' ']).to_string();
+        assert!(end("fable 모델").ends_with("물"));
+        assert!(end("opus 모델").ends_with("불"));
+        assert!(end("sonnet 모델").ends_with("불"));
+        assert!(end("haiku 모델").ends_with("독"));
     }
 
     #[test]
