@@ -663,11 +663,11 @@ mod tests {
         assert!(idle.windows(2).all(|w| w[0] == w[1]), "body unchanged: {idle:?}");
         // Running: the magic reaches farther as ctx grows; unknown ctx = normal magic
         let reach = |pct: Option<f32>| -> u16 { (0..120).filter_map(|t| lit_cols(&with(Status::Running, pct), t).last().copied()).max().unwrap() };
-        let (none, low, mid, high) = (reach(None), reach(Some(10.0)), reach(Some(50.0)), reach(Some(80.0)));
+        let (none, low, mid, high) = (reach(None), reach(Some(10.0)), reach(Some(30.0)), reach(Some(80.0)));
         assert_eq!(none, mid, "unknown ctx casts normal magic");
         assert!(low < mid && mid < high, "magic grows with ctx: {low} {mid} {high}");
         // every level stays inside the inner area
-        for pct in [10.0, 50.0, 80.0, 95.0] {
+        for pct in [10.0, 30.0, 50.0, 80.0, 95.0] {
             for t in 0..120 {
                 let cols = lit_cols(&with(Status::Running, Some(pct)), t);
                 assert!(cols.iter().all(|&x| (1..CARD_W - 1).contains(&x)), "{pct} {t}: {cols:?}");
@@ -1210,7 +1210,7 @@ mod tests {
                 })
                 .sum()
         };
-        let (low, mid, high) = (painted(10.0), painted(50.0), painted(80.0));
+        let (low, mid, high) = (painted(10.0), painted(30.0), painted(80.0));
         assert!(low < mid && mid < high, "fire breath grows: {low} {mid} {high}");
     }
 

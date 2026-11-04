@@ -8,10 +8,10 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 
 ## Features
 
-- One 20x10 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, the git branch (or PR) and a one-line summary. `v` switches to a large 28x13 card with a quarter-size spirit and more text: the model family, branch and PR on their own rows, and the summary on two lines.
+- One 20x10 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, the git branch (or PR) and a one-line summary. `v` switches to a large card, at least 32x14 and stretched to fill its grid cell, with a quarter-size spirit and more text: the model family, branch and PR on their own rows, and the summary on up to three lines.
 - Each spirit stands for a Claude model: fable is water, opus is fire, sonnet is lightning, haiku is poison (green). You can change the element per model in settings, and unknown models use the `theme` element (default fire).
 - The spirit's state is its animation: running (the body churns and casts its magic to the right: fire breath from the mouth, and a water vortex, poison fog or lightning bolts centred in the room right of the body), needs input (a bobbing `?`), idle (dim slow bob and `z`), done (sparkles), unknown (gray).
-- Context usage sets how hard the spirit works (relaxed, lively, struggling; see [Context usage setup](#context-usage-setup)) and, while running, the size of the magic: small under 30%, normal, big from 70%, and a red warning flicker above 90%.
+- Context usage sets how hard the spirit works (relaxed, lively, struggling; see [Context usage setup](#context-usage-setup)) and, while running, the size of the magic: small under 20%, normal from 20%, big from 50%, and a red warning flicker above 90%.
 - The card border blinks blue while the session has unread cmux notifications, for example when it finished.
 - `Enter` (or `Space`) jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
 - Cards are grouped by cmux window. An optional PR chip shows the open pull request for the branch.
@@ -73,9 +73,9 @@ The old `~/.cache/cmux-cc-monitor/ctx/` is still read too (the freshest valid fi
 
 The usage drives three stages, on the same thresholds as the magic size:
 
-- Relaxed (under 30%): the spirit barely moves, with a slow, tiny bob, calm churn, fewer ambient bits, and a gentler cast pose on only some casts.
-- Lively (30% to 70%, or unknown): the normal motion.
-- Struggling (70% and up): the body trembles and pants with a faster bob and a slight squash and stretch, pale sweat drops slide down its side, casts wind up longer and recoil harder, and an idle spirit slumps with heavy, slow breaths. Above 90% the body also flickers red.
+- Relaxed (under 20%): the spirit barely moves, with a slow, tiny bob, calm churn, fewer ambient bits, and a gentler cast pose on only some casts.
+- Lively (20% to 50%, or unknown): the normal motion.
+- Struggling (50% and up): the body trembles and pants with a faster bob and a slight squash and stretch, pale sweat drops slide down its side, casts wind up longer and recoil harder, and an idle spirit slumps with heavy, slow breaths. Above 90% the body also flickers red.
 
 The water vortex, poison fog and lightning bolts are centred in the magic area, the columns from just right of the body to the card's inner right edge (the wider preview card gives them its full width); the fire breath leaves the mouth.
 

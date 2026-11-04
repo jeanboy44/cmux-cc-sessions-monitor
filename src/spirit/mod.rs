@@ -58,9 +58,9 @@ fn phase_tick(t: u64) -> f32 {
 pub const WARN_HALF_PERIOD: u64 = 8;
 
 /// Context usage (percent) at which the magic grows from small to normal,
-/// and from normal to big.
-const MAGIC_NORMAL_AT: f32 = 30.0;
-const MAGIC_BIG_AT: f32 = 70.0;
+/// and from normal to big; [`stage_for`] shares them.
+const MAGIC_NORMAL_AT: f32 = 20.0;
+const MAGIC_BIG_AT: f32 = 50.0;
 /// Context usage above which the body flickers red.
 const WARNING_ABOVE: f32 = 90.0;
 /// Canvas width (sub-pixels) of a spirit casting big magic: 17 cells, the
@@ -87,8 +87,8 @@ impl Magic {
     pub const ALL: [Magic; 3] = [Magic::Small, Magic::Normal, Magic::Big];
 }
 
-/// Magic level for a context usage: < 30 % small, 30..70 % normal,
-/// >= 70 % big. Unknown or invalid (NaN, negative) usage casts normal magic.
+/// Magic level for a context usage: < 20 % small, 20..50 % normal,
+/// >= 50 % big. Unknown or invalid (NaN, negative) usage casts normal magic.
 pub fn magic_for(ctx_percent: Option<f32>) -> Magic {
     match ctx_percent {
         Some(p) if p.is_nan() || p < 0.0 => Magic::Normal,
@@ -103,17 +103,17 @@ pub fn magic_for(ctx_percent: Option<f32>) -> Magic {
 /// thresholds as [`Magic`] (which still scales the cast particles).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stage {
-    /// stage 1 (< 30 %): slow, tiny bob, calm churn, few ambient bits
+    /// stage 1 (< 20 %): slow, tiny bob, calm churn, few ambient bits
     Relaxed,
     /// stage 2: the reference motion
     #[default]
     Lively,
-    /// stage 3 (>= 70 %): trembling, panting, sweat drops, effortful casts
+    /// stage 3 (>= 50 %): trembling, panting, sweat drops, effortful casts
     Struggling,
 }
 
-/// Context stage for a context usage (see [`magic_for`]: < 30 % relaxed,
-/// 30..70 % lively, >= 70 % struggling; unknown or invalid usage is lively).
+/// Context stage for a context usage (see [`magic_for`]: < 20 % relaxed,
+/// 20..50 % lively, >= 50 % struggling; unknown or invalid usage is lively).
 pub fn stage_for(ctx_percent: Option<f32>) -> Stage {
     match magic_for(ctx_percent) {
         Magic::Small => Stage::Relaxed,
@@ -646,16 +646,18 @@ mod tests {
 
     #[test]
     fn magic_for_thresholds() {
-        let cases: [(Option<f32>, Magic); 13] = [
+        let cases: [(Option<f32>, Magic); 15] = [
             (None, Magic::Normal),
             (Some(f32::NAN), Magic::Normal),
             (Some(-5.0), Magic::Normal),
             (Some(f32::NEG_INFINITY), Magic::Normal),
             (Some(0.0), Magic::Small),
-            (Some(29.9), Magic::Small),
+            (Some(19.9), Magic::Small),
+            (Some(20.0), Magic::Normal),
             (Some(30.0), Magic::Normal),
-            (Some(69.9), Magic::Normal),
-            (Some(70.0), Magic::Big),
+            (Some(49.9), Magic::Normal),
+            (Some(50.0), Magic::Big),
+            (Some(90.0), Magic::Big),
             (Some(90.1), Magic::Big),
             (Some(100.0), Magic::Big),
             (Some(250.0), Magic::Big),
@@ -963,6 +965,7 @@ mod tests {
         assert!(!warning(None));
         assert!(!warning(Some(f32::NAN)));
         assert!(!warning(Some(50.0)));
+        assert!(!warning(Some(50.0)), "stage 3 alone does not warn");
         assert!(!warning(Some(90.0)));
         assert!(warning(Some(90.1)));
         assert!(warning(Some(100.0)));
@@ -1914,14 +1917,15 @@ mod tests {
 
     #[test]
     fn stage_for_thresholds() {
-        let cases: [(Option<f32>, Stage); 11] = [
+        let cases: [(Option<f32>, Stage); 12] = [
             (None, Stage::Lively),
             (Some(f32::NAN), Stage::Lively),
             (Some(-5.0), Stage::Lively),
             (Some(0.0), Stage::Relaxed),
-            (Some(29.9), Stage::Relaxed),
-            (Some(30.0), Stage::Lively),
-            (Some(69.9), Stage::Lively),
+            (Some(19.9), Stage::Relaxed),
+            (Some(20.0), Stage::Lively),
+            (Some(49.9), Stage::Lively),
+            (Some(50.0), Stage::Struggling),
             (Some(70.0), Stage::Struggling),
             (Some(95.0), Stage::Struggling),
             (Some(100.0), Stage::Struggling),
@@ -1929,6 +1933,13 @@ mod tests {
         ];
         for (pct, want) in cases {
             assert_eq!(stage_for(pct), want, "{pct:?}");
+            // one set of thresholds: stage n casts magic level n
+            let level = match want {
+                Stage::Relaxed => Magic::Small,
+                Stage::Lively => Magic::Normal,
+                Stage::Struggling => Magic::Big,
+            };
+            assert_eq!(magic_for(pct), level, "{pct:?}");
         }
         assert_eq!(Stage::default(), Stage::Lively);
         assert_eq!(params(Theme::Fire, Status::Running, Size::S, 0, 1).stage, Stage::Lively, "tests default to stage 2");
