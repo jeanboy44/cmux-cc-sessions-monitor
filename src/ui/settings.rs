@@ -12,7 +12,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::Config;
-use crate::fx::theme::Theme;
+use crate::spirit::theme::Theme;
 use crate::ui::style::{self, cursor_visible, window_block, CURSOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +93,6 @@ pub fn theme_label(theme: Theme) -> &'static str {
         Theme::Water => "물",
         Theme::Ice => "얼음",
         Theme::Lightning => "번개",
-        Theme::Melee => "근접",
     }
 }
 
@@ -165,11 +164,11 @@ mod tests {
         let mut c = Config::default();
         assert_eq!(c.theme, Theme::Fire);
         let mut seen = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..4 {
             toggle(&mut c, SettingsItem::Theme);
             seen.push(c.theme);
         }
-        assert_eq!(seen, [Theme::Water, Theme::Ice, Theme::Lightning, Theme::Melee, Theme::Fire]);
+        assert_eq!(seen, [Theme::Water, Theme::Ice, Theme::Lightning, Theme::Fire]);
         assert_eq!(item_value(&c, SettingsItem::Theme), "불");
         c.theme = Theme::Lightning;
         assert_eq!(item_value(&c, SettingsItem::Theme), "번개");

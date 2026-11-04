@@ -11,7 +11,6 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
-use crate::fx::static_scene;
 use crate::ui::card::{compact_mode, render_card, render_compact, CARD_H};
 use crate::ui::grid::{card_cols, cell_rect};
 use crate::ui::groups::{divider_text, place_rows, row_of, scroll_to_show_rows, Row};
@@ -49,7 +48,7 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
         draw_empty(f, grid, app.loaded);
         (false, false)
     } else {
-        draw_grid(f, grid, app, layout.one_column)
+        draw_grid(f, grid, app, layout.one_column, tick)
     };
     draw_footer(f, footer, app, above, below, now);
 
@@ -62,7 +61,7 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
 /// vertical scrolling in layout rows; returns (more above, more below).
 /// In compact mode (preview shown, or the area cannot hold one full card,
 /// see [`compact_mode`]) every session is one line in a single column.
-fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool) -> (bool, bool) {
+fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool, tick: u64) -> (bool, bool) {
     if area.is_empty() {
         return (false, false);
     }
@@ -78,8 +77,6 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool) -> (boo
     app.scroll = scroll_to_show_rows(&rows, &heights, app.scroll, sel_row, area.height);
     let placed = place_rows(&heights, app.scroll, area);
     let dim = Style::new().fg(style::TEXT_DIM);
-    // Static for now: every card shows the same standing scene.
-    let scene = (!compact).then(static_scene);
 
     for (ri, row_rect) in &placed {
         let (start, end) = match &rows[*ri] {
@@ -96,7 +93,7 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool) -> (boo
             if compact {
                 render_compact(f, Rect { height: 1, ..*row_rect }, s, &app.config, selected);
             } else {
-                render_card(f, cell_rect(*row_rect, cols, col, 0), s, &app.config, selected, scene.as_ref());
+                render_card(f, cell_rect(*row_rect, cols, col, 0), s, &app.config, selected, tick);
             }
         }
     }

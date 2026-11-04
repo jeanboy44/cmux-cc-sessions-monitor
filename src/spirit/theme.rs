@@ -1,4 +1,4 @@
-//! Card themes: which family of spells a card's hero casts.
+//! Card themes: which element a card's spirit is made of.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,13 +10,12 @@ pub enum Theme {
     Water,
     Ice,
     Lightning,
-    Melee,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 5] = [Theme::Fire, Theme::Water, Theme::Ice, Theme::Lightning, Theme::Melee];
+    pub const ALL: [Theme; 4] = [Theme::Fire, Theme::Water, Theme::Ice, Theme::Lightning];
 
-    /// Next theme in `ALL` order, wrapping from `Melee` back to `Fire`.
+    /// Next theme in `ALL` order, wrapping from `Lightning` back to `Fire`.
     pub fn next(self) -> Theme {
         let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
         Self::ALL[(i + 1) % Self::ALL.len()]
@@ -32,11 +31,11 @@ mod tests {
         assert_eq!(Theme::default(), Theme::Fire);
         let mut t = Theme::Fire;
         let mut seen = vec![t];
-        for _ in 0..5 {
+        for _ in 0..4 {
             t = t.next();
             seen.push(t);
         }
-        assert_eq!(seen, [Theme::Fire, Theme::Water, Theme::Ice, Theme::Lightning, Theme::Melee, Theme::Fire]);
+        assert_eq!(seen, [Theme::Fire, Theme::Water, Theme::Ice, Theme::Lightning, Theme::Fire]);
     }
 
     #[test]
@@ -45,11 +44,12 @@ mod tests {
         struct W {
             t: Theme,
         }
-        for (t, name) in [(Theme::Fire, "fire"), (Theme::Water, "water"), (Theme::Ice, "ice"), (Theme::Lightning, "lightning"), (Theme::Melee, "melee")] {
+        for (t, name) in [(Theme::Fire, "fire"), (Theme::Water, "water"), (Theme::Ice, "ice"), (Theme::Lightning, "lightning")] {
             assert_eq!(toml::to_string(&W { t }).unwrap().trim(), format!("t = \"{name}\""));
             assert_eq!(toml::from_str::<W>(&format!("t = \"{name}\"")).unwrap().t, t);
         }
         assert!(toml::from_str::<W>("t = \"Fire\"").is_err());
         assert!(toml::from_str::<W>("t = \"bogus\"").is_err());
+        assert!(toml::from_str::<W>("t = \"melee\"").is_err(), "melee was removed");
     }
 }

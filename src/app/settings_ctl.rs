@@ -168,7 +168,7 @@ mod tests {
     use super::*;
     use crate::app::{key_to_action, Action};
     use crate::config::Config;
-    use crate::fx::theme::Theme;
+    use crate::spirit::theme::Theme;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
 

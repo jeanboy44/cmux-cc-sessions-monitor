@@ -1,4 +1,4 @@
-//! Game-style terminal UI: session cards with pixel scenes, HUD, preview, settings.
+//! Game-style terminal UI: session cards with element spirits, HUD, preview, settings.
 
 pub mod card;
 pub mod grid;

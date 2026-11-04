@@ -1,10 +1,11 @@
-//! Session cards: a pixel scene (hero and dummy, braille, native 1:1) on top
+//! Session cards: an element spirit (braille, see [`crate::spirit`]) on top
 //! and info lines below, in a thin rounded border.
 //!
-//! Full card: [`CARD_W`] x [`CARD_H`] (borders included) = 48 x 10 scene cells
-//! plus [`INFO_ROWS`] text rows. Info rows in priority order: name, status
-//! badge (+ elapsed / last activity), branch, then PR or summary (PR first;
-//! rows of disabled or unknown extras collapse).
+//! Full card: [`CARD_W`] x [`CARD_H`] (borders included): a spirit band of
+//! [`SCENE_ROWS`] rows (room for the largest spirit) plus [`INFO_ROWS`] text
+//! rows. Info rows in priority order: name, status badge (+ elapsed / last
+//! activity), branch, then PR or summary (PR first; rows of disabled or
+//! unknown extras collapse).
 //!
 //! When a card does not fit (or the preview is on) a compact one-line card is
 //! drawn instead ([`render_compact`]). Empty areas draw nothing; no size panics.
@@ -19,19 +20,21 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::Config;
-use crate::fx::frame::{composite, Frame as PxFrame};
-use crate::fx::static_scene;
 use crate::model::{PrState, Session, Status};
-use crate::ui::scene::{render_braille, rgb_color, scene_cells, SCENE_BG};
+use crate::spirit::theme::Theme;
+use crate::spirit::{self, max_grid_size, Size, SpiritParams};
+use crate::ui::scene::draw_grid;
 use crate::ui::style::{self, fmt_duration, truncate_to_width};
 
-/// Scene size in cells (`scene_cells(SCENE_W_PX, SCENE_H_PX)`, checked by a test).
-pub const SCENE_COLS: u16 = 48;
-pub const SCENE_ROWS: u16 = 10;
+/// Spirit band size in cells: room for the largest spirit.
+pub const SCENE_COLS: u16 = max_grid_size().0;
+pub const SCENE_ROWS: u16 = max_grid_size().1;
+/// Narrowest inner width: the info lines keep the previous card width.
+const MIN_INNER_W: u16 = 48;
 /// Text rows below the scene.
 pub const INFO_ROWS: u16 = 4;
 /// Full card size, borders included.
-pub const CARD_W: u16 = SCENE_COLS + 2;
+pub const CARD_W: u16 = if SCENE_COLS > MIN_INNER_W { SCENE_COLS } else { MIN_INNER_W } + 2;
 pub const CARD_H: u16 = SCENE_ROWS + INFO_ROWS + 2;
 
 /// Whether the grid draws compact one-line cards: always while the preview
@@ -40,9 +43,21 @@ pub fn compact_mode(one_column: bool, area: Rect) -> bool {
     one_column || area.width < CARD_W || area.height < CARD_H
 }
 
-/// Draws one session card. `scene` is the pixel frame to show; `None` draws
-/// the static standing scene. Too small an area falls back to [`render_compact`].
-pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool, scene: Option<&PxFrame>) {
+/// The card's element: a per-card choice (keyed by project dir, then session
+/// id) or the configured default.
+fn theme_for(s: &Session, cfg: &Config) -> Theme {
+    let cwd = s.cwd.to_string_lossy();
+    cfg.card_themes.get(cwd.as_ref()).or_else(|| cfg.card_themes.get(&s.id)).copied().unwrap_or(cfg.theme)
+}
+
+/// Stable per-session seed (FNV-1a of the session id).
+fn seed_for(s: &Session) -> u32 {
+    s.id.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193))
+}
+
+/// Draws one session card with its spirit at animation frame `tick`. Too
+/// small an area falls back to [`render_compact`].
+pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool, tick: u64) {
     let rect = area.intersection(f.area());
     if rect.is_empty() {
         return;
@@ -60,23 +75,13 @@ pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selecte
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
 
-    // Scene band: the whole inner width gets the scene background, the
-    // frame itself is centered in it.
+    // Spirit band: the spirit is centered in it.
     let band = Rect { height: SCENE_ROWS.min(inner.height), ..inner };
-    f.buffer_mut().set_style(band, Style::new().bg(rgb_color(SCENE_BG)));
-    let owned;
-    let frame = match scene {
-        Some(fr) => fr,
-        None => {
-            owned = static_scene();
-            &owned
-        }
-    };
-    let (cols, rows) = scene_cells(frame.w, frame.h);
-    let (cols, rows) = (cols.min(band.width), rows.min(band.height));
-    let scene_rect = Rect::new(band.x + (band.width - cols) / 2, band.y, cols, rows);
-    let rgba = composite(frame, SCENE_BG);
-    render_braille(f.buffer_mut(), scene_rect, &rgba, frame.w, frame.h, SCENE_BG);
+    let params = SpiritParams { theme: theme_for(s, cfg), status: s.status, size: Size::S, tick, seed: seed_for(s), warning: false };
+    let grid = spirit::render(&params);
+    let (cols, rows) = (grid.cols.min(band.width), grid.rows.min(band.height));
+    let scene_rect = Rect::new(band.x + (band.width - cols) / 2, band.y + (band.height - rows) / 2, cols, rows);
+    draw_grid(f.buffer_mut(), scene_rect, &grid);
 
     let text_area = Rect::new(inner.x, inner.y + band.height, inner.width, inner.height - band.height)
         .inner(Margin::new(1, 0));
@@ -225,7 +230,6 @@ fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<L
 mod tests {
     use super::*;
     use crate::config::Extras;
-    use crate::fx::{SCENE_H_PX, SCENE_W_PX};
     use crate::model::Pr;
     use crate::ui::test_util::{draw, rows};
     use ratatui::style::Color;
@@ -274,7 +278,7 @@ mod tests {
     }
 
     fn card(s: &Session, cfg: &Config, selected: bool) -> Vec<String> {
-        rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, cfg, selected, None)))
+        rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, cfg, selected, 0)))
     }
 
     /// Text of an info row: border and padding stripped.
@@ -283,17 +287,19 @@ mod tests {
     }
 
     #[test]
-    fn card_size_matches_the_scene() {
-        assert_eq!(scene_cells(SCENE_W_PX, SCENE_H_PX), (SCENE_COLS, SCENE_ROWS));
-        assert_eq!((CARD_W, CARD_H), (50, 16));
+    fn card_size_fits_the_largest_spirit() {
+        assert_eq!((SCENE_COLS, SCENE_ROWS), max_grid_size());
+        assert!(CARD_W >= SCENE_COLS + 2);
+        assert_eq!(CARD_H, SCENE_ROWS + INFO_ROWS + 2);
     }
 
     #[test]
     fn card_shows_scene_and_info_lines() {
         let s = session("proj-a", Status::Running);
-        let rows = rows(&draw(80, 24, |f| render_card(f, Rect::new(0, 0, CARD_W, CARD_H), &s, &Config::default(), false, None)));
+        let rows = rows(&draw(80, 24, |f| render_card(f, Rect::new(0, 0, CARD_W, CARD_H), &s, &Config::default(), false, 0)));
         let text = rows.join("\n");
-        assert!(rows[0].starts_with('╭') && rows[15].starts_with('╰'), "thin rounded border: {text}");
+        let last = CARD_H as usize - 1;
+        assert!(rows[0].starts_with('╭') && rows[last].starts_with('╰'), "thin rounded border: {text}");
         let scene_rows: Vec<usize> =
             (1..CARD_H as usize - 1).filter(|&y| rows[y].chars().any(is_braille)).collect();
         assert!(!scene_rows.is_empty(), "{text}");
@@ -304,39 +310,48 @@ mod tests {
         // default extras: branch, elapsed and summary shown; PR hidden
         assert!(text.contains("3h") && text.contains("fixing the parser") && !text.contains("#42"), "{text}");
         // nothing outside the card rect
-        assert!(rows[16..].iter().all(|r| r.trim().is_empty()));
-        assert!(rows[..16].iter().all(|r| r.chars().skip(CARD_W as usize).all(|c| c == ' ')));
+        assert!(rows[last + 1..].iter().all(|r| r.trim().is_empty()));
+        assert!(rows[..=last].iter().all(|r| r.chars().skip(CARD_W as usize).all(|c| c == ' ')));
     }
 
     #[test]
-    fn scene_band_has_the_scene_background_and_hero_left_of_dummy() {
+    fn spirit_is_centered_and_paints_no_background() {
         let s = session("proj-a", Status::Idle);
-        let buf = draw(CARD_W + 10, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, None));
-        let bg = rgb_color(SCENE_BG);
+        let w = CARD_W + 10;
+        let buf = draw(w, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, 0));
+        let lit: Vec<u16> =
+            (1..=SCENE_ROWS).flat_map(|y| (1..w - 1).map(move |x| (x, y))).filter(|&(x, y)| buf[(x, y)].symbol().chars().any(is_braille)).map(|(x, _)| x).collect();
+        assert!(!lit.is_empty());
+        let (lo, hi) = (*lit.iter().min().unwrap(), *lit.iter().max().unwrap());
+        assert!(lo > 1 && hi < w - 2, "spirit inside the band: {lo}..{hi}");
+        assert!(((lo + hi) / 2).abs_diff(w / 2) <= 3, "roughly centered: {lo}..{hi}");
         for y in 1..=SCENE_ROWS {
-            for x in 1..CARD_W + 9 {
-                assert_eq!(buf[(x, y)].bg, bg, "({x},{y})");
+            for x in 1..w - 1 {
+                assert_eq!(buf[(x, y)].bg, ratatui::style::Color::Reset, "({x},{y})");
             }
         }
-        // hero (small) in the left third, dummy (tall) in the right third
-        let lit = |x0: u16, x1: u16, y: u16| (x0..x1).any(|x| buf[(x, y)].symbol().chars().any(is_braille));
-        assert!(lit(1, 20, SCENE_ROWS), "hero feet row");
-        assert!(lit(40, 59, 1) && !lit(1, 20, 1), "only the dummy reaches the top");
     }
 
     #[test]
-    fn caller_supplied_scene_is_drawn() {
-        let s = session("proj-a", Status::Idle);
-        let empty = PxFrame::new(SCENE_W_PX, SCENE_H_PX, 0, 0);
-        let rows = rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, Some(&empty))));
-        assert!(!rows.join("").chars().any(is_braille), "empty frame: no dots");
+    fn card_spirit_uses_the_card_theme_and_animates() {
+        let s = session("proj-a", Status::Running);
+        let scene = |cfg: &Config, tick: u64| -> Vec<String> { rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, cfg, false, tick)))[1..=SCENE_ROWS as usize].to_vec() };
+        let fg = |cfg: &Config| -> Vec<ratatui::style::Color> {
+            let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, cfg, false, 3));
+            (1..=SCENE_ROWS).flat_map(|y| (1..CARD_W - 1).map(move |x| (x, y))).map(|p| buf[p].fg).collect()
+        };
+        let mut water = Config::default();
+        water.card_themes.insert("/home/user/proj-a".into(), Theme::Water);
+        assert_ne!(fg(&Config::default()), fg(&water), "per-card theme by project dir");
+        assert!((1..30).any(|t| scene(&Config::default(), t) != scene(&Config::default(), 0)), "tick moves the spirit");
     }
 
     #[test]
     fn info_rows_keep_pr_over_summary_and_hide_disabled_extras() {
         let s = session("proj-a", Status::Running);
         let rows = card(&s, &all_extras(), false);
-        let text: Vec<String> = rows[11..15].iter().map(|r| info(r)).collect();
+        let first = 1 + SCENE_ROWS as usize;
+        let text: Vec<String> = rows[first..first + 4].iter().map(|r| info(r)).collect();
         assert_eq!(text, vec!["proj-a", " RUN  3h ·2m ago", "⎇ feat/login", "#42 approved"]);
         let mut cfg = all_extras();
         cfg.extras.pr = false;
@@ -372,7 +387,7 @@ mod tests {
         let mut s = session("proj-a", Status::Running);
         s.pr = None;
         s.pr_unavailable = true;
-        let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &all_extras(), false, None));
+        let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &all_extras(), false, 0));
         let text = rows(&buf);
         let y = text.iter().position(|r| r.contains("PR ?")).expect(&text.join("\n"));
         let x = text[y].find("PR ?").map(|b| text[y][..b].chars().count()).unwrap() as u16;
@@ -411,7 +426,7 @@ mod tests {
     fn wide_korean_name_is_truncated_inside_the_border() {
         let s = session("프로젝트-아주-아주-아주-아주-아주-긴-이름-입니다-정말로-정말", Status::Running);
         for w in CARD_W..CARD_W + 6 {
-            let rows = rows(&draw(w, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, None)));
+            let rows = rows(&draw(w, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, 0)));
             let row = &rows[1 + SCENE_ROWS as usize];
             assert!(row.contains("프로젝트") && row.contains('…'), "{row}");
             assert!(row.ends_with('│'), "border intact: {row:?}");
@@ -423,26 +438,26 @@ mod tests {
         assert_eq!(style::SELECTED, Color::Rgb(0x4C, 0x8D, 0xFF), "cmux blue");
         for st in [Status::Running, Status::NeedsInput, Status::Idle, Status::Done, Status::Unknown] {
             let s = session("proj-a", st);
-            let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), true, None));
+            let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), true, 0));
             let corner = &buf[(0, 0)];
             assert_eq!((corner.symbol(), corner.fg), ("╭", style::SELECTED), "{st:?}");
             assert!(corner.modifier.contains(Modifier::BOLD), "{st:?}");
             assert_eq!(buf[(CARD_W - 1, 5)].fg, style::SELECTED, "{st:?}: right border");
-            let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, None));
+            let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, 0));
             assert_ne!(buf[(0, 0)].fg, style::SELECTED, "{st:?}: unselected border differs");
             assert!(!buf[(0, 0)].modifier.contains(Modifier::BOLD), "{st:?}");
             let Color::Rgb(r, g, b) = style::status_color(st) else { panic!("rgb") };
             assert!(!(b > r && b > g), "{st:?} border is blue-ish");
         }
         let s = session("proj-a", Status::Running);
-        let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, None));
+        let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, 0));
         assert_eq!(buf[(0, 0)].fg, style::RUNNING);
     }
 
     #[test]
     fn done_card_is_dimmed() {
         let s = session("proj-a", Status::Done);
-        let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, None));
+        let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, 0));
         assert!(buf[(0, 0)].modifier.contains(Modifier::DIM));
         let y = 1 + SCENE_ROWS;
         assert!(buf[(2, y)].modifier.contains(Modifier::DIM), "name row");
@@ -451,14 +466,14 @@ mod tests {
     #[test]
     fn narrow_terminal_uses_compact_card_without_panic() {
         let s = session("proj-a", Status::NeedsInput);
-        let lines = rows(&draw(30, 8, |f| render_card(f, f.area(), &s, &Config::default(), true, None)));
+        let lines = rows(&draw(30, 8, |f| render_card(f, f.area(), &s, &Config::default(), true, 0)));
         let text = lines.join("\n");
         assert!(lines[0].contains("proj-a") && lines[0].contains("INPUT"), "{text}");
         assert!(!text.contains('╭') && !text.chars().any(is_braille), "no frame, no scene: {text}");
         assert!(lines[1..].iter().all(|r| r.trim().is_empty()), "one line only: {text}");
         // one column or one row short of a card: compact as well
         for (w, h) in [(CARD_W - 1, CARD_H), (CARD_W, CARD_H - 1)] {
-            let rows = rows(&draw(w, h, |f| render_card(f, f.area(), &s, &Config::default(), false, None)));
+            let rows = rows(&draw(w, h, |f| render_card(f, f.area(), &s, &Config::default(), false, 0)));
             assert!(rows[0].contains("proj-a") && !rows.join("").contains('╭'), "{w}x{h}");
         }
     }
@@ -498,22 +513,22 @@ mod tests {
         let s = session("프로젝트-아주-긴-이름", Status::Idle);
         for (w, h) in [(0, 0), (1, 1), (2, 1), (5, 2), (0, 30), (80, 0), (CARD_W - 1, CARD_H), (CARD_W, CARD_H - 1)] {
             for selected in [false, true] {
-                draw(w, h, |f| render_card(f, f.area(), &s, &Config::default(), selected, None));
+                draw(w, h, |f| render_card(f, f.area(), &s, &Config::default(), selected, 0));
                 draw(w, h, |f| render_compact(f, f.area(), &s, &Config::default(), selected));
                 // rect partly outside the frame
-                draw(w, h, |f| render_card(f, Rect::new(w.saturating_sub(1), h.saturating_sub(1), CARD_W, CARD_H), &s, &Config::default(), selected, None));
-                draw(w, h, |f| render_card(f, Rect::new(u16::MAX - 5, u16::MAX - 5, CARD_W, CARD_H), &s, &Config::default(), selected, None));
+                draw(w, h, |f| render_card(f, Rect::new(w.saturating_sub(1), h.saturating_sub(1), CARD_W, CARD_H), &s, &Config::default(), selected, 0));
+                draw(w, h, |f| render_card(f, Rect::new(u16::MAX - 5, u16::MAX - 5, CARD_W, CARD_H), &s, &Config::default(), selected, 0));
             }
         }
     }
 
-    /// Plain-text look of a full card, a narrow compact card and the static scene.
+    /// Plain-text look of a full card (with its spirit) and a narrow compact card.
     /// Run with `cargo test dump_card -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn dump_card() {
         let s = session("proj-a", Status::Running);
-        for r in rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &all_extras(), true, None))) {
+        for r in rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &all_extras(), true, 0))) {
             println!("{r}");
         }
         for r in rows(&draw(30, 1, |f| render_compact(f, f.area(), &s, &Config::default(), true))) {

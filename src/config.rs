@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::fx::theme::Theme;
+use crate::spirit::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -228,9 +228,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(Config::load_checked(&dir.path().join("nope.toml")), (Config::default(), None));
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "theme = \"melee\"\n").unwrap();
+        std::fs::write(&path, "theme = \"lightning\"\n").unwrap();
         let (c, err) = Config::load_checked(&path);
-        assert_eq!((c.theme, err), (Theme::Melee, None));
+        assert_eq!((c.theme, err), (Theme::Lightning, None));
     }
 
     #[test]
@@ -309,7 +309,7 @@ mod tests {
         let mut c = Config::default();
         c.theme = Theme::Ice;
         c.card_themes.insert("/w/proj-a".into(), Theme::Lightning);
-        c.card_themes.insert("sess-1".into(), Theme::Melee);
+        c.card_themes.insert("sess-1".into(), Theme::Water);
         c.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("theme = \"ice\""), "{text}");
