@@ -31,7 +31,9 @@ pub struct Config {
     /// family missing from the map uses its default ([`default_model_theme`]).
     /// Older files may hold a `card_themes` table; it is ignored.
     pub model_themes: BTreeMap<String, Theme>,
-    /// Context window size used when usage comes from the transcript.
+    /// Context window size used when usage comes from the transcript (no
+    /// statusline file). 0 = auto: 200k up to 200k tokens, 1M beyond. The
+    /// former default 200000, written by every earlier save, also means auto.
     pub context_limit_tokens: u64,
     /// The statusline context file is trusted for this long after it was written.
     pub ctx_fresh_seconds: u64,
@@ -58,7 +60,7 @@ impl Default for Config {
             guess_worktree: true,
             done_retention_minutes: 10,
             model_themes: default_model_themes(),
-            context_limit_tokens: 200_000,
+            context_limit_tokens: 0,
             ctx_fresh_seconds: 300,
         }
     }
@@ -251,7 +253,7 @@ mod tests {
         assert_eq!(c.pr_poll_seconds, 45);
         assert_eq!(c.done_retention_minutes, 10);
         assert!(c.guess_worktree);
-        assert_eq!(c.context_limit_tokens, 200_000);
+        assert_eq!(c.context_limit_tokens, 0, "0 = auto (window inferred)");
         assert_eq!(c.ctx_fresh_seconds, 300);
     }
 
@@ -262,10 +264,19 @@ mod tests {
         std::fs::write(&path, "theme = \"water\"\npr_poll_seconds = 30\nsome_future_key = 1\n").unwrap();
         let (c, err) = Config::load_checked(&path);
         assert_eq!(err, None);
-        assert_eq!((c.context_limit_tokens, c.ctx_fresh_seconds), (200_000, 300));
+        assert_eq!((c.context_limit_tokens, c.ctx_fresh_seconds), (0, 300));
         std::fs::write(&path, "context_limit_tokens = 1000000\nctx_fresh_seconds = 60\n").unwrap();
         let c = Config::load(&path);
         assert_eq!((c.context_limit_tokens, c.ctx_fresh_seconds), (1_000_000, 60));
+        // files saved by earlier versions hold the old default: loads unchanged
+        // (the context code reads that value as auto)
+        std::fs::write(&path, "context_limit_tokens = 200000\n").unwrap();
+        let (c, err) = Config::load_checked(&path);
+        assert_eq!((c.context_limit_tokens, err), (crate::source::context::LEGACY_DEFAULT_LIMIT, None));
+        // auto round-trips
+        Config::default().save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("context_limit_tokens = 0"));
+        assert_eq!(Config::load(&path), Config::default());
     }
 
     #[test]

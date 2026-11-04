@@ -3,11 +3,13 @@
 //! Primary source: the statusline script writes
 //! `~/.cache/cmux-magigent/ctx/<session_id>.json` (or the former
 //! `~/.cache/cmux-cc-monitor/ctx/`; the freshest valid file wins) with
-//! `{"session_id": "...", "used_percentage": NN}`; it is used only while the
-//! file is fresh (mtime within the configured age). Fallback: the last
-//! `message.usage` of the session transcript (only its last [`TAIL_BYTES`]
-//! are read), `input + cache_read + cache_creation` tokens over the configured
-//! context limit. Anything malformed or out of range yields `None`.
+//! `{"session_id": "...", "used_percentage": NN}`. That value is relative to
+//! the session's real window, so it stays authoritative after the file goes
+//! stale (see [`resolve_ctx`]). Without any file: the last `message.usage` of
+//! the session transcript (only its last [`TAIL_BYTES`] are read),
+//! `input + cache_read + cache_creation` tokens over the configured context
+//! limit or the inferred window ([`window_for`]). Anything malformed or out of
+//! range yields `None`.
 //!
 //! The same tail read also yields the session's model (`message.model` of the
 //! last main-chain assistant record), so a transcript is read at most once per
@@ -51,23 +53,33 @@ fn percent(v: f64) -> Option<f32> {
     (v.is_finite() && v >= 0.0).then(|| v.min(100.0) as f32)
 }
 
+/// Whether a file written at `mtime` is at most `max_age` old at `now` (an
+/// mtime in the future counts as fresh).
+fn is_fresh(mtime: SystemTime, now: SystemTime, max_age: Duration) -> bool {
+    now.duration_since(mtime).map_or(true, |age| age <= max_age)
+}
+
 /// `used_percentage` from `<dir>/<session_id>.json`, when the file is at most
 /// `max_age` old at `now` (an mtime in the future counts as fresh). A
 /// `session_id` in the file that names another session rejects it.
 #[cfg(test)]
 pub fn read_ctx_file(dir: &Path, session_id: &str, now: SystemTime, max_age: Duration) -> Option<f32> {
-    read_ctx_entry(dir, session_id, now, max_age).map(|(_, p)| p)
+    read_ctx_entry(dir, session_id).filter(|(m, _)| is_fresh(*m, now, max_age)).map(|(_, p)| p)
 }
 
 /// [`read_ctx_file`] over several directories: the freshest valid file wins.
+#[cfg(test)]
 pub fn read_ctx_files<P: AsRef<Path>>(dirs: &[P], session_id: &str, now: SystemTime, max_age: Duration) -> Option<f32> {
-    dirs.iter()
-        .filter_map(|d| read_ctx_entry(d.as_ref(), session_id, now, max_age))
-        .max_by_key(|(m, _)| *m)
-        .map(|(_, p)| p)
+    read_ctx_latest(dirs, session_id).filter(|(m, _)| is_fresh(*m, now, max_age)).map(|(_, p)| p)
 }
 
-fn read_ctx_entry(dir: &Path, session_id: &str, now: SystemTime, max_age: Duration) -> Option<(SystemTime, f32)> {
+/// The newest valid context file of the session over `dirs`, whatever its
+/// age: (mtime, `used_percentage`). Freshness is decided by [`resolve_ctx`].
+pub fn read_ctx_latest<P: AsRef<Path>>(dirs: &[P], session_id: &str) -> Option<(SystemTime, f32)> {
+    dirs.iter().filter_map(|d| read_ctx_entry(d.as_ref(), session_id)).max_by_key(|(m, _)| *m)
+}
+
+fn read_ctx_entry(dir: &Path, session_id: &str) -> Option<(SystemTime, f32)> {
     if !safe_id(session_id) {
         return None;
     }
@@ -77,9 +89,6 @@ fn read_ctx_entry(dir: &Path, session_id: &str, now: SystemTime, max_age: Durati
         return None;
     }
     let mtime = meta.modified().ok()?;
-    if now.duration_since(mtime).is_ok_and(|age| age > max_age) {
-        return None;
-    }
     let text = std::fs::read_to_string(&path).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
     if let Some(id) = v.get("session_id") {
@@ -119,6 +128,7 @@ pub struct TranscriptTail {
 impl TranscriptTail {
     /// Usage in percent of `limit` tokens (clamped to 100); `None` without a
     /// usage record or with a zero limit.
+    #[cfg(test)]
     pub fn usage_percent(&self, limit: u64) -> Option<f32> {
         if limit == 0 {
             return None;
@@ -239,6 +249,11 @@ impl TranscriptCache {
         self.tail(path)?.usage_percent(limit)
     }
 
+    /// The mtime of `path` as of its last [`TranscriptCache::tail`] read.
+    pub fn mtime(&self, path: &Path) -> Option<SystemTime> {
+        self.entries.get(path).map(|(m, _, _)| *m)
+    }
+
     /// Keeps only the entries of `paths`.
     pub fn retain(&mut self, paths: &[PathBuf]) {
         self.entries.retain(|p, _| paths.contains(p));
@@ -255,17 +270,78 @@ impl TranscriptCache {
     }
 }
 
-/// Context usage of one session: the fresh statusline file, else the
-/// transcript tail's usage, else `None`.
-pub fn context_percent(
-    ctx_dirs: &[PathBuf],
-    session_id: &str,
-    tail: Option<&TranscriptTail>,
+/// The standard context window, used for a transcript-only session that has
+/// not gone past it.
+pub const DEFAULT_WINDOW_TOKENS: u64 = 200_000;
+/// The large context window: a session past [`DEFAULT_WINDOW_TOKENS`] must be on it.
+pub const LARGE_WINDOW_TOKENS: u64 = 1_000_000;
+/// `context_limit_tokens` that every save before the auto window wrote; read as auto.
+pub const LEGACY_DEFAULT_LIMIT: u64 = 200_000;
+
+/// Context window for `tokens` used tokens: the configured `limit`, or, when
+/// it is 0 (auto) or [`LEGACY_DEFAULT_LIMIT`], 200k up to 200k tokens and 1M
+/// beyond.
+pub fn window_for(tokens: u64, limit: u64) -> u64 {
+    match limit {
+        0 | LEGACY_DEFAULT_LIMIT if tokens > DEFAULT_WINDOW_TOKENS => LARGE_WINDOW_TOKENS,
+        0 | LEGACY_DEFAULT_LIMIT => DEFAULT_WINDOW_TOKENS,
+        n => n,
+    }
+}
+
+/// What the monitor saw while a statusline file was fresh: that write's mtime
+/// and the transcript tokens at its first sighting. Carried per session from
+/// round to round, so a stale file can follow later transcript growth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CtxCalibration {
+    pub file_mtime: SystemTime,
+    pub tokens: u64,
+}
+
+/// Context usage of one session and its (possibly updated) calibration.
+///
+/// - Statusline file fresh (within `max_age`): its value; the first sighting
+///   of a write records the current transcript `tokens` as the calibration.
+/// - File stale: still its value (it is window-relative, the transcript is
+///   not), unless the transcript clearly grew since: written more than
+///   `max_age` after the file, with more tokens than the calibration of that
+///   same write. Then `file % × tokens / calibration tokens`.
+/// - No file: transcript `tokens` over [`window_for`] (`limit` 0 = auto).
+/// - No file and no tokens: `None`.
+///
+/// The result is always finite and within 0..=100.
+pub fn resolve_ctx(
+    file: Option<(SystemTime, f32)>,
+    tokens: Option<u64>,
+    transcript_mtime: Option<SystemTime>,
+    calib: Option<CtxCalibration>,
     limit: u64,
     max_age: Duration,
     now: SystemTime,
-) -> Option<f32> {
-    read_ctx_files(ctx_dirs, session_id, now, max_age).or_else(|| tail?.usage_percent(limit))
+) -> (Option<f32>, Option<CtxCalibration>) {
+    let Some((mtime, file_pct)) = file else {
+        let pct = tokens.and_then(|t| percent(t as f64 / window_for(t, limit) as f64 * 100.0));
+        return (pct, None);
+    };
+    if is_fresh(mtime, now, max_age) {
+        let calib = match (calib, tokens) {
+            (Some(c), _) if c.file_mtime == mtime => Some(c),
+            (_, Some(t)) => Some(CtxCalibration { file_mtime: mtime, tokens: t }),
+            (c, None) => c,
+        };
+        return (percent(f64::from(file_pct)), calib);
+    }
+    let grown = match (calib, tokens, transcript_mtime) {
+        (Some(c), Some(t), Some(tm)) if c.file_mtime == mtime && c.tokens > 0 && t > c.tokens => {
+            tm.duration_since(mtime).is_ok_and(|d| d > max_age).then_some((t, c.tokens))
+        }
+        _ => None,
+    };
+    let pct = match grown {
+        Some((t, base)) => f64::from(file_pct) * (t as f64 / base as f64),
+        None => f64::from(file_pct),
+    };
+    (percent(pct), calib)
 }
 
 #[cfg(test)]
@@ -480,22 +556,124 @@ mod tests {
         assert_eq!(read_transcript_usage(&t, 200_000), Some(15.0));
     }
 
+    fn close(got: Option<f32>, want: f32) -> bool {
+        got.is_some_and(|g| (g - want).abs() < 0.01)
+    }
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
     #[test]
-    fn context_percent_prefers_fresh_file_then_transcript() {
-        let dir = tempfile::tempdir().unwrap();
-        let t = dir.path().join("t.jsonl");
-        write_lines(&t, &[assistant(50_000, 0, 0)]);
-        let p = write_ctx(dir.path(), "s", r#"{"used_percentage":80}"#);
+    fn ctx_latest_keeps_stale_files_with_their_mtime() {
+        let home = tempfile::tempdir().unwrap();
+        let dirs = ctx_dirs_in(home.path());
+        std::fs::create_dir_all(&dirs[1]).unwrap();
+        let p = write_ctx(&dirs[1], "s", r#"{"session_id":"s","used_percentage":11}"#);
         let m = mtime(&p);
-        let mut cache = TranscriptCache::default();
-        let tail = cache.tail(&t);
-        assert_eq!(context_percent(&[dir.path().to_path_buf()], "s", tail.as_ref(), 200_000, FRESH, m), Some(80.0));
-        let stale = m + FRESH + Duration::from_secs(60);
-        assert_eq!(context_percent(&[dir.path().to_path_buf()], "s", tail.as_ref(), 200_000, FRESH, stale), Some(25.0));
-        assert_eq!(context_percent(&[dir.path().to_path_buf()], "s", None, 200_000, FRESH, stale), None);
-        let none = cache.tail(&dir.path().join("none"));
-        assert_eq!(none, None, "missing transcript");
-        assert_eq!(context_percent(&[dir.path().to_path_buf()], "zz", none.as_ref(), 200_000, FRESH, m), None);
+        // an hour old: still the authoritative value, with its mtime
+        assert_eq!(read_ctx_latest(&dirs, "s"), Some((m, 11.0)));
+        assert_eq!(read_ctx_latest(&dirs, "other"), None);
+        write_ctx(&dirs[1], "bad", "{{{");
+        assert_eq!(read_ctx_latest(&dirs, "bad"), None);
+    }
+
+    #[test]
+    fn stale_ctx_file_is_kept_not_replaced_by_the_transcript() {
+        // measured case: statusline 11 % of a 1M window, transcript 113k tokens,
+        // file an hour old. Before: 113k / 200k = 56.6 %. Now: 11 %.
+        let m = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let now = m + HOUR;
+        let (pct, cal) = resolve_ctx(Some((m, 11.0)), Some(113_230), Some(now), None, 0, FRESH, now);
+        assert_eq!(pct, Some(11.0));
+        assert_eq!(cal, None, "never seen fresh: no calibration");
+        // a calibration without growth changes nothing
+        let known = CtxCalibration { file_mtime: m, tokens: 113_230 };
+        assert_eq!(resolve_ctx(Some((m, 11.0)), Some(113_230), Some(now), Some(known), 0, FRESH, now), (Some(11.0), Some(known)));
+        // a big transcript never pushes a stale file to 100 % by itself
+        assert_eq!(resolve_ctx(Some((m, 11.0)), Some(900_000), Some(now), None, 0, FRESH, now).0, Some(11.0));
+    }
+
+    #[test]
+    fn fresh_ctx_file_wins_and_calibrates() {
+        let m = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let now = m + Duration::from_secs(10);
+        let (pct, cal) = resolve_ctx(Some((m, 11.0)), Some(113_230), Some(now), None, 0, FRESH, now);
+        assert_eq!(pct, Some(11.0));
+        assert_eq!(cal, Some(CtxCalibration { file_mtime: m, tokens: 113_230 }));
+        // the same write keeps its first calibration (tokens at the write)
+        let (_, again) = resolve_ctx(Some((m, 11.0)), Some(130_000), Some(now), cal, 0, FRESH, now + Duration::from_secs(5));
+        assert_eq!(again, cal);
+        // a new write re-calibrates
+        let m2 = m + Duration::from_secs(60);
+        let (pct, cal2) = resolve_ctx(Some((m2, 13.0)), Some(130_000), Some(m2), cal, 0, FRESH, m2);
+        assert_eq!((pct, cal2), (Some(13.0), Some(CtxCalibration { file_mtime: m2, tokens: 130_000 })));
+        // fresh without a transcript value: the previous calibration stays
+        assert_eq!(resolve_ctx(Some((m2, 13.0)), None, None, cal2, 0, FRESH, m2), (Some(13.0), cal2));
+    }
+
+    #[test]
+    fn stale_ctx_file_scales_with_clear_transcript_growth() {
+        let m = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let now = m + HOUR;
+        let cal = Some(CtxCalibration { file_mtime: m, tokens: 100_000 });
+        // transcript written 30 min after the file, 250k tokens vs 100k at the write
+        let grown = Some(m + Duration::from_secs(1800));
+        assert!(close(resolve_ctx(Some((m, 10.0)), Some(250_000), grown, cal, 0, FRESH, now).0, 25.0));
+        // the calibration is carried unchanged
+        assert_eq!(resolve_ctx(Some((m, 10.0)), Some(250_000), grown, cal, 0, FRESH, now).1, cal);
+        // transcript touched only within the fresh window after the file: not "clearly grown"
+        let soon = Some(m + Duration::from_secs(120));
+        assert_eq!(resolve_ctx(Some((m, 10.0)), Some(250_000), soon, cal, 0, FRESH, now).0, Some(10.0));
+        // fewer tokens than at the write (e.g. after /compact): the file value
+        assert_eq!(resolve_ctx(Some((m, 10.0)), Some(50_000), grown, cal, 0, FRESH, now).0, Some(10.0));
+        // a calibration of another write does not apply
+        let other = Some(CtxCalibration { file_mtime: m - HOUR, tokens: 100_000 });
+        assert_eq!(resolve_ctx(Some((m, 10.0)), Some(250_000), grown, other, 0, FRESH, now).0, Some(10.0));
+        // huge growth clamps at 100
+        assert_eq!(resolve_ctx(Some((m, 60.0)), Some(1_000_000), grown, cal, 0, FRESH, now).0, Some(100.0));
+    }
+
+    #[test]
+    fn no_ctx_file_infers_the_window_from_the_tokens() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let pct = |tokens: u64, limit: u64| resolve_ctx(None, Some(tokens), Some(now), None, limit, FRESH, now).0;
+        assert!(close(pct(113_230, 0), 56.615), "<= 200k: 200k window");
+        assert_eq!(pct(200_000, 0), Some(100.0));
+        assert!(close(pct(240_000, 0), 24.0), "> 200k must be the 1M window");
+        assert!(close(pct(356_220, 0), 35.622));
+        assert_eq!(pct(2_000_000, 0), Some(100.0), "clamped");
+        // an explicit limit is honoured
+        assert!(close(pct(113_230, 1_000_000), 11.323));
+        assert_eq!(pct(150_000, 100_000), Some(100.0));
+        // the old default, written by every earlier save, means auto
+        assert!(close(pct(240_000, LEGACY_DEFAULT_LIMIT), 24.0));
+        assert!(close(pct(113_230, LEGACY_DEFAULT_LIMIT), 56.615));
+        assert_eq!(window_for(1, 0), 200_000);
+        assert_eq!(window_for(200_001, 0), 1_000_000);
+        assert_eq!(window_for(5, 300_000), 300_000);
+        // no transcript value (brand-new session): None
+        assert_eq!(resolve_ctx(None, None, None, None, 0, FRESH, now), (None, None));
+    }
+
+    #[test]
+    fn resolved_ctx_is_never_nan_or_over_100() {
+        let m = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let now = m + HOUR;
+        let grown = Some(m + Duration::from_secs(1800));
+        for file_pct in [0.0f32, 0.5, 50.0, 100.0] {
+            for cal_tokens in [0u64, 1, 100_000] {
+                for tokens in [None, Some(0u64), Some(1), Some(u64::MAX)] {
+                    for limit in [0u64, 1, 200_000, u64::MAX] {
+                        let cal = Some(CtxCalibration { file_mtime: m, tokens: cal_tokens });
+                        for file in [None, Some((m, file_pct))] {
+                            let got = resolve_ctx(file, tokens, grown, cal, limit, FRESH, now).0;
+                            if let Some(g) = got {
+                                assert!(g.is_finite() && (0.0..=100.0).contains(&g), "{file:?} {tokens:?} {limit} -> {g}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn assistant_model(model: &str) -> String {

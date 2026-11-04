@@ -19,7 +19,7 @@ use crate::merge::{apply_notifications, merge_sessions, select_refs};
 use crate::model::{Session, Status};
 use crate::pr::{pr_note, PrCache, PrLookup};
 use crate::source::claude_sessions::read_claude_sessions;
-use crate::source::context::{context_percent, default_ctx_dirs, safe_id, TranscriptCache};
+use crate::source::context::{default_ctx_dirs, read_ctx_latest, resolve_ctx, safe_id, CtxCalibration, TranscriptCache};
 use crate::source::cmux::{Cmux, CmuxCli, CmuxSessionRef, SCREEN_LINES};
 use crate::source::hook_sessions::read_hook_sessions;
 use crate::status::resolve_status;
@@ -54,6 +54,9 @@ pub struct Snapshot {
     pub(crate) seq: u64,
     /// Context usage read from transcripts, reused while a file is unchanged.
     pub(crate) transcripts: TranscriptCache,
+    /// Per session id: the transcript tokens seen while its statusline file
+    /// was fresh (see [`resolve_ctx`]); pruned to the sessions of the round.
+    pub(crate) ctx_calibration: HashMap<String, CtxCalibration>,
 }
 
 impl Snapshot {
@@ -214,26 +217,33 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
         }
     }
     // Model and context usage. The transcript tail (cached, read once per
-    // change) gives the model; usage prefers the small statusline file.
+    // change) gives the model; usage prefers the small statusline file, which
+    // stays authoritative when stale (calibrated against the transcript).
     let mut transcripts = prev.transcripts.clone();
+    let mut ctx_calibration = HashMap::new();
     let max_age = Duration::from_secs(deps.config.ctx_fresh_seconds);
     let mut used = Vec::new();
     for s in sessions.iter_mut() {
         let t = transcript_for(s, &deps.projects_dir);
         let tail = t.as_deref().and_then(|p| transcripts.tail(p));
-        s.ctx_percent = context_percent(
-            &deps.ctx_dirs,
-            &s.id,
-            tail.as_ref(),
+        let (pct, calib) = resolve_ctx(
+            read_ctx_latest(&deps.ctx_dirs, &s.id),
+            tail.as_ref().and_then(|t| t.tokens),
+            t.as_deref().and_then(|p| transcripts.mtime(p)),
+            prev.ctx_calibration.get(&s.id).copied(),
             deps.config.context_limit_tokens,
             max_age,
             deps.now,
         );
+        s.ctx_percent = pct;
+        if let Some(c) = calib {
+            ctx_calibration.insert(s.id.clone(), c);
+        }
         s.model = tail.and_then(|t| t.model);
         used.extend(t);
     }
     transcripts.retain(&used);
-    Snapshot { sessions, message, pr_note: note, window_order, current_window, cmux_refs, seq, transcripts }
+    Snapshot { sessions, message, pr_note: note, window_order, current_window, cmux_refs, seq, transcripts, ctx_calibration }
 }
 
 /// Starts the refresh thread: a snapshot every [`REFRESH_INTERVAL`] (first one
@@ -663,6 +673,56 @@ mod tests {
         assert_eq!(snap.transcripts.len(), 1);
         let again = build_snapshot(&d, &snap);
         assert_eq!(again.sessions.iter().find(|s| s.id == "b").unwrap().ctx_percent, Some(50.0));
+    }
+
+    fn usage_line(tokens: u64) -> String {
+        format!("{{\"type\":\"assistant\",\"message\":{{\"usage\":{{\"input_tokens\":{tokens}}}}}}}\n")
+    }
+
+    #[test]
+    fn build_snapshot_keeps_stale_ctx_file_and_carries_calibration() {
+        let dir = setup();
+        for (pid, id) in [(11, "a"), (12, "b")] {
+            write_claude(&dir.path().join("sessions"), pid, id, "idle");
+        }
+        let mut cmux = FakeCmux::new(vec![cref("a", true), cref("b", true)]);
+        let mut d = deps(dir.path(), &cmux);
+        let t0 = d.now;
+        std::fs::create_dir_all(&d.ctx_dirs[0]).unwrap();
+        for (id, pct) in [("a", 10), ("b", 11)] {
+            std::fs::write(d.ctx_dirs[0].join(format!("{id}.json")), format!(r#"{{"session_id":"{id}","used_percentage":{pct}}}"#)).unwrap();
+        }
+        let transcript = |id: &str| d.projects_dir.join(format!("-home-user-{id}")).join(format!("{id}.jsonl"));
+        for (id, tokens) in [("a", 100_000), ("b", 113_230)] {
+            std::fs::create_dir_all(transcript(id).parent().unwrap()).unwrap();
+            std::fs::write(transcript(id), usage_line(tokens)).unwrap();
+        }
+        let pct = |s: &Snapshot, id: &str| s.sessions.iter().find(|x| x.id == id).unwrap().ctx_percent;
+        // round 1: fresh files win and calibrate both sessions
+        let first = build_snapshot(&d, &Snapshot::default());
+        assert_eq!((pct(&first, "a"), pct(&first, "b")), (Some(10.0), Some(11.0)));
+        assert_eq!(first.ctx_calibration.len(), 2);
+        // an hour later the files are stale. b is idle: still 11 % (was 56.6 %).
+        // a kept working (transcript written 30 min later, 250k tokens): scaled 25 %.
+        let ta = transcript("a");
+        std::fs::write(&ta, usage_line(250_000)).unwrap();
+        std::fs::File::options().write(true).open(&ta).unwrap().set_modified(t0 + Duration::from_secs(1800)).unwrap();
+        d.now = t0 + Duration::from_secs(3600);
+        let second = build_snapshot(&d, &first);
+        assert_eq!(pct(&second, "b"), Some(11.0));
+        assert!(pct(&second, "a").is_some_and(|p| (p - 25.0).abs() < 0.01), "{:?}", pct(&second, "a"));
+        assert_eq!(second.ctx_calibration, first.ctx_calibration, "calibration carried across rounds");
+        // without the carried calibration a stale file is used as is
+        assert_eq!(pct(&build_snapshot(&d, &Snapshot { ctx_calibration: Default::default(), ..second.clone() }), "a"), Some(10.0));
+        // b's tab closes: its calibration is pruned
+        std::fs::remove_file(dir.path().join("sessions").join("12.json")).unwrap();
+        cmux.sessions_result = Ok(vec![cref("a", true), cref("b", false)]);
+        cmux.tree_result = Ok(tree_of(&[("SF-A", "")]));
+        let mut d = deps(dir.path(), &cmux);
+        d.now = t0 + Duration::from_secs(3600);
+        let third = build_snapshot(&d, &second);
+        assert_eq!(ids(&third), vec!["a"]);
+        assert_eq!(third.ctx_calibration.keys().collect::<Vec<_>>(), vec!["a"]);
     }
 
     #[test]
