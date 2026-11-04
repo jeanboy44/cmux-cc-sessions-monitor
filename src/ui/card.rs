@@ -347,6 +347,21 @@ mod tests {
     }
 
     #[test]
+    fn card_seeds_are_full_range_and_spirits_still_move() {
+        for id in ["sess-1", "4f1c2a9e-session", "zzzz"] {
+            let mut s = session("proj-a", Status::Done);
+            s.id = id.into();
+            assert_eq!(seed_for(&s), seed_for(&s.clone()), "stable");
+            // DONE bounce: the spirit band changes over a bounce period
+            let band = |t: u64| -> Vec<String> { rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, t)))[1..=SCENE_ROWS as usize].to_vec() };
+            let frames: std::collections::BTreeSet<Vec<String>> = (0..30).map(band).collect();
+            assert!(frames.len() > 3, "{id} (seed {}): {} distinct frames", seed_for(&s), frames.len());
+        }
+        let s = session("proj-a", Status::Running);
+        assert!(seed_for(&s) > 1 << 24, "realistic seeds exceed f32 integer precision");
+    }
+
+    #[test]
     fn info_rows_keep_pr_over_summary_and_hide_disabled_extras() {
         let s = session("proj-a", Status::Running);
         let rows = card(&s, &all_extras(), false);

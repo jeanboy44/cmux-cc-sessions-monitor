@@ -4,7 +4,7 @@
 use crate::model::Status;
 
 use super::canvas::{lerp, mul, Canvas, Rgb, CARD_BG};
-use super::noise::slot;
+use super::noise::{seed_phase, slot};
 use super::{Ctx, SpiritGrid, BASE_R};
 
 /// Animation speed of the body outline.
@@ -31,7 +31,7 @@ pub(super) fn activity(s: Status) -> f32 {
 
 /// Vertical body offset in design units.
 pub(super) fn bob(s: Status, seed: u32, tf: f32) -> f32 {
-    let ph = seed as f32 * 0.7;
+    let ph = seed_phase(seed, 0xB0B);
     match s {
         Status::Running => (tf * 0.28 + ph).sin(),
         Status::NeedsInput => (tf * 0.2 + ph).sin(),

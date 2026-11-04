@@ -6,7 +6,10 @@ use super::{Cell, SpiritGrid, CX, CY};
 
 pub(super) type Rgb = [f32; 3];
 
-/// Colour the spirit is assumed to sit on; fades blend toward it.
+/// Colour the spirit is assumed to sit on; fades blend toward it. Cells have
+/// no background and no alpha, so a fading dot cannot become transparent:
+/// it darkens toward this near-black instead, which reads as a fade on the
+/// usual dark terminal backgrounds.
 pub(super) const CARD_BG: Rgb = [22., 23., 32.];
 pub(super) const WHITE: Rgb = [255., 255., 255.];
 /// Priority of the eye catchlight; the only dots allowed to stay pure white.

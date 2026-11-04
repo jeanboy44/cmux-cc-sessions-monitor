@@ -35,6 +35,16 @@ const CY: f32 = 15.0;
 const BASE_R: f32 = 8.5;
 /// Water ripple line.
 const FLOOR_Y: f32 = 26.0;
+/// Float phases wrap every 2^16 ticks (about 73 min at 15 fps) so f32 math
+/// keeps sub-tick resolution on a monitor that runs for weeks; the wrap is a
+/// single-frame jump in phase.
+const PHASE_PERIOD: u64 = 1 << 16;
+
+/// Tick as an f32 phase base, exact and small at any uptime.
+fn phase_tick(t: u64) -> f32 {
+    (t % PHASE_PERIOD) as f32
+}
+
 /// Ticks per half period of the red warning flicker (about 0.5 s at 15 fps).
 const WARN_HALF_PERIOD: u64 = 8;
 
@@ -141,7 +151,7 @@ impl Ctx {
             state: p.status,
             seed: p.seed,
             t: p.tick,
-            tf: p.tick as f32,
+            tf: phase_tick(p.tick),
             sp: state::speed(p.status),
             small: p.size.geom().small,
         }
@@ -391,6 +401,98 @@ mod tests {
             let t_off = (0..40).find(|&t| render(&SpiritParams { warning: true, ..params(theme, Status::Running, Size::S, t, 2) }) == render(&params(theme, Status::Running, Size::S, t, 2)));
             assert!(t_off.is_some(), "{theme:?}: an off phase exists");
         }
+    }
+
+    /// Full-range seeds as cards produce them (FNV-1a of a session id).
+    const BIG_SEEDS: [u32; 3] = [u32::MAX, 706_312_658, 0x9e37_79b9];
+
+    fn luminance(g: &SpiritGrid, skip: &[char]) -> f32 {
+        let lum: Vec<f32> = g
+            .cells
+            .iter()
+            .filter(|c| !skip.contains(&c.ch))
+            .filter_map(|c| c.fg)
+            .map(|(r, gg, b)| 0.2126 * f32::from(r) + 0.7152 * f32::from(gg) + 0.0722 * f32::from(b))
+            .collect();
+        lum.iter().sum::<f32>() / lum.len().max(1) as f32
+    }
+
+    #[test]
+    fn large_seeds_keep_bobbing() {
+        for seed in BIG_SEEDS {
+            for status in [Status::Running, Status::NeedsInput] {
+                let bob: Vec<f32> = (0..60).map(|t| state::bob(status, seed, phase_tick(t))).collect();
+                let moving = bob.windows(2).filter(|w| (w[0] - w[1]).abs() > 1e-3).count();
+                assert!(moving > 50, "{seed} {status:?}: {moving} of 59 ticks move");
+            }
+            let done: Vec<f32> = (0..60).map(|t| state::bob(Status::Done, seed, phase_tick(t))).collect();
+            let spread = done.iter().cloned().fold(f32::MIN, f32::max) - done.iter().cloned().fold(f32::MAX, f32::min);
+            assert!(spread > 1.0, "{seed}: DONE bounce spread {spread}");
+            // the bounce shows on the grid: some frames differ by more than particles
+            let frames: std::collections::BTreeSet<Vec<char>> =
+                (0..30).map(|t| render(&params(Theme::Water, Status::Done, Size::S, t, seed)).cells.iter().map(|c| c.ch).collect()).collect();
+            assert!(frames.len() > 3, "{seed}: DONE frames vary");
+        }
+    }
+
+    #[test]
+    fn large_seeds_keep_rotating_and_twinkling() {
+        for seed in BIG_SEEDS {
+            let at = |theme, t| Ctx::new(&params(theme, Status::Running, Size::S, t, seed));
+            let rot0 = element::bolt_rot(&at(Theme::Lightning, 0));
+            assert!((1..400).all(|t| element::bolt_rot(&at(Theme::Lightning, t)) != rot0), "{seed}: lightning rotates");
+            assert!((element::bolt_rot(&at(Theme::Lightning, 400)) - rot0).abs() > 5.0);
+            let ice = |t| element::ice_facets(seed, at(Theme::Ice, t).tf, at(Theme::Ice, t).sp).1;
+            assert!((ice(400) - ice(0)).abs() > 2.0, "{seed}: ice facets rotate");
+            for i in 0..4 {
+                let ph: Vec<f32> = (0..60).map(|t| element::star_phase(&at(Theme::Ice, t), i)).collect();
+                assert!(ph.windows(2).all(|w| w[0] != w[1]), "{seed}: star {i} twinkles");
+            }
+        }
+    }
+
+    #[test]
+    fn motion_survives_long_uptime() {
+        let t0 = 40_000_000;
+        for seed in [7, 706_312_658] {
+            let g = |t| render(&params(Theme::Fire, Status::Running, Size::S, t, seed));
+            assert_ne!(g(t0), g(t0 + 10), "{seed}");
+            let bob: Vec<f32> = (t0..t0 + 30).map(|t| state::bob(Status::Running, seed, phase_tick(t))).collect();
+            let moving = bob.windows(2).filter(|w| (w[0] - w[1]).abs() > 1e-3).count();
+            assert!(moving > 25, "{seed}: {bob:?}");
+            assert!((t0..t0 + 400).any(|t| eyes::blinking(seed, t)));
+        }
+    }
+
+    #[test]
+    fn needs_input_pulses_idle_is_dim_done_sparkles() {
+        let seed = 706_312_658;
+        for theme in Theme::ALL {
+            // NEEDS_INPUT: the body brightness pulses (the `?` mark excluded)
+            let lum: Vec<f32> = (0..22).map(|t| luminance(&render(&params(theme, Status::NeedsInput, Size::S, t, seed)), &['?'])).collect();
+            let spread = lum.iter().cloned().fold(f32::MIN, f32::max) - lum.iter().cloned().fold(f32::MAX, f32::min);
+            assert!(spread > 10.0, "{theme:?}: pulse spread {spread}");
+            // IDLE is dimmer than RUNNING
+            for t in [0, 20, 45] {
+                let idle = luminance(&render(&params(theme, Status::Idle, Size::S, t, seed)), &['z', 'Z']);
+                let run = luminance(&render(&params(theme, Status::Running, Size::S, t, seed)), &[]);
+                assert!(idle < run * 0.8, "{theme:?} {t}: idle {idle} vs running {run}");
+            }
+            // DONE: gold sparkles appear around the body
+            let sparkle = |t| render(&params(theme, Status::Done, Size::S, t, seed)).cells.iter().any(|c| matches!(c.fg, Some((250, 236, 150)) | Some((204, 188, 120))));
+            assert!((0..60).any(sparkle), "{theme:?}: sparkles");
+        }
+    }
+
+    #[test]
+    fn render_has_no_hidden_state() {
+        let p = params(Theme::Ice, Status::Running, Size::M, 300, 706_312_658);
+        let fresh = render(&p);
+        for t in 0..300 {
+            render(&SpiritParams { tick: t, ..p });
+        }
+        render(&SpiritParams { seed: 1, ..p });
+        assert_eq!(render(&p), fresh);
     }
 
     /// Every element x state as ANSI text. Run with

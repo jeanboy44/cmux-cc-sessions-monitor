@@ -5,7 +5,7 @@ use std::f32::consts::{PI, TAU};
 use crate::model::Status;
 
 use super::canvas::{lerp, Canvas, Rgb, CARD_BG};
-use super::noise::{hf, slot, Rng};
+use super::noise::{hf, seed_phase, slot, Rng};
 use super::particles::Particle;
 use super::state::twinkle;
 use super::theme::Theme;
@@ -23,7 +23,17 @@ pub(super) fn ramp(e: Theme) -> [Rgb; 4] {
 
 /// Ice: facet count and rotation.
 pub(super) fn ice_facets(seed: u32, tf: f32, sp: f32) -> (f32, f32) {
-    (7.0, seed as f32 * 0.9 + tf * 0.004 * sp)
+    (7.0, seed_phase(seed, 0x1CE) + tf * 0.004 * sp)
+}
+
+/// Lightning: rotation of the spike star.
+pub(super) fn bolt_rot(ctx: &Ctx) -> f32 {
+    seed_phase(ctx.seed, 0xB01) + ctx.tf * 0.01 * ctx.sp
+}
+
+/// Ice: twinkle phase of frost star `i`.
+pub(super) fn star_phase(ctx: &Ctx, i: usize) -> f32 {
+    (ctx.tf * 0.08 + i as f32 * 1.7 + seed_phase(ctx.seed, 0x57A)).sin()
 }
 
 /// Lightning: round core radius + star-burst spike length at angle `th`.
@@ -32,7 +42,7 @@ pub(super) fn bolt_shape(ctx: &Ctx, th: f32) -> (f32, f32) {
     let (t, tf, sp) = (ctx.t, ctx.tf, ctx.sp);
     let n = 8.0;
     let seg = TAU / n;
-    let rot = ctx.seed as f32 * 0.5 + tf * 0.01 * sp;
+    let rot = bolt_rot(ctx);
     let a = (th - rot).rem_euclid(TAU);
     let k = (a / seg).floor();
     let local = a - (k + 0.5) * seg;
@@ -142,7 +152,7 @@ pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
         Theme::Ice => {
             let stars = [(1.5, 4.0), (21.0, 10.0), (2.5, 22.0), (20.0, 23.0)];
             for (i, &(x, y)) in stars.iter().enumerate() {
-                let ph = (tf * 0.08 + i as f32 * 1.7 + ctx.seed as f32 * 0.37).sin();
+                let ph = star_phase(ctx, i);
                 twinkle(cv, x, y, ph, [230., 250., 255.]);
             }
         }

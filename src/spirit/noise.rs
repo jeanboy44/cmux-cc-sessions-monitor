@@ -14,6 +14,13 @@ pub(super) fn hf(a: u32, b: u32) -> f32 {
     (hash(a.wrapping_mul(0x9E37_79B1) ^ hash(b)) & 0xFFFF) as f32 / 65535.0
 }
 
+/// Per-seed phase offset in [0, TAU) for `salt`. Seeds are full-range u32
+/// values; using them directly in f32 phase math would swallow the small
+/// per-tick increments (f32 spacing near 1e9 is 64), freezing the motion.
+pub(super) fn seed_phase(seed: u32, salt: u32) -> f32 {
+    hf(seed, salt) * std::f32::consts::TAU
+}
+
 /// Stateless integer in `0..n` for slot `k` of a schedule keyed by `seed` and `salt`.
 pub(super) fn slot(seed: u32, salt: u32, k: u64, n: u32) -> u64 {
     u64::from(hash(hash(seed ^ salt) ^ (k as u32) ^ hash((k >> 32) as u32)) % n.max(1))
