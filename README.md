@@ -77,7 +77,7 @@ The usage drives three stages, on the same thresholds as the magic size:
 - Lively (20% to 50%, or unknown): the normal motion.
 - Struggling (50% and up): the body trembles and pants with a faster bob and a slight squash and stretch, pale sweat drops slide down its side, casts wind up longer and recoil harder, and an idle spirit slumps with heavy, slow breaths. Above 90% the body also flickers red.
 
-The water vortex, poison fog and lightning bolts are centred in the magic area, the columns from just right of the body to the card's inner right edge (the wider preview card gives them its full width); the fire breath leaves the mouth.
+The water vortex, poison fog and lightning bolts are centred in the magic area, the columns from just right of the body to the card's inner right edge (the wider preview card gives them its full width); the fire breath leaves the mouth. At normal magic the water vortex turns very slowly (about one turn every 8 s) and four thin lightning bolts strike at random spots a tick or two apart; at big magic one thick bolt strikes in the centre among three thin ones, and the poison fog of each cast settles into a skull that lingers for about half a second before it fades.
 
 The large card's spirit is a quarter-size version (6x2 cells) with the same eyes, state cues, element looks, pose and stages; its magic is about half the size and follows the same placement rules.
 

@@ -1770,7 +1770,9 @@ mod tests {
                 let casts: Vec<u64> = (1..800).filter(|&t| state::casts_at(seed, t)).collect();
                 for w in casts.windows(3) {
                     let (prev, c, next) = (w[0], w[1], w[2]);
-                    if c - prev < life || next - c <= 12 {
+                    // (no fading skull of the previous Big cast in the way)
+                    let quiet = if magic == Magic::Big { life.max(magic::skull_window().1.end) } else { life };
+                    if c - prev < quiet || next - c <= 12 {
                         continue;
                     }
                     // the fog alone: pop sparkles of a bubble at the body's right edge may fly into the fog area
@@ -1820,6 +1822,122 @@ mod tests {
             assert!(denser >= need, "{magic:?}: denser inside on {denser} of {isolated} casts");
         }
         assert!(checked >= 6, "{checked} isolated casts checked");
+    }
+
+    /// Dots of the poison frame at `t` (no bubbles, no ambient bits) inside
+    /// the skull's box, as a bitmap over [`magic::SKULL`]'s rows; and how many
+    /// dots differ from the skull.
+    fn skull_at(magic: Magic, seed: u32, t: u64) -> (Vec<String>, usize) {
+        let p = SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Poison, Status::Running, Size::S, t, seed) };
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        let d = dots(&render_with(&p, false));
+        particles::NO_AMBIENT.with(|c| c.set(false));
+        let (x0, y0) = magic::skull_origin(&geom_of(&p));
+        let mut off = 0;
+        let rows: Vec<String> = magic::SKULL
+            .iter()
+            .enumerate()
+            .map(|(r, want)| {
+                want.chars()
+                    .enumerate()
+                    .map(|(c, w)| {
+                        let on = d.contains(&(x0 + c as i32, y0 + r as i32));
+                        off += usize::from(on != (w == '#'));
+                        if on { '#' } else { '.' }
+                    })
+                    .collect()
+            })
+            .collect();
+        (rows, off)
+    }
+
+    /// Casts of `seed` in ticks 1..800 whose skull is not mixed up with a
+    /// neighbour's: the previous cast's skull is gone by 4 ticks after it
+    /// (or not formed yet) and the next cast's skull forms only after this
+    /// one is gone.
+    fn skull_casts(seed: u32) -> Vec<u64> {
+        let (_, whole) = magic::skull_window();
+        let casts: Vec<u64> = (1..800).filter(|&t| state::casts_at(seed, t)).collect();
+        casts
+            .windows(3)
+            .filter(|w| {
+                let (prev, next) = (w[1] - w[0], w[2] - w[1]);
+                (prev + 4 >= whole.end || prev + 4 < whole.start) && next + whole.start >= whole.end
+            })
+            .map(|w| w[1])
+            .collect()
+    }
+
+    #[test]
+    fn poison_big_fog_ends_in_a_skull() {
+        let skull_dots = magic::SKULL.iter().flat_map(|r| r.chars()).filter(|&c| c == '#').count();
+        let (hold, end) = magic::skull_window();
+        let mut checked = 0;
+        for seed in [4, 11, 23, 37, 706_312_658] {
+            for c in skull_casts(seed) {
+                // formed and held for 6 to 8 ticks near the end of the cast
+                assert!((6..=8).contains(&(hold.end - hold.start)), "hold {hold:?}");
+                for age in hold.clone() {
+                    let (rows, off) = skull_at(Magic::Big, seed, c + age);
+                    assert!(off <= 4, "{seed} {c}+{age}: {off} dots off the skull\n{}", rows.join("\n"));
+                }
+                // not before the fog settles
+                assert!(skull_at(Magic::Big, seed, c + 4).1 > skull_dots / 3, "{seed} {c}: no skull early on");
+                // it fades out: dimmer, then gone
+                let p = |age| SpiritParams { magic: Magic::Big, cols: CARD_COLS, ..params(Theme::Poison, Status::Running, Size::S, c + age, seed) };
+                let bright = |age| {
+                    let g = render_with(&p(age), false);
+                    let (x0, y0) = magic::skull_origin(&geom_of(&p(age)));
+                    let (c0, r0) = ((x0 / 2) as u16, (y0 / 4) as u16);
+                    (c0..c0 + 7).flat_map(|c| (r0..r0 + 4).map(move |r| (c, r))).filter(|&(c, r)| c < g.cols && r < g.rows).filter_map(|(c, r)| cell(&g, c, r).fg).map(lum).fold(0.0f32, f32::max)
+                };
+                assert!(bright(hold.end + 2) < bright(hold.start + 2) - 30.0, "{seed} {c}: fades {} -> {}", bright(hold.start + 2), bright(hold.end + 2));
+                assert!(skull_at(Magic::Big, seed, c + end.end).1 > skull_dots / 2, "{seed} {c}: gone after the fade");
+                // Small and Normal fog never form it
+                for magic in [Magic::Small, Magic::Normal] {
+                    for age in hold.clone() {
+                        assert!(skull_at(magic, seed, c + age).1 > skull_dots / 2, "{magic:?} {seed} {c}+{age}: no skull");
+                    }
+                }
+                checked += 1;
+            }
+        }
+        println!("{checked} casts checked");
+        assert!(checked >= 10, "{checked} casts checked");
+    }
+
+    #[test]
+    fn poison_skull_is_centred_pale_and_leaves_the_rest_alone() {
+        let (hold, _) = magic::skull_window();
+        for seed in [4, 11, 706_312_658] {
+            let c = first_cast(seed);
+            let p = SpiritParams { magic: Magic::Big, cols: CARD_COLS, ..params(Theme::Poison, Status::Running, Size::S, c + hold.start + 2, seed) };
+            let g = geom_of(&p);
+            // centred on the burst anchor
+            let (ax, ay) = magic::fog_anchor(&g);
+            let (x0, y0) = magic::skull_origin(&g);
+            let (w, h) = (magic::SKULL[0].len() as f32, magic::SKULL.len() as f32);
+            assert!((x0 as f32 + w / 2.0 - ax).abs() <= 1.0 && (y0 as f32 + h / 2.0 - ay).abs() <= 2.0, "{seed}: skull at ({x0}, {y0}) vs anchor ({ax}, {ay})");
+            // about as big as the big fog: 6 to 7 columns by 3 to 4 rows
+            assert!((12.0..=14.0).contains(&w) && (12.0..=16.0).contains(&h), "skull {w}x{h} sub-pixels");
+            // pale green-grey, never pure white, deterministic
+            let grid = render(&p);
+            assert_eq!(grid, render(&p));
+            let bone: Vec<(u8, u8, u8)> = (0..grid.rows).flat_map(|r| (0..grid.cols).map(move |c| (c, r))).filter_map(|(c, r)| cell(&grid, c, r).fg).filter(|&(r, g, b)| r > 150 && g > 180 && b > 150 && u16::from(g) > u16::from(r) + 10).collect();
+            assert!(!bone.is_empty(), "{seed}: pale skull cells");
+            assert!(bone.iter().all(|&(r, g, b)| g >= r && g >= b && g < 250), "{seed}: green-grey, never white {bone:?}");
+        }
+        // the other elements cast as before at Big
+        for theme in [Theme::Fire, Theme::Water, Theme::Lightning] {
+            for seed in [4, 11] {
+                let (hold, _) = magic::skull_window();
+                for c in skull_casts(seed).into_iter().take(2) {
+                    let p = SpiritParams { magic: Magic::Big, cols: CARD_COLS, ..params(theme, Status::Running, Size::S, c + hold.start + 2, seed) };
+                    let g = render(&p);
+                    assert!(g.cells.iter().all(|c| c.fg.is_none_or(|(r, gg, b)| !(r > 150 && gg > 180 && b > 150 && u16::from(gg) > u16::from(r) + 10 && gg >= b && r.abs_diff(b) < 40))), "{theme:?} {seed} {c}: no skull");
+                }
+            }
+        }
     }
 
     /// The bolt plans of every cast of seeds 1..30 in ticks 1..300 in the
@@ -1999,8 +2117,9 @@ mod tests {
     /// rebalance (smaller Normal, clearer Small) the 15 running fire, water
     /// and poison frames casting Small or Normal magic (entries 1-3, 5, 7,
     /// 41-43, 45, 47, 81-83, 85, 87). The slow Normal vortex re-captured
-    /// the running water Normal frames 41-43 and 47. Every other frame is
-    /// still the pre-stage render.
+    /// the running water Normal frames 41-43 and 47, and the Big poison
+    /// skull the running poison Big frame 86. Every other frame is still the
+    /// pre-stage render.
     #[rustfmt::skip]
     const GOLDEN: [u64; 160] = [
         0x3512407e8b3be050, 0x47bbd98251e8fd5a, 0xeb233e7a17abe412, 0xcdf749eca37373e8, 0xac4e96eb863a74c1, 0x11dad5b57fe9a68b, 0xfc108cd1c4fb901d, 0xfb9527393cb63a77,
@@ -2013,7 +2132,7 @@ mod tests {
         0xd82350e5a41e871f, 0x6eda02e347dd31c1, 0x03f9c0c849cfb49c, 0xc0e10b81431aa916, 0xd021c09188dbd3c3, 0x6b4b5378291cb075, 0x5eab5e9a96b16fcf, 0x3e5bad230a45cfd7,
         0xa98ffb855054ad80, 0x5e2ff43d23c35201, 0x12d998a33761e63a, 0x47de1dd41ee777b0, 0xdc6417a2c1fe9a9e, 0x97a0921451361b80, 0x4e4fcdacb9d69a47, 0xd63cde832ab3eb0e,
         0x48397efc5c8c3b41, 0x21da5b3f472a49f0, 0xec21ee809d8c883b, 0x7cc2ad766f426d99, 0xf2c3f4f1bafe3b20, 0x4f3d4438efbd360d, 0x900a07b09bae5fb7, 0xf15983afbd5a66d6,
-        0x17ba577ce79f9d69, 0xb04e9224431280a2, 0xa3463cda315301aa, 0x4a8dd78570dd3bce, 0x00e6fb96b9d8dbe3, 0x90b03f33f68f12ed, 0x66b8b6aca898ae18, 0x31f64658867de74e,
+        0x17ba577ce79f9d69, 0xb04e9224431280a2, 0xa3463cda315301aa, 0x4a8dd78570dd3bce, 0x00e6fb96b9d8dbe3, 0x90b03f33f68f12ed, 0xd0a1eaecff347496, 0x31f64658867de74e,
         0x6e6f83e990bad121, 0xe8c937a5b5565162, 0x06b998dbd08c3922, 0x1de1bdf0cc3207fa, 0xdd9a20840cdd6d4f, 0xbf9b1e45c6f184c3, 0xfea08ed50dc958b6, 0xbdfa8d0c6164ec15,
         0xaf99522f19ebd5d3, 0x7ed6f69b81fdce30, 0x59431f82976b233e, 0x153e240a19ecca34, 0xcdddb889d9b805a9, 0x91a61bcdb1643167, 0xb1e025b92ee2cecd, 0x3f47116c7a438ad6,
         0x7850eb98fd19d4ac, 0x1505f53f641c81d0, 0x8bb55120b1e5e349, 0xebd099f4dc831e14, 0xba8e77ce1e06556f, 0x8244f1770964617e, 0xf70329b6cbe5386c, 0x8649e9e257ac4035,
@@ -2689,6 +2808,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Prints the stage-spec sample frames in the standard card: the slow
+    /// Normal water vortex, staggered Normal and Big lightning, and the Big
+    /// poison skull (`cargo test dump_stage_specs -- --ignored --nocapture`;
+    /// `SPIRIT_SEED=…`).
+    #[test]
+    #[ignore]
+    fn dump_stage_specs() {
+        let seed = std::env::var("SPIRIT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        let at = |theme, magic, t| render_with(&SpiritParams { magic, cols: CARD_COLS, ..params(theme, Status::Running, Size::S, t, seed) }, false);
+        let show = |label: String, frames: Vec<(String, SpiritGrid)>| {
+            println!("{label}");
+            println!("{}", frames.iter().map(|f| format!("{:<19}", f.0)).collect::<String>());
+            for row in 0..frames[0].1.rows {
+                let line: String = frames.iter().map(|(_, g)| (0..g.cols).map(|c| cell(g, c, row).ch).collect::<String>() + " ").collect();
+                println!("{line}");
+            }
+            println!();
+        };
+        let casts: Vec<u64> = (1..800).filter(|&t| state::casts_at(seed, t)).collect();
+        let c = casts[2];
+        let ticks = |ts: &[u64], theme, magic| ts.iter().map(|&t| (format!("+{}", t - c), at(theme, magic, t))).collect::<Vec<_>>();
+        show(format!("water Normal, cast at {c}"), ticks(&[c + 4, c + 6, c + 8, c + 10, c + 12, c + 14], Theme::Water, Magic::Normal));
+        show(format!("water Big, cast at {c}"), ticks(&[c + 4, c + 6, c + 8, c + 10, c + 12, c + 14], Theme::Water, Magic::Big));
+        for magic in [Magic::Normal, Magic::Big] {
+            show(format!("lightning {magic:?}, cast at {c}"), ticks(&[c, c + 1, c + 2, c + 3, c + 4, c + 5], Theme::Lightning, magic));
+        }
+        let c = skull_casts(seed)[0];
+        let ticks = |ts: &[u64], theme, magic| ts.iter().map(|&t| (format!("+{}", t - c), at(theme, magic, t))).collect::<Vec<_>>();
+        show(format!("poison Big, cast at {c}"), ticks(&[c + 6, c + 16, c + 22, c + 23, c + 24, c + 25], Theme::Poison, Magic::Big));
+        show(format!("poison Big, cast at {c}"), ticks(&[c + 28, c + 31, c + 32, c + 34, c + 36, c + 37], Theme::Poison, Magic::Big));
+        particles::NO_AMBIENT.with(|c| c.set(false));
     }
 
     /// Per-level magic measurements in the standard card (stage 2, seeds

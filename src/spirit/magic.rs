@@ -368,11 +368,109 @@ pub(super) fn fog_life(m: Magic) -> u64 {
     }
 }
 
+/// The skull a Big poison cast's fog settles into at its end, on a 14 x 14
+/// sub-pixel grid (7 x 3.5 cells, about the size of the big cloud): `#` is
+/// bone, `.` empty. The eye sockets (4 x 4, one whole cell each), the nose
+/// notch and the gaps between the teeth stay dark.
+pub(super) const SKULL: [&str; 14] = [
+    "....######....",
+    "..##########..",
+    ".############.",
+    "##############",
+    "#....####....#",
+    "#....####....#",
+    "#....####....#",
+    "#....####....#",
+    ".#####..#####.",
+    "..####..####..",
+    "...########...",
+    "...##.##.##...",
+    "...########...",
+    "....######....",
+];
+/// Ages (ticks after its cast) at which the skull starts to form, is fully
+/// formed, starts to fade and is gone.
+const SKULL_FORM: u64 = 22;
+const SKULL_HOLD: u64 = 25;
+const SKULL_FADE: u64 = 32;
+const SKULL_END: u64 = 37;
+/// Bone (pale green-grey, never white) and its green glow.
+const SKULL_BONE: Rgb = [196., 228., 186.];
+const SKULL_GLOW: Rgb = [92., 205., 78.];
+
+/// (fully formed, whole life) of the skull in ticks after its cast.
+#[cfg(test)]
+pub(super) fn skull_window() -> (std::ops::Range<u64>, std::ops::Range<u64>) {
+    (SKULL_HOLD..SKULL_FADE, SKULL_FORM..SKULL_END)
+}
+
+/// How much of the skull shows `age` ticks after its cast (0..=1).
+fn skull_alpha(age: u64) -> f32 {
+    match age {
+        a if a < SKULL_FORM || a >= SKULL_END => 0.0,
+        a if a < SKULL_HOLD => (a - SKULL_FORM + 1) as f32 / (SKULL_HOLD - SKULL_FORM + 1) as f32,
+        a if a < SKULL_FADE => 1.0,
+        a => (SKULL_END - a) as f32 / (SKULL_END - SKULL_FADE + 1) as f32,
+    }
+}
+
+/// Top-left sub-pixel of the skull: centred on the burst anchor, snapped so
+/// each eye socket is one whole braille cell, inside the canvas.
+pub(super) fn skull_origin(g: &Geom) -> (i32, i32) {
+    let (ax, ay) = fog_anchor(g);
+    let (w, h) = (SKULL[0].len() as f32, SKULL.len() as f32);
+    let x = (ax - w / 2.0).round() as i32;
+    // socket columns start at x + 1: x odd
+    let x = if x.rem_euclid(2) == 1 { x } else { x - 1 };
+    // socket rows start at y + 4: y on a cell row
+    let y = ((ay - h / 2.0) / 4.0).round() as i32 * 4;
+    (x, y.clamp(0, (g.h as i32 - SKULL.len() as i32).max(0)))
+}
+
+/// Whether skull grid point (c, r) is bone.
+fn bone(c: i32, r: i32) -> bool {
+    r >= 0 && c >= 0 && SKULL.get(r as usize).is_some_and(|row| row.as_bytes().get(c as usize) == Some(&b'#'))
+}
+
+/// Paints the skull at strength `alpha`: the fog settles into bone dots
+/// (a few at first, all once formed, thinning and dimming as it fades), the
+/// sockets, nose and gaps between the teeth cleared to the card, and a
+/// sparse green glow just outside its box.
+fn skull(cv: &mut Canvas, ctx: &Ctx, a: &Area, left: i32, alpha: f32) {
+    let (x0, y0) = skull_origin(&cv.g);
+    let (w, h) = (SKULL[0].len() as i32, SKULL.len() as i32);
+    let col = lerp(CARD_BG, SKULL_BONE, 0.35 + 0.65 * alpha);
+    let glow = lerp(CARD_BG, SKULL_GLOW, 0.75 * alpha);
+    for r in -2..h + 2 {
+        for c in -2..w + 2 {
+            let (x, y) = (x0 + c, y0 + r);
+            if x < left {
+                continue;
+            }
+            let n = hf((c as u32).wrapping_mul(29).wrapping_add((r as u32).wrapping_mul(11)), ctx.seed ^ 0x5C0);
+            let inside = (0..w).contains(&c) && (0..h).contains(&r);
+            if bone(c, r) {
+                if n < alpha {
+                    a.dot(cv, x, y, col, 2);
+                }
+            } else if inside {
+                if alpha >= 0.5 {
+                    cv.clear_px(x, y);
+                }
+            } else if n < 0.55 * alpha && (-1..=1).any(|dy| (-1..=1).any(|dx| bone(c + dx, r + dy))) {
+                a.dot(cv, x, y, glow, 1);
+            }
+        }
+    }
+}
+
 /// Poison: every cast bursts toxic puffs out of a fixed centre in the magic
 /// area. They swell radially, thinning and fading as they grow, with
 /// edges wobbling in smooth noise; Normal and Big casts puff several
 /// overlapping clouds. The dither pattern is fixed, so the fog creeps
-/// instead of flickering.
+/// instead of flickering. At the end of a Big cast the fog settles into a
+/// [`SKULL`] that shows for a few ticks and fades out (not at the half-size
+/// magic scale, whose canvas is too small for it).
 fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
     let (rmax, puffs, spread, thick): (f32, u32, f32, f32) = match ctx.magic {
         Magic::Small => (2.5, 1, 0.0, 1.0),
@@ -385,9 +483,17 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
     let (ax, ay) = fog_anchor(&cv.g);
     // (centre x, centre y, radius, strength, wobble phase) of every live puff
     let mut live: Vec<(f32, f32, f32, f32, f32)> = Vec::new();
-    for age in 0..life {
+    let skulls = ctx.magic == Magic::Big && ctx.ms >= 1.0;
+    let mut alpha = 0.0f32;
+    for age in 0..if skulls { life.max(SKULL_END) } else { life } {
         let Some(c) = ctx.t.checked_sub(age) else { break };
         if c == 0 || !state::casts_at(ctx.seed, c) {
+            continue;
+        }
+        if skulls {
+            alpha = alpha.max(skull_alpha(age));
+        }
+        if age >= life {
             continue;
         }
         let ck = c as u32 ^ (c >> 32) as u32;
@@ -408,27 +514,41 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
             live.push((ax + ox, ay + oy, r, amp, hf(ctx.seed ^ 0xF08 ^ k, ck) * TAU));
         }
     }
-    if live.is_empty() {
-        return;
+    // like the breath, the fog keeps one empty dot column off the body
+    let left = cv.body_right().map_or(0, |e| e + 2);
+    if !live.is_empty() {
+        fog_puffs(cv, ctx, a, &mut live, (rmax, spread, alpha), left);
     }
+    if alpha > 0.0 {
+        skull(cv, ctx, a, left, alpha);
+    }
+}
+
+/// Draws the live puffs (centre x, centre y, radius, strength, wobble
+/// phase); `shape` is (largest radius, spread, skull strength): the fog
+/// thins out inside the skull's box as the skull forms.
+fn fog_puffs(cv: &mut Canvas, ctx: &Ctx, a: &Area, live: &mut [(f32, f32, f32, f32, f32)], shape: (f32, f32, f32), left: i32) {
+    let (rmax, spread, alpha) = shape;
+    let (ax, _) = fog_anchor(&cv.g);
+    let (sx, sy) = skull_origin(&cv.g);
+    let in_skull = |x: i32, y: i32| (sx - 1..sx + SKULL[0].len() as i32 + 1).contains(&x) && (sy - 1..sy + SKULL.len() as i32 + 1).contains(&y);
     // keep the cloud as a whole centred: shift the puffs so their weighted
     // mean x sits on the anchor
     let w: f32 = live.iter().map(|p| p.3 * p.2 * p.2).sum();
     if w > 0.0 {
         let off = live.iter().map(|p| p.3 * p.2 * p.2 * p.0).sum::<f32>() / w - ax;
-        for p in &mut live {
+        for p in live.iter_mut() {
             p.0 -= off;
         }
     }
-    // like the breath, the fog keeps one empty dot column off the body; it
-    // is clipped evenly on both sides of the anchor so it stays centred
-    let left = cv.body_right().map_or(0, |e| e + 2) as f32;
+    // clipped evenly on both sides of the anchor so it stays centred
+    let left = left as f32;
     let reach = (rmax * 1.3 + spread).min(ax - left).min(cv.g.w as f32 - ax).max(0.0);
     for y in 0..cv.g.h as i32 {
         for x in (ax - reach).floor() as i32..(ax + reach).ceil() as i32 {
             let (xf, yf) = (x as f32 + 0.5, y as f32 + 0.5);
             let mut dens = 0.0f32;
-            for &(px, py, r, amp, ph) in &live {
+            for &(px, py, r, amp, ph) in live.iter() {
                 let (dx, dy) = (xf - px, yf - py);
                 let th = dy.atan2(dx);
                 let wob = 1.0 + 0.16 * (3.0 * th + ph + ctx.tf * 0.05).sin() + 0.08 * (5.0 * th - ctx.tf * 0.035 + 2.0 * ph).sin();
@@ -436,6 +556,9 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
                 if d < 1.0 {
                     dens = dens.max(amp * (1.0 - d * d).powf(0.6));
                 }
+            }
+            if alpha > 0.0 && in_skull(x, y) {
+                dens *= 1.0 - alpha;
             }
             // the dither mirrors about the anchor, so it never leans the cloud
             let mx = ((xf - ax).abs() * 2.0) as u32;
