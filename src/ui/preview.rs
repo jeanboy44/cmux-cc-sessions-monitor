@@ -2,14 +2,16 @@
 //! footer) and how it is drawn. Plain chrome: the tiles' thin rounded border
 //! and a dim title, no scene.
 //!
-//! While the preview is on, the session list turns into ONE column of compact cards
-//! and the panel takes the rest (master/detail). Placement rule
-//! ([`preview_layout`], sizes of the area between HUD and footer):
+//! While the preview is on, the session list keeps full spirit cards and the
+//! panel takes the rest (master/detail). Placement rule ([`preview_layout`],
+//! sizes of the area between HUD and footer):
 //! - width ≥ [`SIDE_MIN_WIDTH`] and height ≥ [`SIDE_MIN_HEIGHT`]: list on the
-//!   LEFT, `clamp(width/5, 26, 34)` wide (26 = the widest tile minimum), preview
-//!   on the RIGHT (≥ 44 columns);
-//! - else height ≥ [`STACK_MIN_HEIGHT`]: list on TOP, `clamp(height*2/5, 8, 14)`
-//!   tall, preview at the BOTTOM (≥ 10 rows);
+//!   LEFT, `clamp(width/5, 26, 34)` wide, ONE column of cards stretched to that
+//!   width (user decision: the card grows to the right by the reserved column),
+//!   preview on the RIGHT (≥ 44 columns);
+//! - else height ≥ [`STACK_MIN_HEIGHT`]: list on TOP, `clamp(height*2/5, 9, 10)`
+//!   tall = one row of the usual 20x9 card grid (+ a group divider line),
+//!   preview at the BOTTOM (≥ 15 rows);
 //! - else no panel: the normal grid, and the footer says the terminal is too small.
 
 use ratatui::layout::Rect;
@@ -19,6 +21,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::preview::preview_lines;
+use crate::ui::card::{CARD_H, CARD_W};
 use crate::ui::style;
 use crate::ui::style::truncate_to_width;
 
@@ -26,17 +29,19 @@ use crate::ui::style::truncate_to_width;
 pub const SIDE_MIN_WIDTH: u16 = 70;
 /// Minimum height for the side-by-side layout.
 pub const SIDE_MIN_HEIGHT: u16 = 8;
-/// Side-by-side list width bounds (the minimum is the widest tile minimum,
-/// view A's 26; names are cut with `…` inside the tile).
+/// Side-by-side list width bounds; the one-column cards stretch to this
+/// width (always ≥ [`CARD_W`]; names are cut with `…` inside the card).
 pub const LIST_MIN_WIDTH: u16 = 26;
 pub const LIST_MAX_WIDTH: u16 = 34;
+const _: () = assert!(LIST_MIN_WIDTH >= CARD_W, "a full card fits the side list");
 /// Side-by-side list width = width / this, clamped to the bounds above.
 pub const LIST_WIDTH_DIVISOR: u16 = 5;
 /// Narrower than [`SIDE_MIN_WIDTH`]: from this height on, list top / preview bottom.
 pub const STACK_MIN_HEIGHT: u16 = 24;
-/// Stacked list height bounds.
-pub const LIST_MIN_HEIGHT: u16 = 8;
-pub const LIST_MAX_HEIGHT: u16 = 14;
+/// Stacked list height bounds: one row of full cards, plus one line for a
+/// window group divider when there is room.
+pub const LIST_MIN_HEIGHT: u16 = CARD_H;
+pub const LIST_MAX_HEIGHT: u16 = CARD_H + 1;
 /// The preview never asks cmux for more screen lines than this.
 pub const PREVIEW_MAX_READ_LINES: u16 = 80;
 /// Footer note while the preview is on but there is no room for it.
@@ -47,12 +52,13 @@ pub const PREVIEW_DONE: &str = "종료된 세션";
 pub const PREVIEW_NO_SESSION: &str = "선택한 세션이 없습니다";
 
 /// Session list area, (optional) preview panel area, and whether the list
-/// is forced to a single column.
+/// is one column of cards stretched to its width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviewLayout {
     pub list: Rect,
     pub panel: Option<Rect>,
-    /// True exactly when there is a panel: the list is one tile per row.
+    /// True exactly in the side-by-side layout: one stretched card per row.
+    /// The stacked strip keeps the usual grid.
     pub one_column: bool,
 }
 
@@ -72,7 +78,7 @@ pub fn preview_layout(area: Rect, enabled: bool) -> PreviewLayout {
         let h = h.clamp(LIST_MIN_HEIGHT, LIST_MAX_HEIGHT);
         let list = Rect { height: h, ..area };
         let panel = Rect { y: area.y + h, height: area.height - h, ..area };
-        PreviewLayout { list, panel: Some(panel), one_column: true }
+        PreviewLayout { list, panel: Some(panel), one_column: false }
     } else {
         full
     }
@@ -142,7 +148,16 @@ mod tests {
         assert!(!l.list.intersects(p), "{l:?}");
         assert_eq!(u32::from(l.list.area()) + u32::from(p.area()), u32::from(area.area()), "{l:?}");
         assert_eq!(l.list.union(p), area, "{l:?}");
-        assert!(l.one_column);
+        assert_eq!(l.one_column, p.x > area.x, "one column of stretched cards exactly in the side layout: {l:?}");
+    }
+
+    #[test]
+    fn list_bounds_hold_full_cards() {
+        use crate::ui::card::{CARD_H, CARD_W};
+        assert!(LIST_MIN_WIDTH >= CARD_W && LIST_MAX_WIDTH >= LIST_MIN_WIDTH);
+        assert_eq!((LIST_MIN_WIDTH, LIST_MAX_WIDTH), (26, 34), "the column the stretched card fills");
+        assert_eq!((LIST_MIN_HEIGHT, LIST_MAX_HEIGHT), (CARD_H, CARD_H + 1), "one row of full cards (+ a divider)");
+        assert!(STACK_MIN_HEIGHT - LIST_MIN_HEIGHT >= 10, "the stacked preview keeps at least 10 rows");
     }
 
     #[test]
@@ -169,15 +184,21 @@ mod tests {
     #[test]
     fn preview_layout_top_list_bottom_preview_when_narrow_but_tall() {
         let l = preview_layout(r(60, 30), true);
-        assert_eq!(l.list, Rect::new(0, 1, 60, 12));
-        assert_eq!(l.panel, Some(Rect::new(0, 13, 60, 18)));
+        assert_eq!(l.list, Rect::new(0, 1, 60, 10));
+        assert_eq!(l.panel, Some(Rect::new(0, 11, 60, 20)));
+        assert!(!l.one_column, "the strip is the usual grid");
         assert_split(l, r(60, 30));
-        // list height = clamp(height*2/5, 8, 14)
+        // list height = clamp(height*2/5, 9, 10): one row of full cards (+ a divider line)
         assert_eq!(preview_layout(r(40, 24), true).list.height, 9);
-        assert_eq!(preview_layout(r(40, 100), true).list.height, 14);
+        assert_eq!(preview_layout(r(40, 25), true).list.height, 10);
+        assert_eq!(preview_layout(r(40, 100), true).list.height, 10);
         assert_eq!(preview_layout(r(0, 24), true).list.height, 9, "zero width does not panic");
         let huge = preview_layout(r(69, u16::MAX - 1), true);
-        assert_eq!(huge.list.height, 14, "no overflow");
+        assert_eq!(huge.list.height, 10, "no overflow");
+        for h in 24..=200 {
+            let l = preview_layout(r(60, h), true);
+            assert!(l.panel.unwrap().height >= 15, "h={h}");
+        }
     }
 
     #[test]

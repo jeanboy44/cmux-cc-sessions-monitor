@@ -9,8 +9,12 @@
 //! (rows of disabled or unknown extras collapse). A larger area gets the card
 //! centered across, at its top.
 //!
-//! When a card does not fit (or the preview is on) a compact one-line card is
-//! drawn instead ([`render_compact`]). Empty areas draw nothing; no size panics.
+//! The preview list stretches the card across its column instead
+//! ([`render_wide_card`]): same height, the body stays on the left and the
+//! extra columns go to the text rows and the magic's room on the right.
+//!
+//! When a card does not fit a compact one-line card is drawn instead
+//! ([`render_compact`]). Empty areas draw nothing; no size panics.
 
 use std::time::SystemTime;
 
@@ -41,10 +45,10 @@ pub const CARD_W: u16 = INNER_W + 2;
 pub const CARD_H: u16 = SCENE_ROWS + INFO_ROWS + 2;
 const _: () = assert!(SCENE_COLS <= INNER_W, "the largest spirit fits the card");
 
-/// Whether the grid draws compact one-line cards: always while the preview
-/// lists sessions in one column, else when `area` cannot hold one full card.
-pub fn compact_mode(one_column: bool, area: Rect) -> bool {
-    one_column || area.width < CARD_W || area.height < CARD_H
+/// Whether the grid draws compact one-line cards: only when `area` cannot
+/// hold one full card (the preview list keeps full cards).
+pub fn compact_mode(area: Rect) -> bool {
+    area.width < CARD_W || area.height < CARD_H
 }
 
 /// The card's element: the one mapped to the session's model family, or the
@@ -103,15 +107,29 @@ fn draw_spirit(buf: &mut Buffer, band: Rect, params: &SpiritParams) -> Rect {
 /// [`CARD_W`] x [`CARD_H`] card centered across the top of `area`. Too small
 /// an area falls back to [`render_compact`].
 pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool, tick: u64) {
+    render_full(f, area, s, cfg, selected, tick, false);
+}
+
+/// Like [`render_card`], but the card is as wide as `area` (at least
+/// [`CARD_W`]), at its top left: the preview's one-column list.
+pub fn render_wide_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool, tick: u64) {
+    render_full(f, area, s, cfg, selected, tick, true);
+}
+
+fn render_full(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool, tick: u64, stretch: bool) {
     let area = area.intersection(f.area());
     if area.is_empty() {
         return;
     }
-    if area.width < CARD_W || area.height < CARD_H {
+    if compact_mode(area) {
         render_compact(f, area, s, cfg, selected, tick);
         return;
     }
-    let rect = Rect::new(area.x + (area.width - CARD_W) / 2, area.y, CARD_W, CARD_H);
+    let rect = if stretch {
+        Rect { height: CARD_H, ..area }
+    } else {
+        Rect::new(area.x + (area.width - CARD_W) / 2, area.y, CARD_W, CARD_H)
+    };
     let done = s.status == Status::Done;
     let mut block = style::window_block(style::status_color(s.status), selected);
     if done && !selected {
@@ -836,11 +854,77 @@ mod tests {
     #[test]
     fn compact_mode_rules() {
         let full = Rect::new(0, 0, CARD_W, CARD_H);
-        assert!(!compact_mode(false, full));
-        assert!(compact_mode(true, full), "preview");
-        assert!(compact_mode(false, Rect { width: CARD_W - 1, ..full }));
-        assert!(compact_mode(false, Rect { height: CARD_H - 1, ..full }));
-        assert!(compact_mode(false, Rect::default()));
+        assert!(!compact_mode(full));
+        assert!(!compact_mode(Rect::new(0, 0, 500, 500)), "the preview list keeps full cards");
+        assert!(compact_mode(Rect { width: CARD_W - 1, ..full }));
+        assert!(compact_mode(Rect { height: CARD_H - 1, ..full }));
+        assert!(compact_mode(Rect::default()));
+    }
+
+    fn wide(s: &Session, cfg: &Config, w: u16, selected: bool, tick: u64) -> Buffer {
+        draw(w, CARD_H + 2, |f| render_wide_card(f, f.area(), s, cfg, selected, tick))
+    }
+
+    #[test]
+    fn wide_card_stretches_to_the_area_width_body_left_text_wider() {
+        let s = session("proj-a", Status::Running);
+        for w in [CARD_W, CARD_W + 1, 26, 30, 34] {
+            let buf = wide(&s, &all_extras(), w, false, 0);
+            let rows = rows(&buf);
+            let last = usize::from(CARD_H) - 1;
+            assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮'), "w={w}: {rows:?}");
+            assert!(rows[last].starts_with('╰') && rows[last].ends_with('╯'), "w={w}: {rows:?}");
+            assert!(rows[1..last].iter().all(|r| r.starts_with('│') && r.ends_with('│')), "w={w}: {rows:?}");
+            assert_eq!(rows[0].width(), usize::from(w), "card width == area width");
+            assert!(rows[last + 1..].iter().all(|r| r.trim().is_empty()), "exactly CARD_H rows tall");
+            // spirit in the band, body on the left
+            let lit: Vec<u16> = (1..=SCENE_ROWS)
+                .flat_map(|y| (1..w - 1).map(move |x| (x, y)))
+                .filter(|&p| buf[p].symbol().chars().any(is_braille))
+                .map(|(x, _)| x)
+                .collect();
+            assert!(!lit.is_empty() && *lit.iter().min().unwrap() <= 3, "w={w}: {lit:?}");
+            let info_rows: Vec<String> = (1 + SCENE_ROWS as usize..last).map(|y| info(&rows[y])).collect();
+            assert_eq!(info_rows, vec!["proj-a", " RUN  3h ·2m ago", "#42 approved"], "w={w}");
+        }
+        // text truncation follows the wider inner width
+        let long = session("proj-abcdefghijklmnopqrstu", Status::Running); // 25 columns
+        let name_row = |w: u16| info(&rows(&wide(&long, &Config::default(), w, false, 0))[1 + SCENE_ROWS as usize]);
+        assert!(name_row(CARD_W).ends_with('…'), "{}", name_row(CARD_W));
+        assert_eq!(name_row(30), "proj-abcdefghijklmnopqrstu", "inner 28 holds the whole name");
+        assert!(name_row(26).ends_with('…') && name_row(26).width() == 24, "{}", name_row(26));
+    }
+
+    #[test]
+    fn wide_card_keeps_selection_unread_blink_and_done_dim() {
+        let (on, off) = blink_ticks();
+        let w = 30;
+        let s = session("proj-a", Status::Running);
+        let buf = wide(&s, &Config::default(), w, true, 0);
+        assert_eq!((buf[(0, 0)].symbol(), buf[(0, 0)].fg), ("╭", style::SELECTED));
+        assert_eq!(buf[(w - 1, 5)].fg, style::SELECTED, "right border at the stretched edge");
+        let unread = Session { unread_notification: true, ..s.clone() };
+        let lit = wide(&unread, &Config::default(), w, false, on);
+        assert_eq!((lit[(w - 1, 0)].symbol(), lit[(w - 1, 0)].fg), ("┓", style::NOTIFY_BLUE));
+        assert_eq!(wide(&unread, &Config::default(), w, false, off)[(w - 1, 0)].symbol(), "╮");
+        let done = session("proj-a", Status::Done);
+        let buf = wide(&done, &Config::default(), w, false, 0);
+        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM) && buf[(2, 1 + SCENE_ROWS)].modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn wide_card_falls_back_to_compact_and_never_panics() {
+        let s = Session { unread_notification: true, ..session("프로젝트-아주-긴-이름", Status::Idle) };
+        for (w, h) in [(CARD_W - 1, CARD_H), (CARD_W, CARD_H - 1), (34, 8)] {
+            let rows = rows(&draw(w, h, |f| render_wide_card(f, f.area(), &s, &Config::default(), false, 0)));
+            assert!(rows[0].contains("프로젝") && !rows.join("").contains('╭'), "{w}x{h}: {rows:?}");
+        }
+        for (w, h) in [(0, 0), (1, 1), (5, 2), (0, 30), (80, 0), (21, 9), (25, 9), (400, 9)] {
+            for selected in [false, true] {
+                draw(w, h, |f| render_wide_card(f, f.area(), &s, &Config::default(), selected, 0));
+                draw(w, h, |f| render_wide_card(f, Rect::new(u16::MAX - 5, u16::MAX - 5, 30, CARD_H), &s, &Config::default(), selected, 0));
+            }
+        }
     }
 
     #[test]

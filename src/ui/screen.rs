@@ -11,7 +11,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
-use crate::ui::card::{compact_mode, render_card, render_compact, CARD_H, CARD_W};
+use crate::ui::card::{compact_mode, render_card, render_compact, render_wide_card, CARD_H, CARD_W};
 use crate::ui::grid::{card_cols, cell_rect};
 use crate::ui::groups::{divider_text, place_rows, row_of, scroll_to_show_rows, Row};
 use crate::ui::hud::{render_hud, StatusCounts};
@@ -25,7 +25,8 @@ pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter 포커스 · p �
 
 /// Draws the full frame. Updates `app.cols`, `app.scroll`, `app.grid_rect`,
 /// `app.preview_too_small` and the preview's read line count from the layout.
-/// With the preview panel shown the session list is one column of compact cards.
+/// With the preview panel beside it the session list is one column of
+/// full cards stretched to the list width.
 pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     let [hud, middle, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
@@ -60,7 +61,8 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
 
 /// Card grid (grouped by cmux window, see [`crate::ui::groups`]) with
 /// vertical scrolling in layout rows; returns (more above, more below).
-/// In compact mode (preview shown, or the area cannot hold one full card,
+/// `one_column` (the preview's side list): one full card per row, stretched
+/// to the list width. In compact mode (the area cannot hold one full card,
 /// see [`compact_mode`]) every session is one line in a single column.
 /// Only placed (visible) rows are drawn, so off-screen cards never render a
 /// spirit; `app.spirits_visible` tells the event loop whether to animate.
@@ -68,8 +70,8 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool, tick: u
     if area.is_empty() {
         return (false, false);
     }
-    let compact = compact_mode(one_column, area);
-    let cols = if compact { 1 } else { card_cols(area.width) };
+    let compact = compact_mode(area);
+    let cols = if compact || one_column { 1 } else { card_cols(area.width) };
     app.cols = cols;
     app.clamp_selection();
     let rows = app.grid_rows();
@@ -98,7 +100,11 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool, tick: u
             } else {
                 let rect = cell_rect(*row_rect, cols, col, 0);
                 app.spirits_visible |= rect.width >= CARD_W && rect.height >= CARD_H;
-                render_card(f, rect, s, &app.config, selected, tick);
+                if one_column {
+                    render_wide_card(f, rect, s, &app.config, selected, tick);
+                } else {
+                    render_card(f, rect, s, &app.config, selected, tick);
+                }
             }
         }
     }
@@ -267,13 +273,15 @@ mod tests {
         render(&mut app, 100, 30, 1);
         assert_eq!(app.scroll, 1);
         assert_eq!(spirit_renders(), 15);
-        // compact one-line cards (preview on, or a tiny terminal) draw no spirit
+        // preview list: one column of stretched full cards, only the 3 that fit 28 rows
         app.preview = true;
         reset_spirit_renders();
         render(&mut app, 150, 30, 2);
-        assert_eq!(spirit_renders(), 0);
-        assert!(!app.spirits_visible);
+        assert_eq!(spirit_renders(), 3);
+        assert!(app.spirits_visible);
+        // compact one-line cards (a tiny terminal) draw no spirit
         app.preview = false;
+        reset_spirit_renders();
         render(&mut app, 20, 6, 3);
         assert_eq!(spirit_renders(), 0);
         assert!(!app.spirits_visible);
@@ -383,65 +391,114 @@ mod tests {
         screen[rows].iter().map(|r| r.chars().take(list_w).collect()).collect()
     }
 
+    /// Top-left corners of full cards in the list part (`x < list_w`, rows 1..h-1).
+    fn card_corners(buf: &ratatui::buffer::Buffer, list_w: u16) -> Vec<(u16, u16)> {
+        let h = buf.area.height;
+        (1..h.saturating_sub(1)).flat_map(|y| (0..list_w).map(move |x| (x, y))).filter(|&p| matches!(buf[p].symbol(), "╭" | "┏")).collect()
+    }
+
     #[test]
-    fn preview_mode_uses_compact_one_line_cards() {
+    fn preview_mode_lists_full_stretched_cards() {
         let mut app = preview_app(6);
-        // tall and wide: a full card would fit the height, the preview still lists compact cards
-        let screen = render(&mut app, 200, 60, 0);
-        let list_w = app.grid_rect.width as usize;
-        let list = list_part(&screen, list_w, 1..59);
-        for (i, row) in list.iter().take(6).enumerate() {
-            assert!(row.contains(&format!("proj-t{i}")) && row.contains("RUN"), "row {i}: {row}");
+        let buf = draw_buf(200, 60, |f| draw(f, &mut app, 0, Instant::now()));
+        let screen = rows(&buf);
+        let list_w = app.grid_rect.width;
+        assert_eq!(list_w, 34, "clamp(200/5, 26, 34)");
+        assert_eq!(app.cols, 1);
+        // six cards stacked, CARD_H rows each, each as wide as the list column (>= CARD_W)
+        let corners = card_corners(&buf, list_w);
+        let want: Vec<(u16, u16)> = (0..6).map(|i| (0, 1 + i * CARD_H)).collect();
+        assert_eq!(corners, want, "{}", screen.join("\n"));
+        for &(x, y) in &corners {
+            assert!(matches!(buf[(x + list_w - 1, y)].symbol(), "╮" | "┓"), "card spans the column at row {y}");
+            assert!(matches!(buf[(x, y + CARD_H - 1)].symbol(), "╰" | "┗"), "card is CARD_H tall at row {y}");
         }
-        assert!(list[0].starts_with('▶'), "selected marker: {}", list[0]);
-        let text = list.join("\n");
-        assert!(!text.contains('╭'), "no card frames: {text}");
-        assert!(!has_braille(&text), "no scenes: {text}");
-        assert!(crate::ui::card::compact_mode(true, Rect::new(0, 0, 500, 500)));
+        assert!(list_w >= CARD_W);
+        let list = list_part(&screen, list_w as usize, 1..59);
+        assert!(has_braille(&list.join("\n")), "spirits drawn in the preview list");
+        for i in 0..6usize {
+            let name_row = &list[i * CARD_H as usize + 1 + crate::ui::card::SCENE_ROWS as usize];
+            assert!(name_row.contains(&format!("proj-t{i}")), "card {i}: {name_row}");
+            assert!(has_braille(&list[i * CARD_H as usize..(i + 1) * CARD_H as usize].join("")), "card {i} has its spirit");
+        }
+        assert_eq!(buf[(0, 1)].fg, style::SELECTED, "selected card border");
+        assert_ne!(buf[(0, 1 + CARD_H)].fg, style::SELECTED);
+        assert!(app.spirits_visible);
     }
 
     #[test]
     fn preview_turns_the_list_into_one_column_left_with_preview_right() {
         let mut app = preview_app(6);
-        let screen = render(&mut app, 150, 30, 0);
+        let buf = draw_buf(150, 30, |f| draw(f, &mut app, 0, Instant::now()));
+        let screen = rows(&buf);
         // middle 150x28: list clamp(150/5, 26, 34) = 30 wide, preview the rest
         assert_eq!(app.grid_rect, Rect::new(0, 1, 30, 28));
         assert_eq!(app.cols, 1, "one card per row");
+        assert_eq!(card_corners(&buf, 30), vec![(0, 1), (0, 10), (0, 19)], "3 full cards fit 28 rows");
         let list = list_part(&screen, 30, 1..29);
-        for (i, row) in list.iter().take(6).enumerate() {
-            assert_eq!(row.matches("proj-t").count(), 1, "one card per row: {row}");
-            assert!(row.contains(&format!("proj-t{i}")), "{row}");
+        for i in 0..3 {
+            assert!(list[i * 9 + 5].contains(&format!("proj-t{i}")), "{}", list[i * 9 + 5]);
         }
-        assert!(screen[1].chars().nth(30) == Some('╭') && screen[1].contains("미리보기 · proj-t0"), "{}", screen[1]);
+        assert!(screen[1].chars().nth(29) == Some('╮') && screen[1].chars().nth(30) == Some('╭'), "{}", screen[1]);
+        assert!(screen[1].contains("미리보기 · proj-t0"), "{}", screen[1]);
         assert!(screen[28].chars().nth(30) == Some('╰') && screen[28].ends_with('╯'), "{}", screen[28]);
         let right: String = screen[2..28].iter().map(|r| r.chars().skip(31).collect::<String>()).collect::<Vec<_>>().join("\n");
         assert!(right.contains("first") && right.contains("❯ last prompt line"), "{right}");
-        assert!(!screen.last().unwrap().contains("more"), "6 one-line cards fit 28 rows");
+        assert!(screen.last().unwrap().contains("▼ more"), "6 cards of 9 rows do not fit 28");
         assert!(!app.preview_too_small);
         // the read asks for the panel's inner height
         assert_eq!(app.preview_target().map(|t| t.lines), Some(26));
         app.selected = 5;
-        let screen = render(&mut app, 150, 30, 0);
-        assert!(list_part(&screen, 30, 1..29)[5].starts_with("▶ proj-t5"));
+        let buf = draw_buf(150, 30, |f| draw(f, &mut app, 0, Instant::now()));
+        let screen = rows(&buf);
+        let list = list_part(&screen, 30, 1..29).join("\n");
+        assert!(list.contains("proj-t5"), "{list}");
+        let blue: Vec<_> = card_corners(&buf, 30).into_iter().filter(|&p| buf[p].fg == style::SELECTED).collect();
+        assert_eq!(blue, vec![(0, 19)], "the selected (last) card is the bottom one");
         assert!(screen[1].contains("미리보기 · proj-t5"), "{}", screen[1]);
     }
 
     #[test]
-    fn preview_stacks_list_on_top_of_preview_when_narrow_but_tall() {
+    fn preview_list_of_twenty_keeps_the_selected_card_visible() {
+        let mut app = twenty_sessions();
+        app.preview = true;
+        for sel in (0..20).chain((0..20).rev()) {
+            app.selected = sel;
+            let buf = draw_buf(150, 30, |f| draw(f, &mut app, 0, Instant::now()));
+            let list = list_part(&rows(&buf), 30, 1..29).join("\n");
+            assert!(list.contains(&format!("proj-t{sel} ")), "sel={sel} scroll={}: {list}", app.scroll);
+            let blue = card_corners(&buf, 30).into_iter().filter(|&p| buf[p].fg == style::SELECTED).count();
+            assert_eq!(blue, 1, "sel={sel}: the selected full card is on screen");
+            assert!(has_braille(&list));
+        }
+        assert_eq!(app.scroll, 0);
+        app.selected = 19;
+        render(&mut app, 150, 30, 0);
+        assert_eq!(app.scroll, 17, "last three cards shown");
+    }
+
+    #[test]
+    fn preview_stacks_a_row_of_full_cards_on_top_of_preview_when_narrow_but_tall() {
         let mut app = preview_app(10);
         app.selected = 9;
-        let screen = render(&mut app, 60, 32, 0);
-        // middle 60x30: list clamp(30*2/5, 8, 14) = 12 rows, preview 18 below
-        assert_eq!(app.grid_rect, Rect::new(0, 1, 60, 12));
-        assert_eq!(app.cols, 1, "one column though 60 fits a card");
-        assert!(screen[13].starts_with('╭') && screen[13].contains("미리보기 · proj-t9"), "{}", screen[13]);
+        let buf = draw_buf(60, 32, |f| draw(f, &mut app, 0, Instant::now()));
+        let screen = rows(&buf);
+        // middle 60x30: list clamp(30*2/5, 9, 10) = 10 rows, preview 20 below
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 60, 10));
+        assert_eq!(app.cols, crate::ui::grid::card_cols(60), "the usual grid inside the strip");
+        assert!(screen[11].starts_with('╭') && screen[11].contains("미리보기 · proj-t9"), "{}", screen[11]);
         assert!(screen[30].starts_with('╰'), "{}", screen[30]);
         assert!(screen.join("\n").contains(crate::ui::preview::PREVIEW_LOADING), "t9 not read yet");
-        for (i, row) in screen[1..11].iter().enumerate() {
-            assert_eq!(row.matches("proj-t").count(), 1, "{row}");
-            assert!(row.contains(&format!("proj-t{i}")), "{row}");
-        }
-        assert_eq!(app.preview_target().map(|t| t.lines), Some(16));
+        let strip = screen[1..11].join("\n");
+        assert!(strip.contains("proj-t9") && has_braille(&strip), "{strip}");
+        assert!(screen[1].contains('╭') && screen[9].contains('╰'), "a full card row: {strip}");
+        assert_eq!(app.preview_target().map(|t| t.lines), Some(18));
+        // first row: three full cards across
+        app.selected = 0;
+        let screen = render(&mut app, 60, 32, 0);
+        assert_eq!(screen[1].matches('╭').count(), 3, "{}", screen[1]);
+        let strip = screen[1..11].join("\n");
+        assert!(strip.contains("proj-t0") && strip.contains("proj-t2") && !strip.contains("proj-t3"), "{strip}");
     }
 
     #[test]
@@ -504,11 +561,11 @@ mod tests {
             assert!(screen.last().unwrap().contains(PREVIEW_TOO_SMALL), "{}", screen.last().unwrap());
             assert!(!screen[..h as usize - 1].join("\n").contains("미리보기 · "), "no panel");
         }
-        // one more row / column and the panel is back
-        for (w, h) in [(110, 10), (60, 26), (70, 10)] {
+        // one more row / column and the panel is back (side: one column; stacked: the usual grid)
+        for (w, h, cols) in [(110, 10, 1), (60, 26, 3), (70, 10, 1)] {
             let mut app = preview_app(4);
             render(&mut app, w, h, 0);
-            assert!(!app.preview_too_small && app.cols == 1, "{w}x{h}");
+            assert!(!app.preview_too_small && app.cols == cols, "{w}x{h}");
         }
     }
 
@@ -521,6 +578,14 @@ mod tests {
                 assert_eq!(render(&mut app, w, h, 0).len(), h as usize);
             }
         }
+        // side layout too low for one card (middle 8 rows): compact one-line fallback
+        let mut app = preview_app(4);
+        let screen = render(&mut app, 120, 10, 0);
+        assert_eq!((app.grid_rect.width, app.cols), (26, 1));
+        let list = list_part(&screen, 26, 1..9);
+        assert!(list[0].starts_with("▶ proj-t0") && list[3].contains("proj-t3"), "{list:?}");
+        assert!(!list.join("").contains('╭') && !has_braille(&list.join("")), "{list:?}");
+        assert!(!app.spirits_visible);
     }
 
     fn windowed(id: &str, w: &str) -> crate::model::Session {
@@ -570,38 +635,54 @@ mod tests {
         sessions.extend((0..12).map(|i| windowed(&format!("b{i}"), "W2")));
         app.apply_snapshot(Snapshot { sessions, window_order: vec!["W1".into(), "W2".into()], ..Default::default() });
         app.preview = true;
-        // 150x16: middle 150x14 -> list 30x14, one line per card: D + 12 + D + 12 = 26 rows
+        // 150x22: middle 150x20 -> list 30x20, full cards: D + 12*9 + D + 12*9 rows
         app.selected = 23;
-        let screen = render(&mut app, 150, 16, 0);
+        let screen = render(&mut app, 150, 22, 0);
         assert_eq!((app.grid_rect.width, app.cols), (30, 1));
-        let list = list_part(&screen, 30, 1..15).join("\n");
+        let list = list_part(&screen, 30, 1..21).join("\n");
         assert!(list.contains("proj-b11") && list.contains("proj-b10"), "{list}");
         assert!(screen.last().unwrap().contains("▲ more"));
         // first card of group 2: its divider is shown right above it
         app.selected = 12;
-        let screen = render(&mut app, 150, 16, 0);
-        let list = list_part(&screen, 30, 1..15);
+        let screen = render(&mut app, 150, 22, 0);
+        let list = list_part(&screen, 30, 1..21);
         let d = list.iter().position(|r| r.starts_with("── 창 2 · 세션 12")).expect("divider of group 2");
-        assert!(list[d + 1].contains("proj-b0"), "{list:?}");
+        assert!(list[d + 1].starts_with('╭') && list[d + 6].contains("proj-b0"), "{list:?}");
         // j walks every card in order, across the divider
         app.selected = 0;
         let mut seen = vec![0];
         for _ in 0..25 {
             app.apply_move(Dir::Down);
-            render(&mut app, 150, 16, 0);
+            render(&mut app, 150, 22, 0);
             seen.push(app.selected);
         }
         let want: Vec<usize> = (0..24).chain([23, 23]).collect();
         assert_eq!(seen, want);
         for sel in (0..24).rev() {
             app.selected = sel;
-            let screen = render(&mut app, 150, 16, 0);
+            let buf = draw_buf(150, 22, |f| draw(f, &mut app, 0, Instant::now()));
             let id = &app.sessions[sel].id;
-            let row = list_part(&screen, 30, 1..15).into_iter().find(|r| r.starts_with('▶')).expect("selected row");
-            assert!(row.contains(&format!("proj-{id}")), "sel={sel}: {row}");
+            let blue: Vec<_> = card_corners(&buf, 30).into_iter().filter(|&p| buf[p].fg == style::SELECTED).collect();
+            assert_eq!(blue.len(), 1, "sel={sel}");
+            let name_row = &rows(&buf)[usize::from(blue[0].1) + 5];
+            assert!(name_row.contains(&format!("proj-{id} ")), "sel={sel}: {name_row}");
         }
         assert_eq!(app.scroll, 0);
-        assert!(render(&mut app, 150, 16, 0)[1].starts_with("── 창 1 · 세션 12"));
+        assert!(render(&mut app, 150, 22, 0)[1].starts_with("── 창 1 · 세션 12"));
+    }
+
+    /// Text look of the preview layout. Run with
+    /// `cargo test dump_preview_layout -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_preview_layout() {
+        for (w, h) in [(120u16, 40u16), (80, 24)] {
+            let mut app = preview_app(6);
+            println!("--- {w}x{h} ---");
+            for r in render(&mut app, w, h, 0) {
+                println!("{}", r.trim_end());
+            }
+        }
     }
 
     #[test]
