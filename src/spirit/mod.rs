@@ -61,7 +61,7 @@ pub enum Size {
 impl Size {
     pub const ALL: [Size; 3] = [Size::S, Size::M, Size::L];
 
-    /// Card variants: every size is 4 rows tall (16 sub-pixels) so a 24x9
+    /// Card variants: every size is 4 rows tall (16 sub-pixels) so a 20x9
     /// card never changes size; bigger steps get a bigger body and more room
     /// to the right for cast particles. The body centre sits at 1/3 of the
     /// width (as in the reference design) and high enough that the eye row
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn grid_sizes_are_four_rows_tall() {
-        // card variant: every size fits the 4-row spirit band of a 24x9 card
+        // card variant: every size fits the 4-row spirit band of a 20x9 card
         assert_eq!(grid_size(Size::S), (11, 4));
         assert_eq!(grid_size(Size::M), (14, 4));
         assert_eq!(grid_size(Size::L), (17, 4));

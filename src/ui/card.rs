@@ -1,8 +1,8 @@
 //! Session cards: an element spirit (braille, see [`crate::spirit`]) on top
 //! and info lines below, in a thin rounded border.
 //!
-//! Full card: always [`CARD_W`] x [`CARD_H`] = 24 x 9 cells (borders
-//! included; inner 22 x 7), whatever the spirit size: a spirit band of
+//! Full card: always [`CARD_W`] x [`CARD_H`] = 20 x 9 cells (borders
+//! included; inner 18 x 7; user decision: narrowed from 24 because it looked wide), whatever the spirit size: a spirit band of
 //! [`SCENE_ROWS`] rows (every spirit size is that tall; the spirit is centered
 //! across) and [`INFO_ROWS`] text rows: name, status badge (+ elapsed / last
 //! activity), then one extra: the PR chip, else the branch, else the summary
@@ -15,7 +15,7 @@
 use std::time::SystemTime;
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
@@ -34,9 +34,9 @@ pub const SCENE_COLS: u16 = max_grid_size().0;
 pub const SCENE_ROWS: u16 = max_grid_size().1;
 /// Text rows below the spirit band.
 pub const INFO_ROWS: u16 = 3;
-/// Inner width of a card (the old vertical card).
-const INNER_W: u16 = 22;
-/// Full card size, borders included: 24 x 9.
+/// Inner width of a card.
+const INNER_W: u16 = 18;
+/// Full card size, borders included: 20 x 9.
 pub const CARD_W: u16 = INNER_W + 2;
 pub const CARD_H: u16 = SCENE_ROWS + INFO_ROWS + 2;
 const _: () = assert!(SCENE_COLS <= INNER_W, "the largest spirit fits the card");
@@ -118,8 +118,7 @@ pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selecte
     let params = SpiritParams { theme: theme_for(s, cfg), status: s.status, size: Size::S, tick, seed: seed_for(s), warning: false };
     draw_spirit(f.buffer_mut(), band, &params);
 
-    let text_area = Rect::new(inner.x, inner.y + band.height, inner.width, inner.height - band.height)
-        .inner(Margin::new(1, 0));
+    let text_area = Rect::new(inner.x, inner.y + band.height, inner.width, inner.height - band.height);
     let mut lines = text_lines(s, cfg, usize::from(text_area.width), SystemTime::now());
     lines.truncate(usize::from(INFO_ROWS.min(text_area.height)));
     let mut para = Paragraph::new(lines);
@@ -313,15 +312,15 @@ mod tests {
         rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, cfg, selected, 0)))
     }
 
-    /// Text of an info row: border and padding stripped.
+    /// Text of an info row: border stripped.
     fn info(row: &str) -> String {
-        row.chars().skip(2).collect::<String>().trim_end().trim_end_matches('│').trim_end().to_string()
+        row.chars().skip(1).collect::<String>().trim_end().trim_end_matches('│').trim_end().to_string()
     }
 
     #[test]
-    fn card_is_exactly_24x9() {
-        assert_eq!((CARD_W, CARD_H), (24, 9), "the old vertical card size");
-        assert_eq!((SCENE_ROWS, INFO_ROWS), (4, 3), "inner 22x7: spirit band + 3 text rows");
+    fn card_is_exactly_20x9() {
+        assert_eq!((CARD_W, CARD_H), (20, 9), "user decision: narrowed from 24");
+        assert_eq!((SCENE_ROWS, INFO_ROWS), (4, 3), "inner 18x7: spirit band + 3 text rows");
         assert_eq!((SCENE_COLS, SCENE_ROWS), max_grid_size());
         for size in Size::ALL {
             let (w, h) = spirit::grid_size(size);
@@ -333,7 +332,7 @@ mod tests {
         assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮'), "{rows:?}");
         assert!(rows[8].starts_with('╰') && rows[8].ends_with('╯'), "{rows:?}");
         assert!(rows[1..8].iter().all(|r| r.starts_with('│') && r.ends_with('│')), "{rows:?}");
-        // a larger area still gets a 24x9 card (centered across, at the top); nothing else drawn
+        // a larger area still gets a 20x9 card (centered across, at the top); nothing else drawn
         let (w, h) = (40u16, 15u16);
         let buf = draw(w, h, |f| render_card(f, f.area(), &s, &all_extras(), false, 0));
         let x0 = (w - CARD_W) / 2;

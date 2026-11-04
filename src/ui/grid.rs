@@ -31,13 +31,13 @@ mod tests {
 
     #[test]
     fn card_cols_scales_with_width() {
-        assert_eq!(CARD_W, 24);
-        assert_eq!(card_cols(100), 4);
-        assert_eq!(card_cols(60), 2);
-        assert_eq!(card_cols(48), 2);
-        assert_eq!(card_cols(47), 1);
-        assert_eq!(card_cols(150), 6);
-        for w in [0u16, 1, 10, 23] {
+        assert_eq!(CARD_W, 20);
+        assert_eq!(card_cols(100), 5);
+        assert_eq!(card_cols(60), 3);
+        assert_eq!(card_cols(40), 2);
+        assert_eq!(card_cols(39), 1);
+        assert_eq!(card_cols(150), 7);
+        for w in [0u16, 1, 10, 19] {
             assert_eq!(card_cols(w), 1, "never 0: w={w}");
         }
         assert_eq!(card_cols(u16::MAX), u16::MAX as usize / CARD_W as usize);
@@ -46,13 +46,13 @@ mod tests {
     #[test]
     fn cell_rect_spreads_leftover_width() {
         let area = Rect::new(2, 1, 160, 60);
-        let cols = card_cols(area.width); // 6
+        let cols = card_cols(area.width); // 8
         let rects: Vec<Rect> = (0..cols).map(|c| cell_rect(area, cols, c, 0)).collect();
         assert_eq!(rects.iter().map(|r| r.width).sum::<u16>(), 160);
         assert!(rects.iter().all(|r| r.width >= CARD_W && r.height == CARD_H && r.y == 1));
         assert_eq!(rects[0].x, 2);
-        assert_eq!(cols, 6);
-        assert_eq!(rects[5].x + rects[5].width, 162);
+        assert_eq!(cols, 8);
+        assert_eq!(rects[7].x + rects[7].width, 162);
         assert_eq!(cell_rect(area, cols, 1, 2).y, 1 + 2 * CARD_H);
     }
 

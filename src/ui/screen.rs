@@ -222,24 +222,24 @@ mod tests {
         assert!(text.contains("proj-t0") && text.contains("proj-t1"), "{text}");
         assert!(has_braille(&text), "scenes drawn: {text}");
         assert!(screen.last().unwrap().contains("Enter 포커스"));
-        assert_eq!(app.cols, 5, "120 / 24");
+        assert_eq!(app.cols, 6, "120 / 20");
         // the selected (first) card has the blue border, the second does not
         assert_eq!(buf[(0, 1)].fg, style::SELECTED);
-        assert_eq!(buf[(24, 1)].symbol(), "╭");
-        assert_ne!(buf[(24, 1)].fg, style::SELECTED);
+        assert_eq!(buf[(20, 1)].symbol(), "╭");
+        assert_ne!(buf[(20, 1)].fg, style::SELECTED);
     }
 
     #[test]
     fn draw_scrolls_to_selected_and_hints_more() {
         let mut app = App::new(Config::default());
-        app.set_sessions(ten_sessions());
-        // 100x24 -> 4 cols, 2 visible card rows (of 9) out of 3
-        let screen = render(&mut app, 100, 24, 0);
-        assert_eq!(app.cols, 4);
+        app.set_sessions((0..10).map(|i| fake_session(&format!("t{i}"), Status::Running)).collect());
+        // 60x24 -> 3 cols, 2 visible card rows (of 9) out of 4
+        let screen = render(&mut app, 60, 24, 0);
+        assert_eq!(app.cols, 3);
         assert!(screen.last().unwrap().contains("▼ more"));
         app.selected = 9;
-        let screen = render(&mut app, 100, 24, 0);
-        assert_eq!(app.scroll, 1);
+        let screen = render(&mut app, 60, 24, 0);
+        assert_eq!(app.scroll, 2);
         assert!(screen.join("\n").contains("proj-t9"));
         assert!(screen.last().unwrap().contains("▲ more"));
         assert!(!screen.last().unwrap().contains("▼ more"));
@@ -255,18 +255,18 @@ mod tests {
     fn offscreen_cards_are_not_rendered_by_spirit() {
         use crate::ui::card::{reset_spirit_renders, spirit_renders};
         let mut app = twenty_sessions();
-        // 100x30: middle 100x28 -> 4 columns, 3 card rows of 9 = 12 of 20 cards visible
+        // 100x30: middle 100x28 -> 5 columns, 3 card rows of 9 = 15 of 20 cards visible
         reset_spirit_renders();
         render(&mut app, 100, 30, 0);
-        assert_eq!(app.cols, 4);
-        assert_eq!(spirit_renders(), 12, "only visible cards");
+        assert_eq!(app.cols, 5);
+        assert_eq!(spirit_renders(), 15, "only visible cards");
         assert!(app.spirits_visible);
         // scrolled to the last card: still only what is on screen
         app.selected = 19;
         reset_spirit_renders();
         render(&mut app, 100, 30, 1);
-        assert_eq!(app.scroll, 2);
-        assert_eq!(spirit_renders(), 12);
+        assert_eq!(app.scroll, 1);
+        assert_eq!(spirit_renders(), 15);
         // compact one-line cards (preview on, or a tiny terminal) draw no spirit
         app.preview = true;
         reset_spirit_renders();
@@ -296,8 +296,8 @@ mod tests {
             seen.push(sel);
             app.apply_move(Dir::Down);
         }
-        assert_eq!(seen, vec![0, 4, 8, 12, 16, 16, 16]);
-        assert_eq!(app.scroll, 2);
+        assert_eq!(seen, vec![0, 5, 10, 15, 15, 15, 15]);
+        assert_eq!(app.scroll, 1);
         // and back up again
         for _ in 0..4 {
             app.apply_move(Dir::Up);
