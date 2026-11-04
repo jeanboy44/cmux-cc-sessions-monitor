@@ -1,13 +1,16 @@
 //! Session cards: an element spirit (braille, see [`crate::spirit`]) on top
 //! and info lines below, in a thin rounded border.
 //!
-//! Full card: always [`CARD_W`] x [`CARD_H`] = 20 x 9 cells (borders
-//! included; inner 18 x 7; user decision: narrowed from 24 because it looked wide), whatever the spirit size: a spirit band of
-//! [`SCENE_ROWS`] rows (every spirit size is that tall; the body sits on the
-//! left and the magic it casts, scaled by context usage, fills the right) and [`INFO_ROWS`] text rows: name, status badge (+ elapsed / last
-//! activity), then one extra: the PR chip, else the branch, else the summary
-//! (rows of disabled or unknown extras collapse). A larger area gets the card
-//! centered across, at its top.
+//! Full card: always [`CARD_W`] x [`CARD_H`] = 20 x 10 cells (borders
+//! included; inner 18 x 8; user decision: narrowed from 24 because it looked
+//! wide, then one row taller for the summary), whatever the spirit size: a
+//! spirit band of [`SCENE_ROWS`] rows (every spirit size is that tall; the
+//! body sits on the left and the magic it casts, scaled by context usage,
+//! fills the right) and [`INFO_ROWS`] text rows: name, status badge (+
+//! elapsed / last activity), one extra (the PR chip, else the branch), then
+//! the one-line summary (rows of disabled or unknown extras collapse; with no
+//! summary the last row shows the next extra, e.g. the branch the PR took the
+//! row from). A larger area gets the card centered across, at its top.
 //!
 //! The preview list stretches the card across its column instead
 //! ([`render_wide_card`]): same height, the body stays on the left and the
@@ -37,10 +40,10 @@ use crate::ui::style::{self, fmt_duration, truncate_to_width};
 pub const SCENE_COLS: u16 = max_grid_size().0;
 pub const SCENE_ROWS: u16 = max_grid_size().1;
 /// Text rows below the spirit band.
-pub const INFO_ROWS: u16 = 3;
+pub const INFO_ROWS: u16 = 4;
 /// Inner width of a card.
 const INNER_W: u16 = 18;
-/// Full card size, borders included: 20 x 9.
+/// Full card size, borders included: 20 x 10.
 pub const CARD_W: u16 = INNER_W + 2;
 pub const CARD_H: u16 = SCENE_ROWS + INFO_ROWS + 2;
 const _: () = assert!(SCENE_COLS <= INNER_W, "the largest spirit fits the card");
@@ -254,10 +257,12 @@ fn pr_label(state: PrState) -> &'static str {
 }
 
 /// Info lines in priority order (callers cut the tail to their row budget):
-/// name, status badge (+ elapsed / last activity), then the enabled extras:
-/// PR chip, branch (`~` when guessed), `PR ?` (lookup failed), one-line
-/// summary. A full card keeps three rows, so the third is the PR when there
-/// is one, else the branch, else the summary.
+/// name, status badge (+ elapsed / last activity), the first enabled extra
+/// (PR chip, else branch with `~` when guessed, else `PR ?` when the lookup
+/// failed), the one-line summary, then the remaining extras. A full card
+/// keeps four rows: the summary is always the fourth when there is one, and
+/// with no summary the next extra (e.g. the branch the PR took the row from)
+/// takes its place.
 fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Line<'static>> {
     let ex = &cfg.extras;
     let color = style::status_color(s.status);
@@ -288,6 +293,23 @@ fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<L
     }
     lines.push(Line::from(badge));
 
+    let mut extras = extra_lines(s, cfg, width);
+    let summary = s.summary.as_ref().filter(|_| ex.summary).map(|sum| Line::styled(truncate_to_width(sum, width), dim));
+    if !extras.is_empty() {
+        lines.push(extras.remove(0));
+    }
+    lines.extend(summary);
+    lines.extend(extras);
+    lines
+}
+
+/// The enabled extras in priority order: PR chip, branch (`~` when guessed),
+/// `PR ?` (lookup failed), each cut to `width`.
+fn extra_lines(s: &Session, cfg: &Config, width: usize) -> Vec<Line<'static>> {
+    let ex = &cfg.extras;
+    let text = Style::new().fg(style::TEXT);
+    let dim = Style::new().fg(style::TEXT_DIM);
+    let mut lines = Vec::new();
     if let Some(pr) = s.pr.as_ref().filter(|_| ex.pr) {
         let pr_color = match pr.state {
             PrState::Approved => style::DONE,
@@ -303,9 +325,6 @@ fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<L
     if ex.pr && s.pr.is_none() && s.pr_unavailable {
         // The lookup failed; the footer says why.
         lines.push(Line::styled(truncate_to_width("PR ?", width), dim));
-    }
-    if let Some(sum) = s.summary.as_ref().filter(|_| ex.summary) {
-        lines.push(Line::styled(truncate_to_width(sum, width), dim));
     }
     lines
 }
@@ -374,9 +393,9 @@ mod tests {
     }
 
     #[test]
-    fn card_is_exactly_20x9() {
-        assert_eq!((CARD_W, CARD_H), (20, 9), "user decision: narrowed from 24");
-        assert_eq!((SCENE_ROWS, INFO_ROWS), (4, 3), "inner 18x7: spirit band + 3 text rows");
+    fn card_is_exactly_20x10() {
+        assert_eq!((CARD_W, CARD_H), (20, 10), "user decision: narrowed from 24, one summary row added");
+        assert_eq!((SCENE_ROWS, INFO_ROWS), (4, 4), "inner 18x8: spirit band + 4 text rows");
         assert_eq!((SCENE_COLS, SCENE_ROWS), max_grid_size());
         for size in Size::ALL {
             let (w, h) = spirit::grid_size(size);
@@ -384,11 +403,11 @@ mod tests {
         }
         let s = session("proj-a", Status::Running);
         let rows = card(&s, &all_extras(), true);
-        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.len(), 10);
         assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮'), "{rows:?}");
-        assert!(rows[8].starts_with('╰') && rows[8].ends_with('╯'), "{rows:?}");
-        assert!(rows[1..8].iter().all(|r| r.starts_with('│') && r.ends_with('│')), "{rows:?}");
-        // a larger area still gets a 20x9 card (centered across, at the top); nothing else drawn
+        assert!(rows[9].starts_with('╰') && rows[9].ends_with('╯'), "{rows:?}");
+        assert!(rows[1..9].iter().all(|r| r.starts_with('│') && r.ends_with('│')), "{rows:?}");
+        // a larger area still gets a 20x10 card (centered across, at the top); nothing else drawn
         let (w, h) = (40u16, 15u16);
         let buf = draw(w, h, |f| render_card(f, f.area(), &s, &all_extras(), false, 0));
         let x0 = (w - CARD_W) / 2;
@@ -403,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn card_contains_spirit_and_three_info_lines() {
+    fn card_contains_spirit_and_four_info_lines() {
         let s = session("proj-a", Status::Running);
         let rows = rows(&draw(80, 24, |f| render_card(f, Rect::new(0, 0, CARD_W, CARD_H), &s, &Config::default(), false, 0)));
         let text = rows.join("\n");
@@ -412,11 +431,12 @@ mod tests {
         let scene_rows: Vec<usize> = (1..last).filter(|&y| rows[y].chars().any(is_braille)).collect();
         assert!(!scene_rows.is_empty() && scene_rows.iter().all(|&y| y <= SCENE_ROWS as usize), "spirit in the 4-row band: {text}");
         let info_rows: Vec<String> = (1 + SCENE_ROWS as usize..last).map(|y| info(&rows[y])).collect();
-        assert_eq!(info_rows.len(), 3);
+        assert_eq!(info_rows.len(), 4);
         assert_eq!(info_rows[0], "proj-a", "{text}");
         assert!(info_rows[1].contains("RUN") && info_rows[1].contains("3h"), "{text}");
         assert_eq!(info_rows[2], "⎇ feat/login", "{text}");
-        assert!(!text.contains("fixing the parser") && !text.contains("#42"), "summary dropped, PR off: {text}");
+        assert_eq!(info_rows[3], "fixing the parser", "the one-line summary: {text}");
+        assert!(!text.contains("#42"), "PR off: {text}");
         // nothing outside the card rect
         assert!(rows[last + 1..].iter().all(|r| r.trim().is_empty()));
         assert!(rows[..=last].iter().all(|r| r.chars().skip(CARD_W as usize).all(|c| c == ' ')));
@@ -626,19 +646,27 @@ mod tests {
     }
 
     #[test]
-    fn info_rows_keep_pr_over_branch_over_summary_and_hide_disabled_extras() {
+    fn info_rows_keep_pr_over_branch_then_the_summary_and_hide_disabled_extras() {
         let mut s = session("proj-a", Status::Running);
-        let three = |s: &Session, cfg: &Config| -> Vec<String> {
+        let four = |s: &Session, cfg: &Config| -> Vec<String> {
             let first = 1 + SCENE_ROWS as usize;
-            card(s, cfg, false)[first..first + 3].iter().map(|r| info(r)).collect()
+            card(s, cfg, false)[first..first + 4].iter().map(|r| info(r)).collect()
         };
-        assert_eq!(three(&s, &all_extras()), vec!["proj-a", " RUN  3h ·2m ago", "#42 approved"], "PR first");
+        assert_eq!(four(&s, &all_extras()), vec!["proj-a", " RUN  3h ·2m ago", "#42 approved", "fixing the parser"], "PR first, then the summary");
         let mut cfg = all_extras();
         cfg.extras.pr = false;
-        assert_eq!(three(&s, &cfg)[2], "⎇ feat/login", "then the branch");
+        assert_eq!(four(&s, &cfg)[2..], ["⎇ feat/login", "fixing the parser"], "then the branch");
         s.branch = None;
-        assert_eq!(three(&s, &cfg)[2], "fixing the parser", "summary only when neither");
+        assert_eq!(four(&s, &cfg)[2..], ["fixing the parser", ""], "neither: the summary moves up");
         s.branch = Some("feat/login".into());
+        // no summary: the next best text (the branch the PR took the row from)
+        s.summary = None;
+        assert_eq!(four(&s, &all_extras())[2..], ["#42 approved", "⎇ feat/login"]);
+        assert_eq!(four(&s, &cfg)[2..], ["⎇ feat/login", ""], "else blank");
+        s.summary = Some("fixing the parser".into());
+        let mut no_sum = all_extras();
+        no_sum.extras.summary = false;
+        assert_eq!(four(&s, &no_sum)[2..], ["#42 approved", "⎇ feat/login"], "summary off counts as empty");
         let hidden = card(&s, &no_extras(), false).join("\n");
         assert!(hidden.contains("proj-a") && hidden.contains("RUN"), "{hidden}");
         for gone in ["feat/login", "fixing the parser", "#42", "3h", "2m"] {
@@ -696,6 +724,22 @@ mod tests {
         assert_eq!(badge(&s, now + Duration::from_secs(5 * 3600)), " DONE  1h", "does not keep growing");
         s.status = Status::Running;
         assert_eq!(badge(&s, now), " RUN  3h");
+    }
+
+    #[test]
+    fn summary_row_is_cut_to_the_inner_width_cjk_aware() {
+        let mut s = session("proj-a", Status::Running);
+        s.summary = Some("한글 요약이 아주 길어서 카드 안에서 잘려야 합니다".into());
+        let rows = card(&s, &Config::default(), false);
+        let row = &rows[usize::from(SCENE_ROWS) + 4];
+        assert!(row.starts_with('│') && row.ends_with('│'), "border intact: {row:?}");
+        assert_eq!(row.width(), usize::from(CARD_W), "{row:?}");
+        let text = info(row);
+        assert!(text.starts_with("한글 요약이") && text.ends_with('…'), "{text:?}");
+        assert!(text.width() <= usize::from(CARD_W - 2), "{text:?}");
+        // a summary that fits is shown whole
+        s.summary = Some("짧은 요약".into());
+        assert_eq!(info(&card(&s, &Config::default(), false)[usize::from(SCENE_ROWS) + 4]), "짧은 요약");
     }
 
     #[test]
@@ -888,7 +932,7 @@ mod tests {
                 .collect();
             assert!(!lit.is_empty() && *lit.iter().min().unwrap() <= 3, "w={w}: {lit:?}");
             let info_rows: Vec<String> = (1 + SCENE_ROWS as usize..last).map(|y| info(&rows[y])).collect();
-            assert_eq!(info_rows, vec!["proj-a", " RUN  3h ·2m ago", "#42 approved"], "w={w}");
+            assert_eq!(info_rows, vec!["proj-a", " RUN  3h ·2m ago", "#42 approved", "fixing the parser"], "w={w}");
         }
         // text truncation follows the wider inner width
         let long = session("proj-abcdefghijklmnopqrstu", Status::Running); // 25 columns

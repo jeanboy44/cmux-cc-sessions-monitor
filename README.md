@@ -8,7 +8,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 
 ## Features
 
-- One 20x9 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, and the git branch (or PR).
+- One 20x10 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, the git branch (or PR) and a one-line summary.
 - Each spirit stands for a Claude model: fable is water, opus is fire, sonnet is lightning, haiku is poison (green). You can change the element per model in settings, and unknown models use the `theme` element (default fire).
 - The spirit's state is its animation: running (the body churns and casts its magic to the right: fire breath from the mouth, and a water vortex, poison fog or lightning bolts centred in the room right of the body), needs input (a bobbing `?`), idle (dim slow bob and `z`), done (sparkles), unknown (gray).
 - Context usage sets how hard the spirit works (relaxed, lively, struggling; see [Context usage setup](#context-usage-setup)) and, while running, the size of the magic: small under 30%, normal, big from 70%, and a red warning flicker above 90%.

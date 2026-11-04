@@ -9,9 +9,9 @@
 //!   LEFT, `clamp(width/5, 26, 34)` wide, ONE column of cards stretched to that
 //!   width (user decision: the card grows to the right by the reserved column),
 //!   preview on the RIGHT (≥ 44 columns);
-//! - else height ≥ [`STACK_MIN_HEIGHT`]: list on TOP, `clamp(height*2/5, 9, 10)`
-//!   tall = one row of the usual 20x9 card grid (+ a group divider line),
-//!   preview at the BOTTOM (≥ 15 rows);
+//! - else height ≥ [`STACK_MIN_HEIGHT`]: list on TOP, `clamp(height*2/5, 10, 11)`
+//!   tall = one row of the usual 20x10 card grid (+ a group divider line),
+//!   preview at the BOTTOM (≥ 13 rows);
 //! - else no panel: the normal grid, and the footer says the terminal is too small.
 
 use ratatui::layout::Rect;
@@ -184,20 +184,21 @@ mod tests {
     #[test]
     fn preview_layout_top_list_bottom_preview_when_narrow_but_tall() {
         let l = preview_layout(r(60, 30), true);
-        assert_eq!(l.list, Rect::new(0, 1, 60, 10));
-        assert_eq!(l.panel, Some(Rect::new(0, 11, 60, 20)));
+        assert_eq!(l.list, Rect::new(0, 1, 60, 11));
+        assert_eq!(l.panel, Some(Rect::new(0, 12, 60, 19)));
         assert!(!l.one_column, "the strip is the usual grid");
         assert_split(l, r(60, 30));
-        // list height = clamp(height*2/5, 9, 10): one row of full cards (+ a divider line)
-        assert_eq!(preview_layout(r(40, 24), true).list.height, 9);
-        assert_eq!(preview_layout(r(40, 25), true).list.height, 10);
-        assert_eq!(preview_layout(r(40, 100), true).list.height, 10);
-        assert_eq!(preview_layout(r(0, 24), true).list.height, 9, "zero width does not panic");
+        // list height = clamp(height*2/5, 10, 11): one row of full cards (+ a divider line)
+        assert_eq!(preview_layout(r(40, 24), true).list.height, 10);
+        assert_eq!(preview_layout(r(40, 27), true).list.height, 10);
+        assert_eq!(preview_layout(r(40, 28), true).list.height, 11);
+        assert_eq!(preview_layout(r(40, 100), true).list.height, 11);
+        assert_eq!(preview_layout(r(0, 24), true).list.height, 10, "zero width does not panic");
         let huge = preview_layout(r(69, u16::MAX - 1), true);
-        assert_eq!(huge.list.height, 10, "no overflow");
+        assert_eq!(huge.list.height, 11, "no overflow");
         for h in 24..=200 {
             let l = preview_layout(r(60, h), true);
-            assert!(l.panel.unwrap().height >= 15, "h={h}");
+            assert!(l.panel.unwrap().height >= 14, "h={h}");
         }
     }
 
@@ -206,7 +207,7 @@ mod tests {
         // width 69/70 (tall enough for both)
         assert_eq!(preview_layout(r(70, 24), true).list.height, 24, "70 wide: side by side");
         assert_eq!(preview_layout(r(69, 24), true).list.width, 69, "69 wide: stacked");
-        assert_eq!(preview_layout(r(69, 24), true).panel.map(|p| p.y), Some(1 + 9));
+        assert_eq!(preview_layout(r(69, 24), true).panel.map(|p| p.y), Some(1 + 10));
         // height 7/8 when wide
         assert!(preview_layout(r(70, 8), true).panel.is_some_and(|p| p.x == 26 && p.width == 44));
         assert_eq!(preview_layout(r(70, 7), true).panel, None);
