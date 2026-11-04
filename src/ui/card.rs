@@ -159,6 +159,7 @@ fn render_full(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: b
         warning: spirit::warning(s.ctx_percent),
         magic: spirit::magic_for(s.ctx_percent),
         stage: spirit::stage_for(s.ctx_percent),
+        cols: band.width.saturating_sub(SPIRIT_LEFT_PAD),
     };
     draw_spirit(f.buffer_mut(), band, &params);
 
@@ -446,7 +447,7 @@ mod tests {
         for size in Size::ALL {
             for magic in Magic::ALL {
                 for tick in [0, 30, 61] {
-                    let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick, seed: 1, warning: false, magic, stage: Default::default() };
+                    let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick, seed: 1, warning: false, magic, stage: Default::default(), cols: 0 };
                     let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
                     let at = draw_spirit(&mut buf, band, &params);
                     let (w, h) = spirit::grid_size_for(size, magic);
@@ -465,7 +466,7 @@ mod tests {
         }
         // a band too narrow for the pad still draws inside it
         let narrow = Rect::new(1, 1, 5, SCENE_ROWS);
-        let params = SpiritParams { theme: Theme::Fire, status: Status::Running, size: Size::S, tick: 30, seed: 1, warning: false, magic: Magic::Big, stage: Default::default() };
+        let params = SpiritParams { theme: Theme::Fire, status: Status::Running, size: Size::S, tick: 30, seed: 1, warning: false, magic: Magic::Big, stage: Default::default(), cols: 0 };
         let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
         let at = draw_spirit(&mut buf, narrow, &params);
         assert!(at.x >= narrow.x && at.right() <= narrow.right());
@@ -477,7 +478,7 @@ mod tests {
         for theme in Theme::ALL {
             for status in [Status::Idle, Status::Running] {
                 for magic in Magic::ALL {
-                    let params = SpiritParams { theme, status, size: Size::S, tick: 3, seed: 1, warning: false, magic, stage: Default::default() };
+                    let params = SpiritParams { theme, status, size: Size::S, tick: 3, seed: 1, warning: false, magic, stage: Default::default(), cols: 0 };
                     let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
                     draw_spirit(&mut buf, band, &params);
                     let lo = (0..CARD_W)

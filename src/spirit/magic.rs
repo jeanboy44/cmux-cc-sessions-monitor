@@ -10,6 +10,11 @@
 //! - poison: toxic puffs spreading out radially from a burst centre
 //! - lightning: zig-zag bolts striking down with spark bursts; more and
 //!   thicker bolts at higher magic levels
+//!
+//! Water, poison and lightning are centred in the magic area: the columns
+//! from just right of the body to the right edge of the canvas (which the
+//! card widens to its inner width, see `SpiritParams::cols`). Fire keeps
+//! breathing from the mouth.
 
 use std::f32::consts::TAU;
 
@@ -54,11 +59,27 @@ fn mouth_x(g: &Geom) -> f32 {
     g.rcx + (BASE_R - 0.5) * g.ppu
 }
 
+/// Horizontal centre (real sub-pixels) of the magic area: from the first
+/// whole cell right of the body (its outline radius, rounded up to a cell)
+/// to the right edge of the canvas.
+pub(super) fn area_mid(g: &Geom) -> f32 {
+    let start = ((g.rcx + BASE_R * g.ppu) / 2.0).ceil() * 2.0;
+    (start + g.w as f32) / 2.0
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests isolating the magic switch it off to diff a frame against.
+    pub(super) static NO_MAGIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Where the magic goes, in real sub-pixels: the mouth (`ox`, `oy`) at the
-/// body's right edge and the right end of the reach (exclusive).
+/// body's right edge, the centre of the magic area (`mid`) and the right end
+/// of the reach (exclusive).
 struct Area {
     ox: f32,
     oy: f32,
+    mid: f32,
     end: f32,
 }
 
@@ -66,11 +87,11 @@ impl Area {
     fn new(g: &Geom, m: Magic, elem: Theme, cy: f32) -> Self {
         let ox = mouth_x(g);
         let end = match m {
-            Magic::Small if elem == Theme::Lightning => ox + 7.0,
-            Magic::Small => ox + 3.5,
+            // the small breath stays short; centred magic is sized by its level
+            Magic::Small if elem == Theme::Fire => ox + 3.5,
             _ => g.w as f32,
         };
-        Area { ox, oy: g.rcy + (cy - CY) * g.ppu, end: end.min(g.w as f32) }
+        Area { ox, oy: g.rcy + (cy - CY) * g.ppu, mid: area_mid(g), end: end.min(g.w as f32) }
     }
 
     /// Paints one magic dot, never on the body and never past the reach.
@@ -84,6 +105,10 @@ impl Area {
 /// `cy`: body centre y in design units (bobbing, without the casting pose).
 pub(super) fn draw(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
     if ctx.state != Status::Running {
+        return;
+    }
+    #[cfg(test)]
+    if NO_MAGIC.with(std::cell::Cell::get) {
         return;
     }
     let Some((since_cast, since_start)) = stream(ctx.seed, ctx.t) else { return };
@@ -204,12 +229,12 @@ const DISC_SQUASH: f32 = 0.76;
 /// mid-blue body, spiral arms that brighten toward their tips, a lighter rim
 /// and a bright specular highlight from the upper left (it stays put while
 /// the arms spin), with droplets trailing the arm tips and foam sparkles.
-/// It opens after each cast and closes again.
+/// It opens after each cast and closes again, centred in the magic area.
 fn vortex(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
-    let (dur, dx, major, arms): (u64, f32, f32, u32) = match ctx.magic {
-        Magic::Small => (14, 1.9, 1.9, 1),
-        Magic::Normal => (22, 4.8, 5.0, 2),
-        Magic::Big => (30, 11.5, 7.6, 3),
+    let (dur, major, arms): (u64, f32, u32) = match ctx.magic {
+        Magic::Small => (14, 1.9, 1),
+        Magic::Normal => (22, 5.0, 2),
+        Magic::Big => (30, 7.6, 3),
     };
     if since_cast >= dur {
         return;
@@ -217,7 +242,7 @@ fn vortex(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
     let sc = since_cast as f32;
     let open = ((sc + 1.0) / 4.0).min(1.0) * ((dur as f32 - sc) / 4.0).min(1.0);
     let (ra, rb) = ((major * open).max(0.8), (major * DISC_SQUASH * open).max(0.6));
-    let (cx, cy) = (a.ox + dx, a.oy);
+    let (cx, cy) = (a.mid, a.oy);
     let (ca, sa) = (DISC_TILT.cos(), DISC_TILT.sin());
     // screen half extents of the tilted disc (normalise the highlight spot)
     let hx = (ra * ra * ca * ca + rb * rb * sa * sa).sqrt();
@@ -282,15 +307,10 @@ fn vortex(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
     }
 }
 
-/// Poison burst centre in real sub-pixels: right of the mouth at the body
-/// centre's height, farther out for stronger magic.
-pub(super) fn fog_anchor(g: &Geom, m: Magic) -> (f32, f32) {
-    let d = match m {
-        Magic::Small => 2.0,
-        Magic::Normal => 5.0,
-        Magic::Big => 9.5,
-    };
-    (mouth_x(g) + d, g.rcy)
+/// Poison burst centre in real sub-pixels: the centre of the magic area at
+/// the body centre's height.
+pub(super) fn fog_anchor(g: &Geom) -> (f32, f32) {
+    (area_mid(g), g.rcy)
 }
 
 /// Ticks one cast's toxic puffs live.
@@ -302,8 +322,8 @@ pub(super) fn fog_life(m: Magic) -> u64 {
     }
 }
 
-/// Poison: every cast bursts toxic puffs out of a fixed centre right of the
-/// mouth. They swell radially, thinning and fading as they grow, with
+/// Poison: every cast bursts toxic puffs out of a fixed centre in the magic
+/// area. They swell radially, thinning and fading as they grow, with
 /// edges wobbling in smooth noise; Normal and Big casts puff several
 /// overlapping clouds. The dither pattern is fixed, so the fog creeps
 /// instead of flickering.
@@ -314,7 +334,7 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
         Magic::Big => (9.5, 3, 2.6, 1.2),
     };
     let life = fog_life(ctx.magic);
-    let (ax, ay) = fog_anchor(&cv.g, ctx.magic);
+    let (ax, ay) = fog_anchor(&cv.g);
     // (centre x, centre y, radius, strength, wobble phase) of every live puff
     let mut live: Vec<(f32, f32, f32, f32, f32)> = Vec::new();
     for age in 0..life {
@@ -343,11 +363,21 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
     if live.is_empty() {
         return;
     }
-    let reach = rmax * 1.3 + spread;
-    // like the breath, the fog keeps one empty dot column off the body
-    let x0 = ((ax - reach).floor() as i32).max(cv.body_right().map_or(0, |e| e + 2));
+    // keep the cloud as a whole centred: shift the puffs so their weighted
+    // mean x sits on the anchor
+    let w: f32 = live.iter().map(|p| p.3 * p.2 * p.2).sum();
+    if w > 0.0 {
+        let off = live.iter().map(|p| p.3 * p.2 * p.2 * p.0).sum::<f32>() / w - ax;
+        for p in &mut live {
+            p.0 -= off;
+        }
+    }
+    // like the breath, the fog keeps one empty dot column off the body; it
+    // is clipped evenly on both sides of the anchor so it stays centred
+    let left = cv.body_right().map_or(0, |e| e + 2) as f32;
+    let reach = (rmax * 1.3 + spread).min(ax - left).min(cv.g.w as f32 - ax).max(0.0);
     for y in 0..cv.g.h as i32 {
-        for x in x0..(ax + reach).ceil() as i32 {
+        for x in (ax - reach).floor() as i32..(ax + reach).ceil() as i32 {
             let (xf, yf) = (x as f32 + 0.5, y as f32 + 0.5);
             let mut dens = 0.0f32;
             for &(px, py, r, amp, ph) in &live {
@@ -359,7 +389,9 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
                     dens = dens.max(amp * (1.0 - d * d).powf(0.6));
                 }
             }
-            let q = hf((x as u32).wrapping_mul(131).wrapping_add((y as u32).wrapping_mul(17)), ctx.seed);
+            // the dither mirrors about the anchor, so it never leans the cloud
+            let mx = ((xf - ax).abs() * 2.0) as u32;
+            let q = hf(mx.wrapping_mul(131).wrapping_add((y as u32).wrapping_mul(17)), ctx.seed);
             if dens < q * 0.8 + 0.12 {
                 continue;
             }
@@ -368,13 +400,13 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
     }
 }
 
-/// Lightning layout per magic level: (flicker duration, main bolt distance
-/// from the mouth, zig-zag amplitude, spark burst reach, bolt width in dots).
-fn bolt_style(m: Magic) -> (u64, f32, f32, i32, i32) {
+/// Lightning layout per magic level: (flicker duration, zig-zag amplitude,
+/// spark burst reach, bolt width in dots).
+fn bolt_style(m: Magic) -> (u64, f32, i32, i32) {
     match m {
-        Magic::Small => (3, 5.5, 0.8, 1, 1),
-        Magic::Normal => (5, 7.5, 2.2, 2, 2),
-        Magic::Big => (7, 13.0, 3.4, 4, 3),
+        Magic::Small => (3, 0.8, 1, 1),
+        Magic::Normal => (5, 2.2, 2, 2),
+        Magic::Big => (7, 3.4, 4, 3),
     }
 }
 
@@ -385,11 +417,11 @@ struct Bolt {
     sparks: bool,
 }
 
-/// The bolts of the cast at `cast`: the main bolt first (the same path at
-/// every level), then the extra bolts of higher levels at distinct x, and
-/// at Big sometimes a fork off the main bolt.
-fn bolts(ctx: &Ctx, ox: f32, bottom: f32, cast: u64) -> Vec<Bolt> {
-    let (_, dx, amp, _, _) = bolt_style(ctx.magic);
+/// The bolts of the cast at `cast`, as a group centred on `mid` (the magic
+/// area's centre): the main bolt first, then the extra bolts of higher
+/// levels at distinct x, and at Big sometimes a fork off the main bolt.
+fn bolts(ctx: &Ctx, mid: f32, bottom: f32, cast: u64) -> Vec<Bolt> {
+    let (_, amp, _, _) = bolt_style(ctx.magic);
     let ck = (cast as u32) ^ ((cast >> 32) as u32);
     let key = ctx.seed ^ 0xB017;
     // a zig-zag from (top x around `mid`) down to the bottom; `last` forces the final swing
@@ -409,20 +441,22 @@ fn bolts(ctx: &Ctx, ox: f32, bottom: f32, cast: u64) -> Vec<Bolt> {
         }
         pts
     };
-    let main = ox + dx;
+    // Normal casts a second, thinner-swinging bolt on about half the casts:
+    // the pair straddles the centre
+    let dual = matches!(ctx.magic, Magic::Normal) && hf(key ^ 5, ck) < 0.5;
+    let main = if dual { mid + 2.25 } else { mid };
     let mut out = vec![Bolt { pts: path(key, main, amp, None), sparks: true }];
     match ctx.magic {
         Magic::Small => {}
-        // a second, thinner-swinging bolt nearer the body on about half the casts
         Magic::Normal => {
-            if hf(key ^ 5, ck) < 0.5 {
-                out.push(Bolt { pts: path(key ^ 0x51, ox + 3.0, 0.8, Some(-1.0)), sparks: true });
+            if dual {
+                out.push(Bolt { pts: path(key ^ 0x51, mid - 2.25, 0.8, Some(-1.0)), sparks: true });
             }
         }
         // a bolt on each side of the main one, sometimes a fork off it
         Magic::Big => {
             out.push(Bolt { pts: path(key ^ 0x52, main - 6.5, 1.4, Some(-1.0)), sparks: true });
-            out.push(Bolt { pts: path(key ^ 0x53, main + 6.0, 1.4, Some(1.0)), sparks: true });
+            out.push(Bolt { pts: path(key ^ 0x53, main + 6.5, 1.4, Some(1.0)), sparks: true });
             if hf(key ^ 6, ck) < 0.6 {
                 let from = out[0].pts[out[0].pts.len() / 2];
                 let side = if hf(key ^ 7, ck) < 0.5 { -1.0 } else { 1.0 };
@@ -445,7 +479,7 @@ pub(super) fn strikes(g: &Geom, ctx: &Ctx) -> Vec<f32> {
         return Vec::new();
     }
     let a = Area::new(g, ctx.magic, Theme::Lightning, CY);
-    bolts(ctx, a.ox, g.h as f32 - 1.0, ctx.t - since_cast)
+    bolts(ctx, a.mid, g.h as f32 - 1.0, ctx.t - since_cast)
         .iter()
         .filter(|b| b.sparks)
         .map(|b| b.pts.last().map_or(a.end - 1.0, |p| p.0.min(a.end - 1.0)))
@@ -457,12 +491,12 @@ pub(super) fn strikes(g: &Geom, ctx: &Ctx) -> Vec<f32> {
 /// one thin bolt, Normal one or two bolts two dots wide, Big three or four
 /// (with a fork) three dots wide and a bigger burst.
 fn bolt(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
-    let (dur, _, _, burst, width) = bolt_style(ctx.magic);
+    let (dur, _, burst, width) = bolt_style(ctx.magic);
     if since_cast >= dur {
         return;
     }
     let bottom = cv.g.h as f32 - 1.0;
-    let all = bolts(ctx, a.ox, bottom, ctx.t - since_cast);
+    let all = bolts(ctx, a.mid, bottom, ctx.t - since_cast);
 
     // the bolts flicker: on, on, off, on (big: once more)
     let shown = matches!(since_cast, 0 | 1 | 3) || (width >= 3 && since_cast == 5);
