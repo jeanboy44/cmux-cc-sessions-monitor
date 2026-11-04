@@ -28,7 +28,7 @@ Then run `cmux-magigent` in a cmux pane. Requires a Rust toolchain (1.89 or newe
 
 | Key | Action |
 |---|---|
-| `h` `j` `k` `l` / arrows | Move between cards (rows wrap; from the last card `l`/`j` go to the first, from the first `h`/`k` go to the last) |
+| `h` `j` `k` `l` / arrows | Move between cards (rows wrap) |
 | `Enter` / `Space` | Focus the selected session's cmux workspace and pane |
 | `v` | Switch the card layout: standard (20x10) or large (28x13); saved as `card_layout` |
 | `p` | Toggle preview (a column of cards of the current layout plus the session's screen) |

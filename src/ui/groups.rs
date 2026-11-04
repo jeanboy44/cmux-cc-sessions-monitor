@@ -88,26 +88,11 @@ pub fn row_of(rows: &[Row], idx: usize) -> Option<usize> {
 
 /// Selection after a move: h/l move within the row and wrap to the next/previous
 /// tile row at its ends, j/k go to the next/previous tile row (across
-/// dividers and groups) with the column clamped to that row's length. The
-/// list is a ring at its ends: l or j on the last tile goes to the first,
-/// h or k on the first tile to the last. Other edges clamp (j on a
-/// non-last tile of the last row stays).
+/// dividers and groups) with the column clamped to that row's length. All
+/// edges clamp: there is no cycle between the last and the first tile.
 pub fn move_selection(rows: &[Row], selected: usize, dir: Dir) -> usize {
     let Some(r) = row_of(rows, selected) else { return selected };
     let Row::Tiles { start, end } = rows[r] else { return selected };
-    let first = rows.iter().find_map(|r| match r {
-        Row::Tiles { start, .. } => Some(*start),
-        Row::Divider { .. } => None,
-    });
-    let last = rows.iter().rev().find_map(|r| match r {
-        Row::Tiles { end, .. } => Some(end - 1),
-        Row::Divider { .. } => None,
-    });
-    match dir {
-        Dir::Right | Dir::Down if Some(selected) == last => return first.unwrap_or(selected),
-        Dir::Left | Dir::Up if Some(selected) == first => return last.unwrap_or(selected),
-        _ => {}
-    }
     let col = selected - start;
     let land = |row: Option<&Row>| match row {
         Some(Row::Tiles { start, end }) => start + col.min(end - start - 1),
@@ -287,35 +272,36 @@ mod tests {
         assert_eq!(move_selection(&rows, 4, Dir::Down), 6, "into the next group's first row");
         assert_eq!(move_selection(&rows, 3, Dir::Down), 5);
         assert_eq!(move_selection(&rows, 7, Dir::Down), 8, "clamped to the short last row");
-        assert_eq!(move_selection(&rows, 8, Dir::Down), 0, "last card wraps to the first");
+        assert_eq!(move_selection(&rows, 8, Dir::Down), 8, "last card: stays");
         assert_eq!(move_selection(&rows, 8, Dir::Up), 5);
         assert_eq!(move_selection(&rows, 7, Dir::Up), 4, "back into group 1, column clamped");
         assert_eq!(move_selection(&rows, 5, Dir::Up), 3);
         assert_eq!(move_selection(&rows, 3, Dir::Up), 0);
         assert_eq!(move_selection(&rows, 1, Dir::Up), 1, "first row, not the first card: stays");
-        assert_eq!(move_selection(&rows, 0, Dir::Up), 8, "first card wraps to the last");
+        assert_eq!(move_selection(&rows, 0, Dir::Up), 0, "first card: stays");
     }
 
     #[test]
-    fn last_and_first_cards_wrap_around() {
+    fn last_and_first_cards_do_not_cycle() {
         // grouped (dividers between): [0 1 2 | 3 4] [5 6 7 | 8]
         let rows = two_groups();
-        assert_eq!(move_selection(&rows, 8, Dir::Right), 0);
-        assert_eq!(move_selection(&rows, 8, Dir::Down), 0);
-        assert_eq!(move_selection(&rows, 0, Dir::Left), 8);
-        assert_eq!(move_selection(&rows, 0, Dir::Up), 8);
-        // a non-last card of the last row does not wrap on j
+        for d in [Dir::Right, Dir::Down] {
+            assert_eq!(move_selection(&rows, 8, d), 8, "{d:?}");
+        }
+        for d in [Dir::Left, Dir::Up] {
+            assert_eq!(move_selection(&rows, 0, d), 0, "{d:?}");
+        }
         assert_eq!(move_selection(&rows, 7, Dir::Down), 8);
         assert_eq!(move_selection(&rows, 6, Dir::Down), 8);
-        // one column: j/l and k/h walk a ring
+        // one column: the ends stay, the middle walks
         let v: Vec<Session> = (0..4).map(|i| sess(&format!("a{i}"), None)).collect();
         let one = layout_groups(&v, &[], None, 1);
         for d in [Dir::Down, Dir::Right] {
-            assert_eq!(move_selection(&one, 3, d), 0, "{d:?}");
+            assert_eq!(move_selection(&one, 3, d), 3, "{d:?}");
             assert_eq!(move_selection(&one, 1, d), 2, "{d:?}");
         }
         for d in [Dir::Up, Dir::Left] {
-            assert_eq!(move_selection(&one, 0, d), 3, "{d:?}");
+            assert_eq!(move_selection(&one, 0, d), 0, "{d:?}");
             assert_eq!(move_selection(&one, 2, d), 1, "{d:?}");
         }
         // a single card stays put, an empty list never panics
@@ -333,8 +319,8 @@ mod tests {
         assert_eq!(move_selection(&rows, 5, Dir::Left), 4, "start of group 2 -> last tile of group 1");
         assert_eq!(move_selection(&rows, 2, Dir::Right), 3, "end of row -> next row start");
         assert_eq!(move_selection(&rows, 3, Dir::Left), 2, "row start -> previous row end");
-        assert_eq!(move_selection(&rows, 8, Dir::Right), 0, "last tile wraps to the first");
-        assert_eq!(move_selection(&rows, 0, Dir::Left), 8, "first tile wraps to the last");
+        assert_eq!(move_selection(&rows, 8, Dir::Right), 8, "last tile: no cycle");
+        assert_eq!(move_selection(&rows, 0, Dir::Left), 0, "first tile: no cycle");
         assert_eq!(move_selection(&rows, 6, Dir::Right), 7);
         assert_eq!(move_selection(&rows, 6, Dir::Left), 5);
         // out of range selection never panics

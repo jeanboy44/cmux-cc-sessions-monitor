@@ -328,7 +328,7 @@ impl App {
 
     /// Grid move over [`App::grid_rows`] (see [`move_selection`]): j/k cross
     /// window groups, a shorter target row clamps the column, and the first
-    /// and last cards wrap around to each other.
+    /// and last cards are hard stops.
     pub fn apply_move(&mut self, dir: Dir) {
         if self.sessions.is_empty() {
             self.selected = 0;
@@ -635,20 +635,15 @@ mod tests {
     }
 
     #[test]
-    fn move_wraps_around_at_the_first_and_last_cards() {
+    fn move_stops_at_the_first_and_last_cards() {
         let mut app = app_with(6, 3);
-        app.apply_move(Dir::Left); // first card -> last
-        assert_eq!(app.selected, 5);
-        app.apply_move(Dir::Right); // last card -> first
-        assert_eq!(app.selected, 0);
+        app.apply_move(Dir::Left);
         app.apply_move(Dir::Up);
-        assert_eq!(app.selected, 5);
+        assert_eq!(app.selected, 0);
+        app.selected = 5;
         app.apply_move(Dir::Down);
-        assert_eq!(app.selected, 0);
-        // the first row's other cards do not wrap on k
-        app.selected = 2;
-        app.apply_move(Dir::Up);
-        assert_eq!(app.selected, 2);
+        app.apply_move(Dir::Right);
+        assert_eq!(app.selected, 5);
         // one session: stays
         let mut one = app_with(1, 3);
         for d in [Dir::Left, Dir::Down, Dir::Up, Dir::Right] {
@@ -680,9 +675,9 @@ mod tests {
         app.selected = 5;
         app.apply_move(Dir::Down);
         assert_eq!(app.selected, 6);
-        // the last tile wraps to the first
+        // the last tile does not cycle to the first
         app.apply_move(Dir::Right);
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.selected, 6);
     }
 
     #[test]

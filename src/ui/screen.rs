@@ -311,7 +311,7 @@ mod tests {
         }
         assert_eq!(seen, vec![0, 5, 10, 15, 15, 15, 15]);
         assert_eq!(app.scroll, 2);
-        // and back up again (one more k from the first card wraps to the last)
+        // and back up again; k on the first card stays, l on the last stays
         for _ in 0..3 {
             app.apply_move(Dir::Up);
             let text = render(&mut app, 100, 30, 0)[1..29].join("\n");
@@ -319,13 +319,10 @@ mod tests {
         }
         assert_eq!((app.selected, app.scroll), (0, 0));
         app.apply_move(Dir::Up);
-        let text = render(&mut app, 100, 30, 0)[1..29].join("\n");
-        assert_eq!(app.selected, 19, "k on the first card wraps to the last");
-        assert!(text.contains("proj-t19 "), "scrolled to it: {text}");
+        assert_eq!((app.selected, app.scroll), (0, 0), "k on the first card stays");
+        app.selected = 19;
         app.apply_move(Dir::Right);
-        let text = render(&mut app, 100, 30, 0)[1..29].join("\n");
-        assert_eq!((app.selected, app.scroll), (0, 0), "l on the last card wraps to the first");
-        assert!(text.contains("proj-t0 "), "{text}");
+        assert_eq!(app.selected, 19, "l on the last card stays");
     }
 
     #[test]
@@ -669,7 +666,7 @@ mod tests {
             render(&mut app, 150, 22, 0);
             seen.push(app.selected);
         }
-        let want: Vec<usize> = (0..24).chain([0, 1]).collect();
+        let want: Vec<usize> = (0..24).chain([23, 23]).collect();
         assert_eq!(seen, want);
         for sel in (0..24).rev() {
             app.selected = sel;
