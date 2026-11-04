@@ -8,8 +8,8 @@
 //! - water: a glossy, shaded whirlpool disc seen at an angle, lit from the
 //!   upper left, with spiral arms, droplets and foam
 //! - poison: toxic puffs spreading out radially from a burst centre
-//! - lightning: zig-zag bolts striking down with spark bursts; more and
-//!   thicker bolts at higher magic levels
+//! - lightning: zig-zag bolts striking down with spark bursts: one thin
+//!   bolt, four thin ones, or a thick one among three thin ones
 //!
 //! Water, poison and lightning are centred in the magic area: the columns
 //! from just right of the body to the right edge of the canvas (which the
@@ -63,8 +63,13 @@ fn mouth_x(g: &Geom) -> f32 {
 /// whole cell right of the body (its outline radius, rounded up to a cell)
 /// to the right edge of the canvas.
 pub(super) fn area_mid(g: &Geom) -> f32 {
-    let start = ((g.rcx + BASE_R * g.ppu) / 2.0).ceil() * 2.0;
-    (start + g.w as f32) / 2.0
+    (area_start(g) + g.w as f32) / 2.0
+}
+
+/// Left edge (real sub-pixels) of the magic area: the first whole cell
+/// right of the body.
+fn area_start(g: &Geom) -> f32 {
+    ((g.rcx + BASE_R * g.ppu) / 2.0).ceil() * 2.0
 }
 
 #[cfg(test)]
@@ -443,37 +448,59 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
     }
 }
 
-/// Lightning layout per magic level at magic scale `ms`: (flicker
-/// duration, zig-zag amplitude, spark burst reach, bolt width in dots).
+/// Lightning per magic level at magic scale `ms`: (flicker duration of
+/// one bolt, zig-zag amplitude of the main bolt in sub-pixels, spark burst
+/// reach of the main bolt, main bolt width in dots).
 fn bolt_style(m: Magic, ms: f32) -> (u64, f32, i32, i32) {
     let (dur, amp, burst, width) = match m {
         Magic::Small => (3, 0.8, 1, 1),
-        Magic::Normal => (3, 1.3, 1, 2),
-        Magic::Big => (7, 3.4, 4, 3),
+        Magic::Normal => (3, 0.8, 1, 1),
+        Magic::Big => (7, 1.0, 4, 3),
     };
     let scaled = |n: i32| (n as f32 * ms).ceil() as i32;
     (dur, amp * ms, scaled(burst), scaled(width))
 }
 
-/// One bolt: its zig-zag points from the top row to the bottom row and
-/// whether it ends in a spark burst (forks do not).
-struct Bolt {
-    pts: Vec<(f32, f32)>,
-    sparks: bool,
+/// Ticks a bolt may flash after its cast: the bolts of a Normal or Big cast
+/// are staggered by up to this much so they never all flash at once.
+const MAX_DELAY: u64 = 2;
+/// Half the span (sub-pixels, at magic scale 1) the four Normal bolts spread
+/// over; the magic area may cut it shorter.
+const NORMAL_SPREAD: f32 = 5.5;
+/// Zig-zag amplitude (sub-pixels, at magic scale 1) of a thin side bolt.
+const THIN_AMP: f32 = 0.7;
+
+/// One bolt of a cast: its zig-zag points from the top row to the bottom
+/// row, its width in dots, the ticks after the cast it flashes and its spark
+/// burst reach.
+#[cfg_attr(test, derive(Debug))]
+pub(super) struct PlannedBolt {
+    pub(super) pts: Vec<(f32, f32)>,
+    pub(super) width: i32,
+    pub(super) delay: u64,
+    pub(super) burst: i32,
+    #[cfg(test)]
+    pub(super) strike: f32,
 }
 
-/// The bolts of the cast at `cast`, as a group centred on `mid` (the magic
-/// area's centre): the main bolt first, then the extra bolts of higher
-/// levels at distinct x, and at Big sometimes a fork off the main bolt.
-fn bolts(ctx: &Ctx, mid: f32, bottom: f32, cast: u64) -> Vec<Bolt> {
-    let (_, amp, _, _) = bolt_style(ctx.magic, ctx.ms);
+/// The bolts of the cast at `cast` in the magic area `[lo, end)` around
+/// `mid` (sub-pixels): Small strikes one thin bolt in the centre; Normal
+/// four thin bolts at random distinct x spread over the area, centred as a
+/// group; Big one thick bolt in the centre (first) and three thin ones at
+/// random distances around it, two on one side and one on the other, clear
+/// of it. Normal and Big bolts flash a random tick or two apart.
+fn bolts(ctx: &Ctx, lo: f32, mid: f32, end: f32, bottom: f32, cast: u64) -> Vec<PlannedBolt> {
+    let (_, amp, burst, width) = bolt_style(ctx.magic, ctx.ms);
     let ms = ctx.ms;
     let ck = (cast as u32) ^ ((cast >> 32) as u32);
     let key = ctx.seed ^ 0xB017;
-    // a zig-zag from (top x around `mid`) down to the bottom; `last` forces the final swing
-    let path = |key: u32, mid: f32, amp: f32, last: Option<f32>| {
+    // keeps a bolt in the magic area (Small keeps its original path)
+    let (lo, hi) = (lo, (end - 1.0).max(lo));
+    // a zig-zag from (top x around `mid`) down to the bottom; `last` forces
+    // the final swing, `keep` clamps every point
+    let path = |key: u32, mid: f32, amp: f32, last: Option<f32>, keep: &dyn Fn(f32) -> f32| {
         let mut dir = if hf(key, ck) < 0.5 { -1.0 } else { 1.0 };
-        let mut pts = vec![(mid + (hf(key ^ 1, ck) - 0.5) * amp, 0.0)];
+        let mut pts = vec![(keep(mid + (hf(key ^ 1, ck) - 0.5) * amp), 0.0)];
         let (mut y, mut i) = (0.0, 0u32);
         while y < bottom {
             i += 1;
@@ -482,102 +509,150 @@ fn bolts(ctx: &Ctx, mid: f32, bottom: f32, cast: u64) -> Vec<Bolt> {
             if y >= bottom {
                 dir = last.unwrap_or(dir);
             }
-            pts.push((mid + dir * amp * (0.5 + 0.5 * hf(key ^ 3, n)), y));
+            pts.push((keep(mid + dir * amp * (0.5 + 0.5 * hf(key ^ 3, n))), y));
             dir = -dir;
         }
         pts
     };
-    // Normal casts a second, thinner-swinging bolt on about a quarter of
-    // the casts: the pair straddles the centre
-    let dual = matches!(ctx.magic, Magic::Normal) && hf(key ^ 5, ck) < 0.25;
-    let main = if dual { mid + 2.25 * ms } else { mid };
-    let mut out = vec![Bolt { pts: path(key, main, amp, None), sparks: true }];
-    match ctx.magic {
-        Magic::Small => {}
+    let delay = |k: u32| (hf(key ^ 0xDE1 ^ k, ck) * (MAX_DELAY + 1) as f32) as u64;
+    let thin = |pts, delay| PlannedBolt { pts, width: 1, delay, burst: 1, #[cfg(test)] strike: 0.0 };
+    let out = match ctx.magic {
+        Magic::Small => {
+            vec![PlannedBolt { pts: path(key, mid, amp, None, &|x| x), width, delay: 0, burst, #[cfg(test)] strike: 0.0 }]
+        }
         Magic::Normal => {
-            if dual {
-                out.push(Bolt { pts: path(key ^ 0x51, mid - 2.25 * ms, 0.8 * ms, Some(-1.0)), sparks: true });
+            // four slots across the spread, a random offset in each, the
+            // group shifted back onto the centre
+            let half = (NORMAL_SPREAD * ms).min((hi - lo) / 2.0 - 0.5).max(0.0);
+            let slot_w = 2.0 * half / 4.0;
+            let mut xs: Vec<f32> = (0..4u32).map(|k| -half + (k as f32 + 0.5) * slot_w + (hf(key ^ 0x4E0 ^ k, ck) - 0.5) * 0.6 * slot_w).collect();
+            let shift = xs.iter().sum::<f32>() / 4.0;
+            for x in &mut xs {
+                *x += mid - shift;
             }
+            // one bolt (a random one) flashes on the cast tick, another a
+            // tick or two later, the other two at random
+            let first = (hf(key ^ 0x4E5, ck) * 4.0) as usize % 4;
+            let late = (first + 1 + (hf(key ^ 0x4E6, ck) * 3.0) as usize % 3) % 4;
+            let keep = |x: f32| x.clamp(lo, hi);
+            xs.iter()
+                .enumerate()
+                .map(|(k, &x)| {
+                    let d = if k == first {
+                        0
+                    } else if k == late {
+                        1 + delay(k as u32) % MAX_DELAY
+                    } else {
+                        delay(k as u32)
+                    };
+                    thin(path(key ^ 0x60 ^ k as u32, x, amp, None, &keep), d)
+                })
+                .collect()
         }
-        // a bolt on each side of the main one, sometimes a fork off it
         Magic::Big => {
-            out.push(Bolt { pts: path(key ^ 0x52, main - 6.5 * ms, 1.4 * ms, Some(-1.0)), sparks: true });
-            out.push(Bolt { pts: path(key ^ 0x53, main + 6.5 * ms, 1.4 * ms, Some(1.0)), sparks: true });
-            if hf(key ^ 6, ck) < 0.6 {
-                let from = out[0].pts[out[0].pts.len() / 2];
-                let side = if hf(key ^ 7, ck) < 0.5 { -1.0 } else { 1.0 };
-                let fork = vec![from, (from.0 + side * 2.0 * ms, from.1 + 2.0), (from.0 + side * 2.5 * ms, (from.1 + 4.0).min(bottom))];
-                out.push(Bolt { pts: fork, sparks: false });
+            let keep = |x: f32| x.clamp(lo, hi);
+            let thick = PlannedBolt { pts: path(key, mid, amp, None, &keep), width, delay: 0, burst, #[cfg(test)] strike: 0.0 };
+            // thin bolts keep a clear dot column off the thick one's reach
+            let half_w = ((width - 1) / 2) as f32;
+            let clear = amp + half_w + 1.5;
+            let step = 2.0 * ms.max(0.5);
+            let d1 = clear + hf(key ^ 0xB10, ck) * ms;
+            let d2 = d1 + step + hf(key ^ 0xB11, ck) * ms;
+            // the lone bolt on the other side balances the pair
+            let d3 = ((d1 + d2) / 2.0 + 0.5 + (hf(key ^ 0xB12, ck) - 0.5) * 1.5 * ms).max(clear + 0.5);
+            let side = if hf(key ^ 0xB13, ck) < 0.5 { -1.0 } else { 1.0 };
+            let mut out = vec![thick];
+            for (k, (d, s)) in [(d1, side), (d2, side), (d3, -side)].into_iter().enumerate() {
+                let near = mid + s * clear;
+                let keep = move |x: f32| if s > 0.0 { x.max(near) } else { x.min(near) }.clamp(lo, hi);
+                let fin = Some(s);
+                let delay = delay(k as u32) % (MAX_DELAY + 1);
+                out.push(thin(path(key ^ 0x70 ^ k as u32, mid + s * d, THIN_AMP * ms, fin, &keep), delay));
             }
+            // never all on the cast tick
+            if out.iter().all(|b| b.delay == 0) {
+                out[1 + (hf(key ^ 0xB14, ck) * 3.0) as usize % 3].delay = 1;
+            }
+            out
         }
-    }
+    };
+    #[cfg(test)]
+    let out = {
+        let mut out = out;
+        for b in &mut out {
+            b.strike = b.pts.last().map_or(end - 1.0, |p| p.0.min(end - 1.0));
+        }
+        out
+    };
     out
 }
 
-/// Strike x (real sub-pixels, clipped to the magic area) of every bolt of
-/// the cast at or just before `ctx.t`; the main bolt first. Empty when no
-/// bolt is showing.
+/// The bolts of the cast showing at `ctx.t` (empty when none is), in the
+/// canvas `g` (the main or thick bolt first).
 #[cfg(test)]
-pub(super) fn strikes(g: &Geom, ctx: &Ctx) -> Vec<f32> {
+pub(super) fn bolt_plan(g: &Geom, ctx: &Ctx) -> Vec<PlannedBolt> {
     let (dur, ..) = bolt_style(ctx.magic, ctx.ms);
     let Some((since_cast, _)) = stream(ctx.seed, ctx.t) else { return Vec::new() };
-    if since_cast >= dur {
+    if since_cast >= dur + MAX_DELAY {
         return Vec::new();
     }
     let a = Area::new(g, CY);
-    bolts(ctx, a.mid, g.h as f32 - 1.0, ctx.t - since_cast)
-        .iter()
-        .filter(|b| b.sparks)
-        .map(|b| b.pts.last().map_or(a.end - 1.0, |p| p.0.min(a.end - 1.0)))
-        .collect()
+    bolts(ctx, area_start(g), a.mid, a.end, g.h as f32 - 1.0, ctx.t - since_cast)
 }
 
 /// Lightning: zig-zag bolts from the top of the area to the bottom with a
 /// spark burst where they strike; every cast strikes new paths. Small casts
-/// one thin bolt, Normal one or two bolts two dots wide, Big three or four
-/// (with a fork) three dots wide and a bigger burst.
+/// one thin bolt; Normal four thin bolts spread over the area, flashing a
+/// tick or two apart; Big one thick bolt (three dots) in the centre with a
+/// strong burst and three thin ones around it.
 fn bolt(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
-    let (dur, _, burst, width) = bolt_style(ctx.magic, ctx.ms);
-    if since_cast >= dur {
+    let (dur, ..) = bolt_style(ctx.magic, ctx.ms);
+    if since_cast >= dur + MAX_DELAY {
         return;
     }
     let bottom = cv.g.h as f32 - 1.0;
-    let all = bolts(ctx, a.mid, bottom, ctx.t - since_cast);
+    let all = bolts(ctx, area_start(&cv.g), a.mid, a.end, bottom, ctx.t - since_cast);
 
-    // the bolts flicker: on, on, off, on (big: once more)
-    let shown = matches!(since_cast, 0 | 1 | 3) || (matches!(ctx.magic, Magic::Big) && since_cast == 5);
-    if shown {
-        let lo = -(width - 1) / 2;
-        for b in &all {
+    for b in &all {
+        // ticks since this bolt's own flash
+        let Some(local) = since_cast.checked_sub(b.delay) else { continue };
+        if local >= dur {
+            continue;
+        }
+        // the bolts flicker: on, on, off, on (big: once more)
+        let shown = matches!(local, 0 | 1 | 3) || (matches!(ctx.magic, Magic::Big) && local == 5);
+        let lo = -(b.width - 1) / 2;
+        if shown {
             for w in b.pts.windows(2) {
                 let ((x0, y0), (x1, y1)) = (w[0], w[1]);
                 let steps = (x1 - x0).abs().max(y1 - y0).ceil().max(1.0) as i32;
                 for s in 0..=steps {
                     let f = s as f32 / steps as f32;
                     let (x, y) = ((x0 + (x1 - x0) * f).round() as i32, (y0 + (y1 - y0) * f).round() as i32);
-                    for k in lo..lo + width {
+                    for k in lo..lo + b.width {
                         let c = if k == 0 { [255., 255., 235.] } else { [255., 225., 90.] };
                         a.dot(cv, x + k, y, c, 2);
                     }
                 }
             }
         }
-    }
 
-    // spark bursts at the impacts, spreading and fading
-    let fade = since_cast as f32 / dur as f32;
-    let rays: [(i32, i32); 7] = [(-1, 0), (1, 0), (-1, -1), (1, -1), (0, -1), (-2, -1), (2, -1)];
-    for (i, b) in all.iter().enumerate().filter(|(_, b)| b.sparks) {
-        // the main bolt bursts strongest
-        let burst = if i == 0 { burst } else { (burst - 1).max(1) };
-        let reach = burst.min(since_cast as i32 + 1);
+        // a spark burst at the impact, spreading and fading
+        let fade = local as f32 / dur as f32;
+        let reach = b.burst.min(local as i32 + 1);
         let (xb, yb) = *b.pts.last().unwrap_or(&(a.ox, bottom));
         let (bx, by) = (xb.round() as i32, yb.round() as i32);
-        let half = (width - 1) / 2;
-        // a small bolt's burst keeps to its own column and the next
-        for (rx, ry) in rays.into_iter().filter(|r| ctx.magic != Magic::Small || r.0.abs() < 2) {
+        let half = (b.width - 1) / 2;
+        // thin bolts' bursts keep to their own column and the next; the
+        // thick bolt's bursts wider and higher
+        let rays: &[(i32, i32)] = if b.width > 1 {
+            &[(-1, 0), (1, 0), (-1, -1), (1, -1), (0, -1), (-2, -1), (2, -1), (-3, -1), (3, -1), (-1, -2), (1, -2)]
+        } else {
+            &[(-1, 0), (1, 0), (-1, -1), (1, -1), (0, -1)]
+        };
+        for &(rx, ry) in rays {
             for k in 1..=reach {
-                let c = lerp(lerp([255., 250., 200.], [255., 170., 30.], k as f32 / (burst as f32 + 1.0)), CARD_BG, fade * 0.7);
+                let c = lerp(lerp([255., 250., 200.], [255., 170., 30.], k as f32 / (b.burst as f32 + 1.0)), CARD_BG, fade * 0.7);
                 // rays start at the bolt's edge, not its centre
                 let side = rx.signum() * half;
                 a.dot(cv, bx + side + rx * k, by + ry * k, c, 2);

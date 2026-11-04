@@ -805,7 +805,13 @@ mod tests {
             assert!(s.lit_cells >= 2.0, "{theme:?}: small paints {} cells", s.lit_cells);
             // normal is no longer the old crowd of cells (fire breathes
             // farther now: its normal is thinner but about as many cells)
-            let cap = if *theme == Theme::Fire { 1.0 } else { 0.6 };
+            // Lightning is exempt: its Normal is four thin bolts by request
+            // (the old Normal was one or two), still well under its Big
+            let cap = match theme {
+                Theme::Fire => 1.0,
+                Theme::Lightning => f32::INFINITY,
+                Theme::Water | Theme::Poison => 0.6,
+            };
             assert!(n.cells <= cap * OLD_NORMAL_CELLS[i], "{theme:?}: normal cells {} vs old {}", n.cells, OLD_NORMAL_CELLS[i]);
             // big fits the card area: nothing past the last column
             assert!(b.max_far < CARD_COLS, "{theme:?}: big reaches col {}", b.max_far);
@@ -850,6 +856,18 @@ mod tests {
                         let p = |t| SpiritParams { magic, cols, ..params(theme, Status::Running, Size::S, t, seed) };
                         let all: Vec<std::collections::BTreeSet<(i32, i32)>> = (0..320u64).map(|t| magic_dots(&p(t))).collect();
                         let centre = area_centre(render(&p(0)).cols.max(render(&p(1)).cols));
+                        // staggered lightning bolts flash one by one: the group is
+                        // centred over the whole cast (every frame until the next cast)
+                        if theme == Theme::Lightning && magic != Magic::Small {
+                            let casts: Vec<usize> = (1..320).filter(|&t| state::casts_at(seed, t as u64)).collect();
+                            for w in casts.windows(2) {
+                                let d: Vec<(i32, i32)> = all[w[0]..w[1]].iter().flatten().copied().collect();
+                                let cx = d.iter().map(|p| p.0 as f32 + 0.5).sum::<f32>() / d.len().max(1) as f32;
+                                worst = worst.max((cx - centre).abs());
+                                frames += 1;
+                            }
+                            continue;
+                        }
                         for t in 2..300usize {
                             let d = &all[t];
                             // not the first or last frame of a cast, nor its faint fade-in/out
@@ -864,7 +882,7 @@ mod tests {
                         }
                     }
                     println!("{theme:?} cols {cols} {magic:?}: {frames} frames, worst centroid offset {worst:.2} sub-pixels");
-                    assert!(frames >= 20, "{theme:?} {cols} {magic:?}: {frames} frames");
+                    assert!(frames >= 20 || (theme == Theme::Lightning && frames >= 30), "{theme:?} {cols} {magic:?}: {frames} frames");
                     assert!(worst <= 2.0, "{theme:?} {cols} {magic:?}: centroid {worst} sub-pixels off the area centre");
                 }
             }
@@ -1473,23 +1491,25 @@ mod tests {
         particles::NO_AMBIENT.with(|c| c.set(false));
     }
 
-    /// Mean column of the main lightning bolt's strike (where it hits the
-    /// bottom row, clipped to the magic area) at each cast tick, over several
-    /// seeds. Since several bolts strike at once (task 3c) the main bolt is
-    /// taken from the bolt plan; the render must paint the bottom row there.
+    /// Mean column where the lightning bolts strike (where they hit the
+    /// bottom row, clipped to the magic area) over the casts of several
+    /// seeds: the mean over every bolt of a cast, each checked on the frame
+    /// it flashes (Normal and Big bolts are staggered by a tick or two).
     fn bolt_strike_mean(magic: Magic) -> f32 {
         particles::NO_AMBIENT.with(|c| c.set(true));
         let (mut sum, mut n) = (0.0f32, 0u32);
         for seed in [4, 11, 23, 37, 58, 91] {
             for t in (1..400).filter(|&t| state::casts_at(seed, t)) {
                 let p = SpiritParams { magic, ..params(Theme::Lightning, Status::Running, Size::S, t, seed) };
-                let strikes = magic::strikes(&geom_for(Size::S, magic), &Ctx::new(&p));
-                let col = (strikes[0].round() / 2.0).floor();
-                let g = render(&p);
-                let row = g.rows - 1;
-                let near = (col as u16).saturating_sub(1)..=(col as u16 + 1).min(g.cols - 1);
-                assert!(near.into_iter().any(|c| is_braille(cell(&g, c, row).ch)), "{seed} {t} {magic:?}: strike painted at col {col}");
-                sum += col + 0.5;
+                let plan = magic::bolt_plan(&geom_for(Size::S, magic), &Ctx::new(&p));
+                for b in &plan {
+                    let col = (b.strike.round() / 2.0).floor();
+                    let g = render(&SpiritParams { tick: t + b.delay, ..p });
+                    let row = g.rows - 1;
+                    let near = (col as u16).saturating_sub(1)..=(col as u16 + 1).min(g.cols - 1);
+                    assert!(near.into_iter().any(|c| is_braille(cell(&g, c, row).ch)), "{seed} {t} {magic:?}: strike painted at col {col}");
+                    sum += (col + 0.5) / plan.len() as f32;
+                }
                 n += 1;
             }
         }
@@ -1802,41 +1822,117 @@ mod tests {
         assert!(checked >= 6, "{checked} isolated casts checked");
     }
 
+    /// The bolt plans of every cast of seeds 1..30 in ticks 1..300 in the
+    /// standard card, with the centre of the magic area (sub-pixels).
+    fn bolt_plans(magic: Magic) -> Vec<(u32, u64, f32, Vec<magic::PlannedBolt>)> {
+        let mut out = Vec::new();
+        for seed in 1..30u32 {
+            for t in (1..300).filter(|&t| state::casts_at(seed, t)) {
+                let p = SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Lightning, Status::Running, Size::S, t, seed) };
+                let g = geom_of(&p);
+                out.push((seed, t, magic::area_mid(&g), magic::bolt_plan(&g, &Ctx::new(&p))));
+            }
+        }
+        out
+    }
+
+    /// Mean x of a bolt's zig-zag points.
+    fn bolt_x(b: &magic::PlannedBolt) -> f32 {
+        b.pts.iter().map(|p| p.0).sum::<f32>() / b.pts.len() as f32
+    }
+
     #[test]
-    fn lightning_bolts_multiply_and_thicken() {
-        particles::NO_AMBIENT.with(|c| c.set(true));
-        let mut widths = Vec::new();
+    fn lightning_bolt_groups_per_level() {
         for magic in Magic::ALL {
-            let mut counts = std::collections::BTreeSet::new();
-            let mut runs = Vec::new();
-            for seed in 1..30u32 {
-                for t in (1..300).filter(|&t| state::casts_at(seed, t)) {
-                    let g = render(&SpiritParams { magic, ..params(Theme::Lightning, Status::Running, Size::S, t, seed) });
-                    let d = dots(&g);
-                    let w = i32::from(g.cols) * 2;
-                    let n = dot_runs(&d, 0, 15, w).len();
-                    counts.insert(n);
-                    for y in 2..i32::from(g.rows) * 4 - 3 {
-                        runs.extend(dot_runs(&d, y, 15, w).into_iter().map(|r| r.1));
+            let plans = bolt_plans(magic);
+            assert!(plans.len() >= 100, "{magic:?}: {} casts", plans.len());
+            let mut layouts = std::collections::BTreeSet::new();
+            for (seed, t, mid, plan) in &plans {
+                let mid = *mid;
+                let widths: Vec<i32> = plan.iter().map(|b| b.width).collect();
+                let want: &[i32] = match magic {
+                    Magic::Small => &[1],
+                    Magic::Normal => &[1, 1, 1, 1],
+                    Magic::Big => &[3, 1, 1, 1],
+                };
+                assert_eq!(widths, want, "{magic:?} {seed} {t}: bolts and widths (thick first)");
+                // the bolts flash on the cast tick or a tick or two later
+                assert!(plan.iter().any(|b| b.delay == 0) && plan.iter().all(|b| b.delay <= 2), "{magic:?} {seed} {t}: delays");
+                if plan.len() > 1 {
+                    assert!(plan.iter().any(|b| b.delay != plan[0].delay), "{magic:?} {seed} {t}: they never all flash together");
+                }
+                // the group is centred: its width-weighted centroid within one column
+                let w: f32 = plan.iter().map(|b| b.width as f32).sum();
+                let cx = plan.iter().map(|b| bolt_x(b) * b.width as f32).sum::<f32>() / w;
+                assert!((cx - mid).abs() <= 2.0, "{magic:?} {seed} {t}: group centroid {cx} vs {mid}");
+                // every bolt strikes top to bottom inside the area
+                for b in plan {
+                    assert_eq!(b.pts.first().map(|p| p.1), Some(0.0), "{magic:?} {seed} {t}: from the top");
+                    assert_eq!(b.pts.last().map(|p| p.1), Some(15.0), "{magic:?} {seed} {t}: to the bottom");
+                    assert!(b.pts.iter().all(|p| p.0 >= 14.0 && p.0 < 34.0), "{magic:?} {seed} {t}: inside the area {:?}", b.pts);
+                }
+                match magic {
+                    Magic::Small => {}
+                    // four thin bolts in distinct columns, spread over the area
+                    Magic::Normal => {
+                        let xs: std::collections::BTreeSet<i32> = plan.iter().map(|b| bolt_x(b).round() as i32).collect();
+                        assert_eq!(xs.len(), 4, "{seed} {t}: distinct columns {xs:?}");
+                        let span = xs.last().unwrap_or(&0) - xs.first().unwrap_or(&0);
+                        assert!(span >= 6, "{seed} {t}: spread {span} dots");
+                    }
+                    // one thick bolt in the centre, three thin ones around it
+                    // that never touch it
+                    Magic::Big => {
+                        assert!((bolt_x(&plan[0]) - mid).abs() <= 1.0, "{seed} {t}: thick bolt at {} vs {mid}", bolt_x(&plan[0]));
+                        let thick_reach = plan[0].pts.iter().map(|p| (p.0.round() - mid).abs()).fold(0.0f32, f32::max) + 1.0;
+                        for b in &plan[1..] {
+                            let d = (bolt_x(b) - mid).abs();
+                            assert!((3.0..=8.0).contains(&d), "{seed} {t}: thin bolt {d} dots off centre");
+                            assert!(b.pts.iter().all(|p| (p.0.round() - mid).abs() >= thick_reach + 1.0), "{seed} {t}: thin bolt clear of the thick one");
+                        }
+                        let sides: std::collections::BTreeSet<bool> = plan[1..].iter().map(|b| bolt_x(b) > mid).collect();
+                        assert_eq!(sides.len(), 2, "{seed} {t}: thin bolts on both sides");
+                    }
+                }
+                layouts.insert(plan.iter().flat_map(|b| b.pts.iter().map(|p| (p.0.round() as i32, p.1 as i32))).collect::<Vec<_>>());
+            }
+            // every cast strikes new paths at new positions
+            assert!(layouts.len() * 10 >= plans.len() * 9, "{magic:?}: {} layouts over {} casts", layouts.len(), plans.len());
+        }
+        // same tick, different seeds: different layouts
+        let at = |seed| {
+            let p = SpiritParams { magic: Magic::Normal, cols: CARD_COLS, ..params(Theme::Lightning, Status::Running, Size::S, first_cast(4), seed) };
+            magic::bolt_plan(&geom_of(&p), &Ctx::new(&SpiritParams { seed, ..p })).iter().map(|b| b.pts[0].0.round() as i32).collect::<Vec<_>>()
+        };
+        assert_ne!(at(4), at(5));
+    }
+
+    #[test]
+    fn lightning_bolts_paint_their_widths() {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        for magic in Magic::ALL {
+            let (mut thick_ok, mut thin_ok, mut thick_n, mut thin_n) = (0, 0, 0, 0);
+            for (seed, t, _, plan) in bolt_plans(magic) {
+                for b in &plan {
+                    let d = magic_dots(&SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Lightning, Status::Running, Size::S, t + b.delay, seed) });
+                    // the run of dots through the bolt's middle point
+                    let (x, y) = b.pts[b.pts.len() / 2];
+                    let (x, y) = (x.round() as i32, y as i32);
+                    let run = dot_runs(&d, y, 0, 80).into_iter().find(|r| (r.0..r.0 + r.1).contains(&x)).map_or(0, |r| r.1);
+                    if b.width == 3 {
+                        thick_n += 1;
+                        thick_ok += usize::from(run >= 3);
+                    } else {
+                        thin_n += 1;
+                        thin_ok += usize::from((1..=2).contains(&run));
                     }
                 }
             }
-            let mut hist = std::collections::BTreeMap::new();
-            for r in &runs {
-                *hist.entry(*r).or_insert(0) += 1;
-            }
-            let mode = hist.iter().max_by_key(|e| e.1).map(|e| *e.0).unwrap_or(0);
-            let mean = runs.iter().sum::<i32>() as f32 / runs.len() as f32;
-            println!("{magic:?}: bolts per cast {counts:?}, width mode {mode} mean {mean:.2}");
-            match magic {
-                Magic::Small => assert_eq!(counts, [1].into(), "one thin bolt"),
-                Magic::Normal => assert_eq!(counts, [1, 2].into(), "one or two bolts"),
-                Magic::Big => assert!(counts.iter().all(|&n| n >= 3), "three or more bolts: {counts:?}"),
-            }
-            widths.push((mode, mean));
+            println!("{magic:?}: thick {thick_ok}/{thick_n} thin {thin_ok}/{thin_n}");
+            assert!(thick_ok == thick_n, "{magic:?}: thick bolts three dots wide on {thick_ok} of {thick_n}");
+            assert!(thin_ok * 10 >= thin_n * 8, "{magic:?}: thin bolts one dot wide on {thin_ok} of {thin_n}");
+            assert_eq!(thick_n > 0, magic == Magic::Big, "{magic:?}: only Big has a thick bolt");
         }
-        assert_eq!(widths.iter().map(|w| w.0).collect::<Vec<_>>(), [1, 2, 3], "bolt width in dots: {widths:?}");
-        assert!(widths.windows(2).all(|w| w[1].1 > w[0].1), "thicker with more context: {widths:?}");
         particles::NO_AMBIENT.with(|c| c.set(false));
     }
 
