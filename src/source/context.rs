@@ -21,6 +21,9 @@ use serde_json::Value;
 
 /// Bytes read from the end of a transcript.
 pub const TAIL_BYTES: u64 = 64 * 1024;
+/// Larger window read once (per file change) when the tail misses a value
+/// that the cache does not already know.
+pub const RETRY_BYTES: u64 = 1024 * 1024;
 /// Context files larger than this are not ours (or broken): ignored.
 pub const MAX_CTX_FILE_BYTES: u64 = 4096;
 
@@ -114,12 +117,17 @@ fn real_model(v: &Value) -> Option<&str> {
 /// lines, sidechain and non-assistant records, malformed usage and
 /// placeholder models are skipped. `None` when the file cannot be read.
 pub fn read_transcript_tail(path: &Path) -> Option<TranscriptTail> {
+    read_transcript_window(path, TAIL_BYTES)
+}
+
+/// [`read_transcript_tail`] over the last `window` bytes.
+fn read_transcript_window(path: &Path, window: u64) -> Option<TranscriptTail> {
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(TAIL_BYTES);
+    let start = len.saturating_sub(window);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
-    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    file.take(window).read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes);
     let mut body: &str = &text;
     if start > 0 {
@@ -160,6 +168,12 @@ pub fn read_transcript_usage(path: &Path, limit: u64) -> Option<f32> {
 
 /// Transcript tails keyed by path, reused while the file's (mtime, length)
 /// is unchanged. Carried from one refresh round to the next.
+///
+/// A big non-assistant record (e.g. a huge tool_result) can push the last
+/// assistant record out of the tail window. A value the tail misses is then
+/// kept from the path's previous entry (the last known model / usage); a
+/// value still unknown in a file longer than the tail is retried once (per
+/// file change) with [`RETRY_BYTES`] before it stays `None`.
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptCache {
     entries: HashMap<PathBuf, (SystemTime, u64, TranscriptTail)>,
@@ -182,7 +196,17 @@ impl TranscriptCache {
         {
             self.reads += 1;
         }
-        let tail = read_transcript_tail(path)?;
+        let mut tail = read_transcript_tail(path)?;
+        if let Some((_, _, known)) = self.entries.get(path) {
+            tail.tokens = tail.tokens.or(known.tokens);
+            tail.model = tail.model.take().or_else(|| known.model.clone());
+        }
+        if (tail.tokens.is_none() || tail.model.is_none()) && key.1 > TAIL_BYTES {
+            if let Some(wide) = read_transcript_window(path, RETRY_BYTES) {
+                tail.tokens = tail.tokens.or(wide.tokens);
+                tail.model = tail.model.take().or(wide.model);
+            }
+        }
         self.entries.insert(path.to_path_buf(), (key.0, key.1, tail.clone()));
         Some(tail)
     }
@@ -531,5 +555,92 @@ mod tests {
         assert_eq!(cache.usage(&t, 100_000), Some(100.0), "limit change is applied");
         cache.retain(&[]);
         assert_eq!(cache.len(), 0);
+    }
+
+    /// A non-assistant line of about `bytes` bytes (e.g. a huge tool_result).
+    fn big_user(bytes: usize) -> String {
+        format!(r#"{{"type":"user","message":{{"content":"{}"}}}}"#, "x".repeat(bytes))
+    }
+
+    fn append(path: &Path, line: &str) {
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    #[test]
+    fn transcript_cache_keeps_model_and_tokens_past_a_big_user_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        // 20_000 tokens = 10 % of 200k
+        write_lines(&t, &[assistant_model("claude-fable-5-1")]);
+        let mut cache = TranscriptCache::default();
+        assert_eq!(cache.tail(&t).unwrap().model.as_deref(), Some("claude-fable-5-1"));
+        // a > 64 KiB user record pushes the assistant out of the tail window
+        append(&t, &big_user(TAIL_BYTES as usize + 1000));
+        assert_eq!(read_transcript_tail(&t).unwrap().model, None, "test setup: out of the 64 KiB window");
+        let tail = cache.tail(&t).unwrap();
+        assert_eq!(tail.model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(tail.usage_percent(200_000), Some(10.0));
+        // even past the larger retry window, the last known values stay
+        append(&t, &big_user(RETRY_BYTES as usize + 1000));
+        let tail = cache.tail(&t).unwrap();
+        assert_eq!(tail.model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(tail.tokens, Some(20_000));
+    }
+
+    #[test]
+    fn transcript_cache_retries_a_miss_with_a_larger_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        // never seen before: the 64 KiB tail misses, the 1 MiB retry finds it
+        write_lines(&t, &[assistant_model("claude-sonnet-5-5"), big_user(TAIL_BYTES as usize + 1000)]);
+        let mut cache = TranscriptCache::default();
+        let tail = cache.tail(&t).unwrap();
+        assert_eq!(tail.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(tail.tokens, Some(20_000));
+        assert_eq!(cache.tail(&t), Some(tail), "cached by (mtime, len)");
+        assert_eq!(cache.reads(), 1);
+    }
+
+    #[test]
+    fn transcript_cache_new_session_without_assistant_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(&t, &[r#"{"type":"user","message":{"content":"hi"}}"#.into()]);
+        let mut cache = TranscriptCache::default();
+        assert_eq!(cache.tail(&t), Some(TranscriptTail::default()));
+        // a fresh unseen file whose assistant is beyond every window: None
+        let u = dir.path().join("u.jsonl");
+        write_lines(&u, &[assistant_model("claude-opus-4-5"), big_user(RETRY_BYTES as usize + 1000)]);
+        assert_eq!(cache.tail(&u), Some(TranscriptTail::default()));
+    }
+
+    #[test]
+    fn transcript_cache_pruned_entries_lose_their_last_known_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(&t, &[assistant_model("claude-opus-4-5")]);
+        let mut cache = TranscriptCache::default();
+        assert!(cache.tail(&t).unwrap().model.is_some());
+        cache.retain(&[]);
+        assert_eq!(cache.len(), 0);
+        append(&t, &big_user(RETRY_BYTES as usize + 1000));
+        assert_eq!(cache.tail(&t), Some(TranscriptTail::default()), "pruned: nothing carried over");
+    }
+
+    #[test]
+    fn transcript_cache_updates_a_genuinely_changed_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(&t, &[assistant_model("claude-opus-4-5")]);
+        let mut cache = TranscriptCache::default();
+        assert_eq!(cache.tail(&t).unwrap().model.as_deref(), Some("claude-opus-4-5"));
+        append(&t, &big_user(RETRY_BYTES as usize + 1000));
+        assert_eq!(cache.tail(&t).unwrap().model.as_deref(), Some("claude-opus-4-5"));
+        append(&t, &assistant(150_000, 0, 0));
+        append(&t, &assistant_model("claude-haiku-5-5"));
+        let tail = cache.tail(&t).unwrap();
+        assert_eq!(tail.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(tail.tokens, Some(20_000));
     }
 }
