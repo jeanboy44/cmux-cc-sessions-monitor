@@ -163,17 +163,80 @@ pub fn backup(path: &Path) -> anyhow::Result<PathBuf> {
     anyhow::bail!("no free backup name")
 }
 
+fn home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// `<home>/.config/magigent/config.toml`: where the config is written.
+pub fn config_path_in(home: &Path) -> PathBuf {
+    home.join(".config").join("magigent").join("config.toml")
+}
+
+/// The config location of the app's former name (read-only fallback).
+pub fn legacy_config_path_in(home: &Path) -> PathBuf {
+    home.join(".config").join("cmux-cc-monitor").join("config.toml")
+}
+
+/// Where the config is saved.
 pub fn default_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config")
-        .join("cmux-cc-monitor")
-        .join("config.toml")
+    config_path_in(&home())
+}
+
+/// The file to load: `new` when anything exists there (even a broken link, so
+/// a problem is reported rather than skipped), else `legacy` when it exists,
+/// else `new`. Never moves or deletes anything.
+pub fn resolve_load_path(new: &Path, legacy: &Path) -> PathBuf {
+    if std::fs::symlink_metadata(new).is_err() && std::fs::symlink_metadata(legacy).is_ok() {
+        legacy.to_path_buf()
+    } else {
+        new.to_path_buf()
+    }
+}
+
+/// The file to load at startup (see [`resolve_load_path`]).
+pub fn load_path() -> PathBuf {
+    let h = home();
+    resolve_load_path(&config_path_in(&h), &legacy_config_path_in(&h))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_paths_use_magigent_with_legacy_beside() {
+        let home = Path::new("/h");
+        assert_eq!(config_path_in(home), Path::new("/h/.config/magigent/config.toml"));
+        assert_eq!(legacy_config_path_in(home), Path::new("/h/.config/cmux-cc-monitor/config.toml"));
+    }
+
+    #[test]
+    fn legacy_config_is_read_when_new_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = config_path_in(dir.path());
+        let old = legacy_config_path_in(dir.path());
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "pr_poll_seconds = 77\n").unwrap();
+        let load = resolve_load_path(&new, &old);
+        assert_eq!(load, old);
+        assert_eq!(Config::load(&load).pr_poll_seconds, 77);
+        // saving goes to the new location; the legacy file is untouched
+        let mut c = Config::load(&load);
+        c.pr_poll_seconds = 88;
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        c.save(&new).unwrap();
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "pr_poll_seconds = 77\n");
+        assert_eq!(resolve_load_path(&new, &old), new, "new wins once it exists");
+        assert_eq!(Config::load(&new).pr_poll_seconds, 88);
+    }
+
+    #[test]
+    fn no_config_anywhere_loads_new_path_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = config_path_in(dir.path());
+        let old = legacy_config_path_in(dir.path());
+        assert_eq!(resolve_load_path(&new, &old), new);
+    }
 
     #[test]
     fn config_defaults_match_spec() {
@@ -457,6 +520,6 @@ mod tests {
 
     #[test]
     fn default_path_ends_with_expected_suffix() {
-        assert!(default_path().ends_with("cmux-cc-monitor/config.toml"));
+        assert!(default_path().ends_with("magigent/config.toml"));
     }
 }

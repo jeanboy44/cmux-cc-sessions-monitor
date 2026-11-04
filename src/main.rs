@@ -15,7 +15,7 @@ mod term;
 mod ui;
 mod worktree;
 
-const USAGE: &str = "cmux-cc-monitor — Claude Code sessions in cmux as tiles (hjkl move, Enter focus, p preview, i settings, q quit)";
+const USAGE: &str = "magigent — Claude Code sessions in cmux as tiles (hjkl move, Enter focus, p preview, i settings, q quit)";
 
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("-V" | "--version") => {
-            println!("cmux-cc-monitor {}", env!("CARGO_PKG_VERSION"));
+            println!("magigent {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Some(other) => {
@@ -33,7 +33,7 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(2);
         }
     }
-    let (config, load_error) = config::Config::load_checked(&config::default_path());
+    let (config, load_error) = config::Config::load_checked(&config::load_path());
     term::install_panic_hook();
     let mut guard = term::TerminalGuard::new()?;
     app::run(&mut guard.terminal, config, load_error)

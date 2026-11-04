@@ -19,7 +19,7 @@ use crate::merge::{apply_notifications, merge_sessions, select_refs};
 use crate::model::{Session, Status};
 use crate::pr::{pr_note, PrCache, PrLookup};
 use crate::source::claude_sessions::read_claude_sessions;
-use crate::source::context::{context_percent, default_ctx_dir, safe_id, TranscriptCache};
+use crate::source::context::{context_percent, default_ctx_dirs, safe_id, TranscriptCache};
 use crate::source::cmux::{Cmux, CmuxCli, CmuxSessionRef, SCREEN_LINES};
 use crate::source::hook_sessions::read_hook_sessions;
 use crate::status::resolve_status;
@@ -92,7 +92,7 @@ pub struct RefreshDeps<'a> {
     pub claude_dir: PathBuf,
     pub hook_path: PathBuf,
     /// Statusline context files (`<session_id>.json`).
-    pub ctx_dir: PathBuf,
+    pub ctx_dirs: Vec<PathBuf>,
     /// Claude transcripts (`<encoded cwd>/<session_id>.jsonl`).
     pub projects_dir: PathBuf,
     pub cmux: &'a dyn Cmux,
@@ -222,7 +222,7 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
         let t = transcript_for(s, &deps.projects_dir);
         let tail = t.as_deref().and_then(|p| transcripts.tail(p));
         s.ctx_percent = context_percent(
-            &deps.ctx_dir,
+            &deps.ctx_dirs,
             &s.id,
             tail.as_ref(),
             deps.config.context_limit_tokens,
@@ -258,7 +258,7 @@ pub fn spawn_refresh(
                 let deps = RefreshDeps {
                     claude_dir: default_claude_dir(),
                     hook_path: default_hook_path(),
-                    ctx_dir: default_ctx_dir(),
+                    ctx_dirs: default_ctx_dirs(),
                     projects_dir: default_projects_dir(),
                     cmux: &cmux,
                     config: cfg,
@@ -362,7 +362,7 @@ mod tests {
         RefreshDeps {
             claude_dir: dir.join("sessions"),
             hook_path: dir.join("hooks.json"),
-            ctx_dir: dir.join("ctx"),
+            ctx_dirs: vec![dir.join("ctx")],
             projects_dir: dir.join("projects"),
             cmux,
             config: Config::default(),
@@ -645,8 +645,8 @@ mod tests {
         let cmux = FakeCmux::new(vec![cref("a", true), cref("b", true), cref("c", true)]);
         let d = deps(dir.path(), &cmux);
         // a: fresh statusline file; b: transcript under the projects dir (encoded cwd); c: nothing
-        std::fs::create_dir_all(&d.ctx_dir).unwrap();
-        std::fs::write(d.ctx_dir.join("a.json"), r#"{"session_id":"a","used_percentage":72}"#).unwrap();
+        std::fs::create_dir_all(&d.ctx_dirs[0]).unwrap();
+        std::fs::write(d.ctx_dirs[0].join("a.json"), r#"{"session_id":"a","used_percentage":72}"#).unwrap();
         let proj = d.projects_dir.join("-home-user-b");
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(
@@ -674,8 +674,8 @@ mod tests {
         let cmux = FakeCmux::new(vec![cref("a", true), cref("b", true), cref("c", true)]);
         let d = deps(dir.path(), &cmux);
         // a: fresh statusline file and a transcript; b: transcript only; c: nothing
-        std::fs::create_dir_all(&d.ctx_dir).unwrap();
-        std::fs::write(d.ctx_dir.join("a.json"), r#"{"session_id":"a","used_percentage":72}"#).unwrap();
+        std::fs::create_dir_all(&d.ctx_dirs[0]).unwrap();
+        std::fs::write(d.ctx_dirs[0].join("a.json"), r#"{"session_id":"a","used_percentage":72}"#).unwrap();
         for (id, model) in [("a", "claude-haiku-5-5"), ("b", "claude-opus-4-5")] {
             let proj = d.projects_dir.join(format!("-home-user-{id}"));
             std::fs::create_dir_all(&proj).unwrap();

@@ -1,7 +1,8 @@
 //! Context-window usage of a session, as a percentage (0..=100).
 //!
 //! Primary source: the statusline script writes
-//! `~/.cache/cmux-cc-monitor/ctx/<session_id>.json` with
+//! `~/.cache/magigent/ctx/<session_id>.json` (or the former
+//! `~/.cache/cmux-cc-monitor/ctx/`; the freshest valid file wins) with
 //! `{"session_id": "...", "used_percentage": NN}`; it is used only while the
 //! file is fresh (mtime within the configured age). Fallback: the last
 //! `message.usage` of the session transcript (only its last [`TAIL_BYTES`]
@@ -27,9 +28,17 @@ pub const RETRY_BYTES: u64 = 1024 * 1024;
 /// Context files larger than this are not ours (or broken): ignored.
 pub const MAX_CTX_FILE_BYTES: u64 = 4096;
 
-/// Default directory of the statusline context files.
-pub fn default_ctx_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".cache").join("cmux-cc-monitor").join("ctx")
+/// Directories of the statusline context files under `home`: the current one
+/// first, then the app's former name (existing statusline scripts keep
+/// writing there).
+pub fn ctx_dirs_in(home: &Path) -> Vec<PathBuf> {
+    let cache = home.join(".cache");
+    vec![cache.join("magigent").join("ctx"), cache.join("cmux-cc-monitor").join("ctx")]
+}
+
+/// Default directories of the statusline context files.
+pub fn default_ctx_dirs() -> Vec<PathBuf> {
+    ctx_dirs_in(&dirs::home_dir().unwrap_or_default())
 }
 
 /// A session id that is safe to use as a file name.
@@ -45,7 +54,20 @@ fn percent(v: f64) -> Option<f32> {
 /// `used_percentage` from `<dir>/<session_id>.json`, when the file is at most
 /// `max_age` old at `now` (an mtime in the future counts as fresh). A
 /// `session_id` in the file that names another session rejects it.
+#[cfg(test)]
 pub fn read_ctx_file(dir: &Path, session_id: &str, now: SystemTime, max_age: Duration) -> Option<f32> {
+    read_ctx_entry(dir, session_id, now, max_age).map(|(_, p)| p)
+}
+
+/// [`read_ctx_file`] over several directories: the freshest valid file wins.
+pub fn read_ctx_files<P: AsRef<Path>>(dirs: &[P], session_id: &str, now: SystemTime, max_age: Duration) -> Option<f32> {
+    dirs.iter()
+        .filter_map(|d| read_ctx_entry(d.as_ref(), session_id, now, max_age))
+        .max_by_key(|(m, _)| *m)
+        .map(|(_, p)| p)
+}
+
+fn read_ctx_entry(dir: &Path, session_id: &str, now: SystemTime, max_age: Duration) -> Option<(SystemTime, f32)> {
     if !safe_id(session_id) {
         return None;
     }
@@ -65,7 +87,7 @@ pub fn read_ctx_file(dir: &Path, session_id: &str, now: SystemTime, max_age: Dur
             return None;
         }
     }
-    percent(v.get("used_percentage")?.as_f64()?)
+    Some((mtime, percent(v.get("used_percentage")?.as_f64()?)?))
 }
 
 /// Context tokens of a usage record; `None` when a counted field is not a
@@ -236,14 +258,14 @@ impl TranscriptCache {
 /// Context usage of one session: the fresh statusline file, else the
 /// transcript tail's usage, else `None`.
 pub fn context_percent(
-    ctx_dir: &Path,
+    ctx_dirs: &[PathBuf],
     session_id: &str,
     tail: Option<&TranscriptTail>,
     limit: u64,
     max_age: Duration,
     now: SystemTime,
 ) -> Option<f32> {
-    read_ctx_file(ctx_dir, session_id, now, max_age).or_else(|| tail?.usage_percent(limit))
+    read_ctx_files(ctx_dirs, session_id, now, max_age).or_else(|| tail?.usage_percent(limit))
 }
 
 #[cfg(test)]
@@ -262,6 +284,43 @@ mod tests {
 
     fn mtime(p: &Path) -> SystemTime {
         std::fs::metadata(p).unwrap().modified().unwrap()
+    }
+
+    #[test]
+    fn ctx_dirs_are_magigent_first_then_legacy() {
+        let home = Path::new("/h");
+        assert_eq!(
+            ctx_dirs_in(home),
+            vec![PathBuf::from("/h/.cache/magigent/ctx"), PathBuf::from("/h/.cache/cmux-cc-monitor/ctx")]
+        );
+    }
+
+    #[test]
+    fn legacy_ctx_dir_is_read_when_new_has_no_file() {
+        let home = tempfile::tempdir().unwrap();
+        let dirs = ctx_dirs_in(home.path());
+        std::fs::create_dir_all(&dirs[1]).unwrap();
+        let p = write_ctx(&dirs[1], "s", r#"{"session_id":"s","used_percentage":33}"#);
+        assert_eq!(read_ctx_files(&dirs, "s", mtime(&p), FRESH), Some(33.0));
+        assert_eq!(read_ctx_files(&dirs, "other", mtime(&p), FRESH), None);
+    }
+
+    #[test]
+    fn freshest_valid_ctx_file_wins_across_dirs() {
+        let home = tempfile::tempdir().unwrap();
+        let dirs = ctx_dirs_in(home.path());
+        for d in &dirs {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let old = write_ctx(&dirs[0], "s", r#"{"used_percentage":10}"#);
+        let f = std::fs::File::options().write(true).open(&old).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(100)).unwrap();
+        let newer = write_ctx(&dirs[1], "s", r#"{"used_percentage":20}"#);
+        let now = mtime(&newer);
+        assert_eq!(read_ctx_files(&dirs, "s", now, FRESH), Some(20.0), "legacy is fresher");
+        // an invalid fresher file does not shadow a valid older one
+        write_ctx(&dirs[1], "s", "{{{");
+        assert_eq!(read_ctx_files(&dirs, "s", SystemTime::now(), FRESH), Some(10.0));
     }
 
     #[test]
@@ -430,13 +489,13 @@ mod tests {
         let m = mtime(&p);
         let mut cache = TranscriptCache::default();
         let tail = cache.tail(&t);
-        assert_eq!(context_percent(dir.path(), "s", tail.as_ref(), 200_000, FRESH, m), Some(80.0));
+        assert_eq!(context_percent(&[dir.path().to_path_buf()], "s", tail.as_ref(), 200_000, FRESH, m), Some(80.0));
         let stale = m + FRESH + Duration::from_secs(60);
-        assert_eq!(context_percent(dir.path(), "s", tail.as_ref(), 200_000, FRESH, stale), Some(25.0));
-        assert_eq!(context_percent(dir.path(), "s", None, 200_000, FRESH, stale), None);
+        assert_eq!(context_percent(&[dir.path().to_path_buf()], "s", tail.as_ref(), 200_000, FRESH, stale), Some(25.0));
+        assert_eq!(context_percent(&[dir.path().to_path_buf()], "s", None, 200_000, FRESH, stale), None);
         let none = cache.tail(&dir.path().join("none"));
         assert_eq!(none, None, "missing transcript");
-        assert_eq!(context_percent(dir.path(), "zz", none.as_ref(), 200_000, FRESH, m), None);
+        assert_eq!(context_percent(&[dir.path().to_path_buf()], "zz", none.as_ref(), 200_000, FRESH, m), None);
     }
 
     fn assistant_model(model: &str) -> String {

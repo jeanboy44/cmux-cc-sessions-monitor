@@ -1,6 +1,6 @@
 [package]
-name = "cmux-cc-monitor"
-version = "0.0.2"
+name = "magigent"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
 description = "A ratatui TUI that shows Claude Code sessions running in cmux"
