@@ -797,12 +797,12 @@ mod tests {
             }
             // small is a clear little shape, never a stray dot
             assert!(s.lit_cells >= 2.0, "{theme:?}: small paints {} cells", s.lit_cells);
-            // normal is no longer the old crowd of cells (fire breathes
-            // farther now: its normal is thinner but about as many cells)
-            // Lightning is exempt: its Normal is four thin bolts by request
-            // (the old Normal was one or two), still well under its Big
+            // normal is no longer the old crowd of cells. Fire is exempt: its
+            // Normal was boosted back to a full flame by request (still well
+            // under its Big), as is Lightning, whose Normal is four thin bolts
+            // by request (the old Normal was one or two)
             let cap = match theme {
-                Theme::Fire => 1.0,
+                Theme::Fire => 2.1,
                 Theme::Lightning => f32::INFINITY,
                 Theme::Water | Theme::Poison => 0.6,
             };
@@ -821,14 +821,22 @@ mod tests {
         let (ls, ln, lb) = (len(&s), len(&n), len(&b));
         println!("fire length S {ls:.2} N {ln:.2} B {lb:.2}; rows S {} N {} B {}; dots S {:.1} N {:.1} B {:.1}", s.max_height, n.max_height, b.max_height, s.dots, n.dots, b.dots);
         assert!((2.5..=4.0).contains(&ls), "small flame {ls} columns");
-        assert!((4.5..=7.0).contains(&ln), "normal flame {ln} columns");
+        assert!((5.5..=7.5).contains(&ln), "normal flame {ln} columns");
         assert!(lb >= 8.0, "big flame {lb} columns");
         assert!(ls < ln - 1.5 && ln - 1.5 < lb - 2.0, "length steps {ls} {ln} {lb}");
-        assert!(s.max_height <= 2 && n.max_height <= 3 && b.max_height <= 4, "rows {} {} {}", s.max_height, n.max_height, b.max_height);
+        assert!(s.max_height <= 2 && n.max_height == 3 && b.max_height <= 4, "rows {} {} {}", s.max_height, n.max_height, b.max_height);
         assert!(s.height < n.height && n.height < b.height, "rows {} < {} < {}", s.height, n.height, b.height);
-        // the old normal cone painted 15.7 dots a frame and 2.47 rows
-        assert!(n.dots <= 0.8 * 15.7 && n.height <= 2.47 - 0.4, "normal is smaller: {} dots, {} rows", n.dots, n.height);
-        assert!(s.dots * 1.6 < n.dots && n.dots * 4.0 < b.dots, "dots {} {} {}", s.dots, n.dots, b.dots);
+        // normal is a full flame (about twice the thin 6-cell jet it was),
+        // clearly stronger than the water and poison Normal, well under Big
+        assert!((10.0..=14.0).contains(&n.cells), "normal paints {} cells a frame", n.cells);
+        for other in [Theme::Water, Theme::Poison] {
+            let o = level_metrics(other, Magic::Normal);
+            assert!(n.cells >= 1.5 * o.cells, "fire normal {} cells vs {other:?} {}", n.cells, o.cells);
+        }
+        assert!(s.dots * 1.6 < n.dots && n.dots * 2.5 < b.dots, "dots {} {} {}", s.dots, n.dots, b.dots);
+        // the small spirit's normal flame gets the same boost
+        let xn = level_metrics_for(Size::XS, STD_COLS, Theme::Fire, Magic::Normal);
+        assert!(xn.cells >= 8.0, "XS normal paints {} cells a frame", xn.cells);
     }
 
     /// Centre (sub-pixels) of the magic area of a size-S spirit with a
@@ -2142,11 +2150,12 @@ mod tests {
     /// and poison frames casting Small or Normal magic (entries 1-3, 5, 7,
     /// 41-43, 45, 47, 81-83, 85, 87). The slow Normal vortex re-captured
     /// the running water Normal frames 41-43 and 47, and the Big poison
-    /// skull the running poison Big frame 86. Every other frame is still the
+    /// skull the running poison Big frame 86, and the fuller fire Normal the
+    /// running fire Normal frames 1-3 and 7. Every other frame is still the
     /// pre-stage render.
     #[rustfmt::skip]
     const GOLDEN: [u64; 160] = [
-        0x3512407e8b3be050, 0x47bbd98251e8fd5a, 0xeb233e7a17abe412, 0xcdf749eca37373e8, 0xac4e96eb863a74c1, 0x11dad5b57fe9a68b, 0xfc108cd1c4fb901d, 0xfb9527393cb63a77,
+        0x3512407e8b3be050, 0xeb2592adbe6c0c33, 0x9a975b1f917a0f15, 0x7ddb91cb757afde7, 0xac4e96eb863a74c1, 0x11dad5b57fe9a68b, 0xfc108cd1c4fb901d, 0x9eeed11b458daf2b,
         0xe63151fe9a9034cc, 0x7a8ac6628408efd6, 0xe7c8d4a08b21e8dd, 0xa78308e8344bfc33, 0x593823a0b217a421, 0x3d7198f183a6f699, 0x6b7fdff6fb1ca679, 0x360e578976d6b475,
         0xef4f5337fe84e25d, 0x9491d9830f79a16d, 0xfade110e02982b10, 0xb3cae76b73ec5f64, 0x1bbf5c77d2e7c756, 0xb35def89ef4ff9c9, 0xe1361db73402ebb5, 0xae106a39f3427582,
         0xb07554c2511c01b3, 0x7c2ccbca01365697, 0x7324e7ce2c9bce28, 0xa4280c3f454ca467, 0x91eac22fa83d1bcf, 0xddb08feddde44f72, 0x7201e9d0b17de902, 0x0f45b90a4d2df7c3,
@@ -2896,10 +2905,11 @@ mod tests {
 
     /// Hashes of the XS golden frames (theme-major, then state, then
     /// `XS_GOLDEN_CASES`), captured when the standard card switched to the
-    /// redesigned 7 x 4 XS spirit; `SPIRIT_GOLDEN_PRINT=1` prints them.
+    /// redesigned 7 x 4 XS spirit (the fuller fire Normal re-captured the
+    /// running fire Normal frame 0); `SPIRIT_GOLDEN_PRINT=1` prints them.
     #[rustfmt::skip]
     const XS_GOLDEN: [u64; 60] = [
-        0x9551e9333745cd6e, 0xdf3e1a25a64d7685, 0xde5f3b842dbe0876, 0x8c4d12bcaade4c91, 0xe03014127d2a7d60, 0x4eceaf8677977634,
+        0x001ccb6a4925af98, 0xdf3e1a25a64d7685, 0xde5f3b842dbe0876, 0x8c4d12bcaade4c91, 0xe03014127d2a7d60, 0x4eceaf8677977634,
         0x76dae5d953ecc50b, 0xce3e1ea1af447b5e, 0xd0f87e8dcacd0112, 0xca2b781017ea0a19, 0x4a6c7b71d9234dc1, 0x3c78f4e14dd70080,
         0x51e58b4b661fe6da, 0x88ca151c2fea63a4, 0x10dbf51a4aa54620, 0xb5bc5303d1827c2c, 0xb8ba786841e73a6d, 0xbb733524326638ed,
         0xadf281763c8442a2, 0xd251b8529bb0014c, 0x80552ac87dd9d191, 0x7347d102f2e3a7d0, 0x526ac1823fd5c4b3, 0x8b62eaff1ff1d85b,

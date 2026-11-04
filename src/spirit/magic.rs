@@ -137,17 +137,18 @@ const EMBER_DRIFT: f32 = 2.0;
 /// Fire breath per magic level: (flame reach past the gap in sub-pixels,
 /// half height of the cone's end in sub-pixels, wave amplitude in
 /// sub-pixels, embers, smoke puffs). Small is a short steady jet about three
-/// columns long, one or two rows tall and without smoke; Normal about five
-/// to six columns, two (at most three) rows at its end; Big roars to the
-/// right edge of the room (the card's inner edge). The small spirit's
-/// flame is two, four and all the columns long, slimmer, with fewer embers.
+/// columns long, one or two rows tall and without smoke; Normal a full
+/// flame about six to seven columns long, three rows at its end, with a
+/// denser, hotter core (see `breath`); Big roars to the right edge of the
+/// room (the card's inner edge). The small spirit's flame is two, five and
+/// all the columns long, with fewer embers.
 fn breath_style(m: Magic, xs: bool) -> (f32, f32, f32, u32, u32) {
     match (m, xs) {
         (Magic::Small, false) => (6.2, 0.8, 0.35, 0, 0),
-        (Magic::Normal, false) => (9.3, 1.0, 0.55, 2, 1),
+        (Magic::Normal, false) => (11.6, 2.0, 0.55, 3, 2),
         (Magic::Big, false) => (f32::INFINITY, 4.6, 0.9, 7, 4),
         (Magic::Small, true) => (4.4, 0.7, 0.3, 0, 0),
-        (Magic::Normal, true) => (7.4, 1.1, 0.45, 1, 0),
+        (Magic::Normal, true) => (10.4, 2.0, 0.45, 2, 1),
         (Magic::Big, true) => (f32::INFINITY, 3.4, 0.7, 4, 2),
     }
 }
@@ -185,6 +186,8 @@ fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u6
     };
     // half height of the cone at distance `d` (dots) from its first column
     let hw = |d: f32| (0.1 + 0.42 * d).min(w_end);
+    // the Normal flame is a full, dense one with a hotter core
+    let full_boost = if ctx.magic == Magic::Normal { 0.15 } else { 0.0 };
 
     for k in 0..smokes {
         let key = ctx.seed ^ (k as u32).wrapping_mul(0x5A0C);
@@ -215,14 +218,14 @@ fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u6
             let dy = dy.min(1.0);
             let n = hf((x as u32).wrapping_mul(31).wrapping_add((y as u32).wrapping_mul(7)).wrapping_add(ctx.seed), ctx.t as u32);
             // densest along the middle of the jet, ragged at its edges
-            let dens = (0.5 + 0.45 * (std::f32::consts::PI * u).sin()) * (1.0 - 0.55 * dy) + 0.25 * (1.0 - dy);
+            let dens = (0.5 + 0.45 * (std::f32::consts::PI * u).sin()) * (1.0 - 0.55 * dy) + 0.25 * (1.0 - dy) + full_boost;
             // the end breaks up into tongues; the small spirit's cone is
             // solid (no ragged edges) and hotter, so it reads at its size
             let tip = u < 0.78 || n > (u - 0.78) * 2.6;
             if !centre && (!tip || (!ctx.xs && n > dens)) {
                 continue;
             }
-            let heat = if ctx.xs { (1.0 - 0.6 * dy) * (1.0 - 0.35 * u) } else { (1.0 - dy) * (1.0 - 0.55 * u) };
+            let heat = if ctx.xs { (1.0 - 0.6 * dy) * (1.0 - 0.35 * u) } else { (1.0 - dy) * (1.0 - 0.55 * u) } + full_boost;
             let col = if heat > 0.62 {
                 [255., 242., 168.]
             } else if heat > 0.4 {
