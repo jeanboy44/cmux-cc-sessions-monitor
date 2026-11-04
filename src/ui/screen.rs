@@ -94,7 +94,7 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool, tick: u
             let Some(s) = app.sessions.get(idx) else { break };
             let selected = idx == app.selected;
             if compact {
-                render_compact(f, Rect { height: 1, ..*row_rect }, s, &app.config, selected);
+                render_compact(f, Rect { height: 1, ..*row_rect }, s, &app.config, selected, tick);
             } else {
                 let rect = cell_rect(*row_rect, cols, col, 0);
                 app.spirits_visible |= rect.width >= CARD_W && rect.height >= CARD_H;

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::branch::{BranchCache, BranchTarget, BranchTargets};
 use crate::config::Config;
-use crate::merge::{merge_sessions, select_refs};
+use crate::merge::{apply_notifications, merge_sessions, select_refs};
 use crate::model::{Session, Status};
 use crate::pr::{pr_note, PrCache, PrLookup};
 use crate::source::claude_sessions::read_claude_sessions;
@@ -153,6 +153,10 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
     for s in sessions.iter_mut() {
         s.window_id = tree.as_ref().and_then(|t| t.window_of(&s.surface_id)).map(String::from);
     }
+    // Unread completion notifications: one `list-notifications` per round.
+    // A failing call counts as "none" (the blink stops) and never touches
+    // the sessions or the footer.
+    apply_notifications(&mut sessions, &deps.cmux.notifications().unwrap_or_default());
     let window_order = tree.as_ref().map(|t| t.window_order.clone()).unwrap_or_default();
     let current_window = tree
         .as_ref()
@@ -527,7 +531,47 @@ mod tests {
         write_claude(&dir.path().join("sessions"), 11, "live", "busy");
         let cmux = FakeCmux::new(vec![cref("live", true)]);
         build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
-        assert_eq!(cmux.calls(), vec!["sessions".to_string(), "tree".to_string()]);
+        assert_eq!(cmux.calls(), vec!["sessions", "tree", "notifications"]);
+    }
+
+    fn note(surface: &str, unread: bool) -> crate::source::cmux::Notification {
+        crate::source::cmux::Notification {
+            id: format!("n-{surface}"),
+            workspace_id: "ws".into(),
+            surface_id: surface.into(),
+            unread,
+            title: "t".into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            workspace_title: String::new(),
+        }
+    }
+
+    #[test]
+    fn build_snapshot_marks_unread_notifications_with_one_call_per_round() {
+        let dir = setup();
+        let sd = dir.path().join("sessions");
+        write_claude(&sd, 11, "a", "busy");
+        write_claude(&sd, 12, "b", "idle");
+        write_claude(&sd, 13, "c", "idle");
+        let mut cmux = FakeCmux::new(vec![cref("a", true), cref("b", true), cref("c", true)]);
+        cmux.notifications_result = Ok(vec![note("SF-A", true), note("sf-b", false), note("sf-elsewhere", true)]);
+        let first = build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
+        let unread: Vec<(&str, bool)> = first.sessions.iter().map(|s| (s.id.as_str(), s.unread_notification)).collect();
+        assert_eq!(unread, [("a", true), ("b", false), ("c", false)]);
+        let count = |c: &FakeCmux| c.calls().iter().filter(|x| *x == "notifications").count();
+        assert_eq!(count(&cmux), 1, "one list per round, not per session");
+        let second = build_snapshot(&deps(dir.path(), &cmux), &first);
+        assert_eq!(count(&cmux), 2);
+        assert!(second.sessions[0].unread_notification);
+
+        // the list fails: sessions stay as they are, only the cue is off
+        cmux.notifications_result = Err("timed out".into());
+        let third = build_snapshot(&deps(dir.path(), &cmux), &second);
+        assert_eq!(ids(&third), vec!["a", "b", "c"]);
+        let statuses: Vec<Status> = third.sessions.iter().map(|s| s.status).collect();
+        assert_eq!(statuses, [Status::Running, Status::Idle, Status::Idle]);
+        assert!(third.sessions.iter().all(|s| !s.unread_notification));
+        assert_eq!(third.message, None, "no footer note for the notification list");
     }
 
     #[test]

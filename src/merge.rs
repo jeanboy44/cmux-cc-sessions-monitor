@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::model::{Session, Status};
 use crate::source::claude_sessions::ClaudeSessionRecord;
-use crate::source::cmux::{CmuxSessionRef, TreeLayout};
+use crate::source::cmux::{CmuxSessionRef, Notification, TreeLayout};
 use crate::source::hook_sessions::HookRecord;
 use crate::status::resolve_status;
 
@@ -110,6 +110,7 @@ fn build(c: Option<&ClaudeSessionRecord>, h: Option<&HookRecord>, x: &CmuxSessio
         window_id: None,
         ctx_percent: None,
         model: None,
+        unread_notification: false,
     }
 }
 
@@ -232,10 +233,24 @@ pub fn merge_sessions(
     out
 }
 
+/// Sets [`Session::unread_notification`] from the cmux notification list:
+/// true when any unread notification belongs to the session's surface (ids
+/// compare case-insensitively; cmux prints them in either case).
+/// Notifications for surfaces without a session are ignored, and every other
+/// session is cleared, so a read (or a failed, empty) list stops the blink.
+pub fn apply_notifications(sessions: &mut [Session], notes: &[Notification]) {
+    let unread: HashSet<String> =
+        notes.iter().filter(|n| n.unread).map(|n| n.surface_id.to_ascii_uppercase()).collect();
+    for s in sessions.iter_mut() {
+        s.unread_notification = unread.contains(&s.surface_id.to_ascii_uppercase());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::Status;
+    use crate::source::cmux::Notification;
     use std::path::PathBuf;
     use std::time::UNIX_EPOCH;
 
@@ -602,5 +617,42 @@ mod tests {
         let later = merge_sessions(&[], &[], &[], now() + Duration::from_secs(30), RET, &done, Some(&tab));
         assert_eq!(later.len(), 1, "still within retention");
         assert!(merge_sessions(&[], &[], &[], now() + RET, RET, &later, Some(&tab)).is_empty());
+    }
+
+    fn note(surface: &str, unread: bool) -> Notification {
+        Notification {
+            id: format!("n-{surface}-{unread}"),
+            workspace_id: "w".into(),
+            surface_id: surface.into(),
+            unread,
+            title: "t".into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            workspace_title: String::new(),
+        }
+    }
+
+    #[test]
+    fn notifications_mark_sessions_by_surface() {
+        let c = [cr("s1", 10, "busy", Some(1)), cr("s2", 11, "idle", Some(2)), cr("s3", 12, "idle", Some(3))];
+        let x = [cx_at("s1", "f1", true, None), cx_at("s2", "f2", true, None), cx_at("s3", "f3", true, None)];
+        let mut out = merge_sessions(&c, &[], &x, now(), RET, &[], None);
+        assert!(out.iter().all(|s| !s.unread_notification), "merge alone sets nothing");
+        let notes = [
+            note("F1", true),     // case-insensitive surface match
+            note("f2", false),    // read: no cue
+            note("f3", false),    // several for one surface: unread if any is unread
+            note("f3", true),
+            note("f-gone", true), // no session on that surface: ignored
+        ];
+        apply_notifications(&mut out, &notes);
+        let flags: Vec<(&str, bool)> = out.iter().map(|s| (s.id.as_str(), s.unread_notification)).collect();
+        assert_eq!(flags, [("s1", true), ("s2", false), ("s3", true)]);
+        assert_eq!(out.len(), 3, "unknown surfaces add no session");
+        // read later (or the list failed = empty): the cue goes away
+        apply_notifications(&mut out, &[note("f1", false)]);
+        assert!(out.iter().all(|s| !s.unread_notification));
+        apply_notifications(&mut out, &notes);
+        apply_notifications(&mut out, &[]);
+        assert!(out.iter().all(|s| !s.unread_notification));
     }
 }

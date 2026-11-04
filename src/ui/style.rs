@@ -15,6 +15,9 @@ use crate::model::Status;
 /// Thin rounded line frame: `╭─╮ │ │ ╰─╯`.
 pub const BORDER: border::Set = border::ROUNDED;
 
+/// Heavy frame `┏━┓ ┃ ┃ ┗━┛` an unread card shows on the lit half of its blink.
+pub const UNREAD_BORDER: border::Set = border::THICK;
+
 /// Menu / selection cursor glyph.
 pub const CURSOR: &str = "▶";
 
@@ -31,6 +34,13 @@ pub const FPS: u64 = 15;
 /// blue") of cmux's settings schema. No status colour is blue-dominant, so
 /// blue always means "selected".
 pub const SELECTED: Color = Color::Rgb(0x4C, 0x8D, 0xFF);
+/// Unread-notification blue: macOS system blue `#0A84FF`, a deeper, more
+/// saturated blue than [`SELECTED`] so the blinking border of an unread card
+/// is not mistaken for the selection. It is only ever shown blinking.
+pub const NOTIFY_BLUE: Color = Color::Rgb(0x0A, 0x84, 0xFF);
+/// Unread blink period in ticks: 16 at [`FPS`] = about 1.07 s (≈ 0.94 Hz),
+/// lit for the first half.
+pub const BLINK_PERIOD: u64 = 16;
 /// Background of the HUD's ` ◆ SESSIONS n ` badge (the original game yellow).
 pub const HUD_BADGE: Color = Color::Rgb(255, 236, 64);
 /// Warning red (PR conflicts, alert glyphs).
@@ -78,6 +88,12 @@ pub fn status_icon(status: Status) -> &'static str {
         Status::Done => "✓",
         Status::Unknown => "?",
     }
+}
+
+/// Whether an unread card's blink is in its lit half on this tick (≈ 1 Hz).
+/// Pure modulo, so any tick (including `u64::MAX`) is fine.
+pub fn blink_on(tick: u64) -> bool {
+    tick % BLINK_PERIOD < BLINK_PERIOD / 2
 }
 
 /// Whether the blinking cursor is visible on this tick.
@@ -170,6 +186,21 @@ mod tests {
         assert!((0..6).all(cursor_visible));
         assert!(!(6..12).any(cursor_visible));
         assert!(cursor_visible(12));
+    }
+
+    #[test]
+    fn unread_blink_is_about_one_hertz_and_safe_at_any_tick() {
+        // 10 s of frames at FPS: about 10 on/off cycles = about 20 phase changes
+        let ticks = FPS * 10;
+        let changes = (1..ticks).filter(|&t| blink_on(t) != blink_on(t - 1)).count();
+        assert!((16..=24).contains(&changes), "changes in 10 s = {changes}");
+        let lit = (0..ticks).filter(|&t| blink_on(t)).count() as u64;
+        assert!(lit * 10 >= ticks * 4 && lit * 10 <= ticks * 6, "about half the time on: {lit}/{ticks}");
+        assert!(blink_on(0), "a new notification lights up at once");
+        // wraps cleanly at the end of the tick range
+        let tail: Vec<bool> = (u64::MAX - 40..=u64::MAX).map(blink_on).collect();
+        assert!(tail.contains(&true) && tail.contains(&false));
+        assert_eq!(BLINK_PERIOD % 2, 0, "equal on and off halves");
     }
 
     #[test]

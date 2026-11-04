@@ -499,6 +499,9 @@ mod tests {
         fn focus(&self, w: &str, s: &str) -> anyhow::Result<()> {
             self.0.focus(w, s)
         }
+        fn notifications(&self) -> anyhow::Result<Vec<crate::source::cmux::Notification>> {
+            self.0.notifications()
+        }
         fn read_screen(&self, w: &str, s: &str, lines: u16) -> anyhow::Result<String> {
             if s == "sf-boom" {
                 panic!("read exploded");

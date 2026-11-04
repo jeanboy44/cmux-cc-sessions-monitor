@@ -56,6 +56,9 @@ pub struct Session {
     /// Model of the last main-chain assistant reply in the transcript
     /// (e.g. `claude-opus-4-5`), `None` when unknown.
     pub model: Option<String>,
+    /// cmux holds an unread notification for this session's surface
+    /// (`cmux list-notifications`); the card border blinks while it does.
+    pub unread_notification: bool,
 }
 
 /// Claude model family; each one maps to a spirit element in the config.

@@ -541,6 +541,7 @@ pub(crate) fn fake_session(id: &str, status: Status) -> Session {
         window_id: None,
         ctx_percent: None,
         model: None,
+        unread_notification: false,
     }
 }
 
@@ -583,6 +584,9 @@ mod tests {
         }
         fn read_screen(&self, _: &str, _: &str, _: u16) -> Result<String> {
             Ok(String::new())
+        }
+        fn notifications(&self) -> Result<Vec<crate::source::cmux::Notification>> {
+            Ok(vec![])
         }
     }
 
@@ -1015,6 +1019,43 @@ mod tests {
         let mut empty = App::new(Config::default());
         draw_at(&mut empty, 120, 40);
         assert_eq!(empty.frame_timeout(), IDLE_FRAME);
+
+        // Unread blink without any spirit on screen (preview list / compact
+        // cards): the slower idle redraw still shows every blink phase at
+        // least twice, so no extra wake-up is needed for it.
+        let half = Duration::from_millis(1000 * crate::ui::style::BLINK_PERIOD / 2 / FPS);
+        assert!(IDLE_FRAME * 2 <= half, "{IDLE_FRAME:?} vs half period {half:?}");
+        let phases: Vec<bool> =
+            (0..40u32).map(|i| crate::ui::style::blink_on(tick_at(t0, t0 + IDLE_FRAME * i))).collect();
+        let mut runs = vec![1usize];
+        for w in phases.windows(2) {
+            if w[0] == w[1] {
+                *runs.last_mut().unwrap() += 1;
+            } else {
+                runs.push(1);
+            }
+        }
+        assert!(runs.len() >= 8, "it blinks at the idle rate: {phases:?}");
+        assert!(runs[1..runs.len() - 1].iter().all(|&n| n >= 2), "no phase skipped: {runs:?}");
+        let mut app = app_with(2, 1);
+        app.sessions[0].unread_notification = true;
+        app.preview = true;
+        let dot = |app: &mut App, tick: u64| {
+            let buf = crate::ui::test_util::draw(150, 30, |f| screen::draw(f, app, tick, Instant::now()));
+            let area = buf.area;
+            (0..area.height)
+                .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+                .map(|p| buf[p].clone())
+                .filter(|c| c.symbol() == "●")
+                .map(|c| c.fg)
+                .collect::<Vec<_>>()
+        };
+        let on = (0..).find(|&t| crate::ui::style::blink_on(t)).unwrap();
+        let off = (0..).find(|&t| !crate::ui::style::blink_on(t)).unwrap();
+        assert_eq!(dot(&mut app, on), vec![crate::ui::style::NOTIFY_BLUE], "one unread dot");
+        assert!(!app.spirits_visible);
+        assert_eq!(app.frame_timeout(), IDLE_FRAME);
+        assert_eq!(dot(&mut app, off), vec![crate::ui::style::TEXT_DIM]);
 
         // the poll waits only for what is left of the frame, so drawing time does not slow the clock
         assert_eq!(poll_timeout(t0, t0 + Duration::from_millis(20), FRAME), FRAME - Duration::from_millis(20));

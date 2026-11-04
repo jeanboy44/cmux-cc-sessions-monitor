@@ -108,7 +108,7 @@ pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selecte
         return;
     }
     if area.width < CARD_W || area.height < CARD_H {
-        render_compact(f, area, s, cfg, selected);
+        render_compact(f, area, s, cfg, selected, tick);
         return;
     }
     let rect = Rect::new(area.x + (area.width - CARD_W) / 2, area.y, CARD_W, CARD_H);
@@ -116,6 +116,16 @@ pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selecte
     let mut block = style::window_block(style::status_color(s.status), selected);
     if done && !selected {
         block = block.border_style(Style::new().fg(style::DONE).add_modifier(Modifier::DIM));
+    }
+    // Unread cmux notification: on the lit half of the blink the frame turns
+    // heavy (and, unless selected, bold notify blue); the other half is the
+    // normal frame. A selected card keeps its selection blue throughout, so
+    // selected + unread shows both cues at once.
+    if s.unread_notification && style::blink_on(tick) {
+        block = block.border_set(style::UNREAD_BORDER);
+        if !selected {
+            block = block.border_style(Style::new().fg(style::NOTIFY_BLUE).add_modifier(Modifier::BOLD));
+        }
     }
     let inner = block.inner(rect);
     f.render_widget(Clear, rect);
@@ -143,9 +153,11 @@ pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selecte
     f.render_widget(para, text_area);
 }
 
-/// One-line card: `▶ name  STATUS  3h` (cursor only when selected). The
-/// name is kept first; elapsed, then the badge, are dropped when too narrow.
-pub fn render_compact(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool) {
+/// One-line card: `▶ name  STATUS  3h` (cursor only when selected; an
+/// unread notification puts a `●` right after the cursor that blinks notify
+/// blue / dim at `tick`). The name is kept first; elapsed, then the badge,
+/// are dropped when too narrow.
+pub fn render_compact(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool, tick: u64) {
     let area = area.intersection(f.area());
     if area.is_empty() {
         return;
@@ -156,7 +168,13 @@ pub fn render_compact(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, sele
     let mut avail = width;
     if width >= 3 {
         let mark = if selected { style::CURSOR } else { " " };
-        spans.push(Span::styled(format!("{mark} "), Style::new().fg(style::SELECTED).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(mark, Style::new().fg(style::SELECTED).add_modifier(Modifier::BOLD)));
+        if s.unread_notification {
+            let fg = if style::blink_on(tick) { style::NOTIFY_BLUE } else { style::TEXT_DIM };
+            spans.push(Span::styled("●", Style::new().fg(fg).add_modifier(Modifier::BOLD)));
+        } else {
+            spans.push(Span::raw(" "));
+        }
         avail -= 2;
     }
     let tag = format!(" {} ", style::status_tag(s.status));
@@ -304,6 +322,7 @@ mod tests {
             window_id: None,
             ctx_percent: None,
             model: None,
+            unread_notification: false,
         }
     }
 
@@ -700,6 +719,76 @@ mod tests {
         assert_eq!(buf[(0, 0)].fg, style::RUNNING);
     }
 
+    /// First tick with the unread blink on, and first with it off.
+    fn blink_ticks() -> (u64, u64) {
+        ((0..).find(|&t| style::blink_on(t)).unwrap(), (0..).find(|&t| !style::blink_on(t)).unwrap())
+    }
+
+    #[test]
+    fn unread_card_border_blinks_thick_blue_and_stops_when_read() {
+        assert_ne!(style::NOTIFY_BLUE, style::SELECTED, "unread blue differs from the selection blue");
+        let Color::Rgb(r, g, b) = style::NOTIFY_BLUE else { panic!("rgb") };
+        assert!(b > r && b > g, "unread colour is blue");
+        let (on, off) = blink_ticks();
+        for st in [Status::Running, Status::NeedsInput, Status::Idle, Status::Done, Status::Unknown] {
+            let plain = session("proj-a", st);
+            let unread = Session { unread_notification: true, ..plain.clone() };
+            let at = |s: &Session, t: u64| draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, &Config::default(), false, t));
+            let lit = at(&unread, on);
+            for (x, y, sym) in [(0, 0, "┏"), (CARD_W - 1, 5, "┃"), (5, CARD_H - 1, "━")] {
+                let c = &lit[(x, y)];
+                assert_eq!((c.symbol(), c.fg), (sym, style::NOTIFY_BLUE), "{st:?} on-phase at ({x},{y})");
+                assert!(c.modifier.contains(Modifier::BOLD) && !c.modifier.contains(Modifier::DIM), "{st:?}");
+            }
+            // off phase: exactly the normal border (thin, status colour, Done dimmed)
+            let dark = at(&unread, off);
+            let normal = at(&plain, off);
+            for (x, y) in [(0, 0), (CARD_W - 1, 5), (5, CARD_H - 1)] {
+                let (d, n) = (&dark[(x, y)], &normal[(x, y)]);
+                assert_eq!((d.symbol(), d.fg, d.modifier), (n.symbol(), n.fg, n.modifier), "{st:?} off-phase");
+            }
+            assert_eq!(normal[(0, 0)].symbol(), "╭");
+            // marked read: no blink at all
+            assert_eq!(at(&plain, on)[(0, 0)], normal[(0, 0)], "{st:?}: a read card never blinks");
+        }
+    }
+
+    #[test]
+    fn selected_unread_card_shows_both_cues() {
+        let (on, off) = blink_ticks();
+        for st in [Status::Running, Status::Idle, Status::Done] {
+            let s = Session { unread_notification: true, ..session("proj-a", st) };
+            let at = |t: u64| draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), true, t));
+            // selection: always bold cmux blue; unread: the frame turns thick on the beat
+            let (lit, dark) = (at(on), at(off));
+            assert_eq!((lit[(0, 0)].symbol(), lit[(0, 0)].fg), ("┏", style::SELECTED), "{st:?}");
+            assert_eq!((dark[(0, 0)].symbol(), dark[(0, 0)].fg), ("╭", style::SELECTED), "{st:?}");
+            assert!(lit[(0, 0)].modifier.contains(Modifier::BOLD) && dark[(0, 0)].modifier.contains(Modifier::BOLD));
+            // a selected card without notification never turns thick
+            let read = Session { unread_notification: false, ..s.clone() };
+            let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &read, &Config::default(), true, on));
+            assert_eq!(buf[(0, 0)].symbol(), "╭");
+        }
+    }
+
+    #[test]
+    fn compact_card_shows_unread_dot() {
+        let (on, off) = blink_ticks();
+        let s = Session { unread_notification: true, ..session("proj-a", Status::Done) };
+        let line = |s: &Session, selected: bool, t: u64| draw(30, 1, |f| render_compact(f, f.area(), s, &Config::default(), selected, t));
+        let buf = line(&s, false, on);
+        assert_eq!((buf[(1, 0)].symbol(), buf[(1, 0)].fg), ("●", style::NOTIFY_BLUE));
+        assert_eq!(rows(&buf)[0].trim_end(), " ●proj-a  DONE  3h");
+        let buf = line(&s, false, off);
+        assert_eq!((buf[(1, 0)].symbol(), buf[(1, 0)].fg), ("●", style::TEXT_DIM));
+        // selected + unread: cursor and dot
+        let buf = line(&s, true, on);
+        assert_eq!(rows(&buf)[0].trim_end(), "▶●proj-a  DONE  3h");
+        // read: back to the plain layout
+        let read = Session { unread_notification: false, ..s.clone() };
+        assert_eq!(rows(&line(&read, false, on))[0].trim_end(), "  proj-a  DONE  3h");
+    }
+
     #[test]
     fn done_card_is_dimmed() {
         let s = session("proj-a", Status::Done);
@@ -728,7 +817,7 @@ mod tests {
     fn compact_card_layout_and_truncation() {
         let s = session("proj-a", Status::Running);
         let line = |w: u16, selected: bool, cfg: &Config| -> String {
-            rows(&draw(w, 1, |f| render_compact(f, f.area(), &s, cfg, selected)))[0].trim_end().to_string()
+            rows(&draw(w, 1, |f| render_compact(f, f.area(), &s, cfg, selected, 0)))[0].trim_end().to_string()
         };
         assert_eq!(line(30, true, &Config::default()), "▶ proj-a  RUN  3h");
         assert_eq!(line(30, false, &Config::default()), "  proj-a  RUN  3h");
@@ -738,9 +827,9 @@ mod tests {
         assert_eq!(line(6, false, &Config::default()), "  pro…");
         assert_eq!(line(2, false, &Config::default()), "p…");
         assert_eq!(line(1, false, &Config::default()), "…");
-        let buf = draw(30, 1, |f| render_compact(f, f.area(), &s, &Config::default(), true));
+        let buf = draw(30, 1, |f| render_compact(f, f.area(), &s, &Config::default(), true, 0));
         assert_eq!(buf[(2, 0)].fg, style::SELECTED, "selected name is blue");
-        let buf = draw(30, 1, |f| render_compact(f, f.area(), &s, &Config::default(), false));
+        let buf = draw(30, 1, |f| render_compact(f, f.area(), &s, &Config::default(), false, 0));
         assert_eq!(buf[(2, 0)].fg, style::RUNNING);
     }
 
@@ -756,11 +845,12 @@ mod tests {
 
     #[test]
     fn zero_and_tiny_areas_do_not_panic() {
-        let s = session("프로젝트-아주-긴-이름", Status::Idle);
+        // unread too: the blinking border and dot must not change the bounds
+        let s = Session { unread_notification: true, ..session("프로젝트-아주-긴-이름", Status::Idle) };
         for (w, h) in [(0, 0), (1, 1), (2, 1), (5, 2), (0, 30), (80, 0), (CARD_W - 1, CARD_H), (CARD_W, CARD_H - 1)] {
             for selected in [false, true] {
                 draw(w, h, |f| render_card(f, f.area(), &s, &Config::default(), selected, 0));
-                draw(w, h, |f| render_compact(f, f.area(), &s, &Config::default(), selected));
+                draw(w, h, |f| render_compact(f, f.area(), &s, &Config::default(), selected, 0));
                 // rect partly outside the frame
                 draw(w, h, |f| render_card(f, Rect::new(w.saturating_sub(1), h.saturating_sub(1), CARD_W, CARD_H), &s, &Config::default(), selected, 0));
                 draw(w, h, |f| render_card(f, Rect::new(u16::MAX - 5, u16::MAX - 5, CARD_W, CARD_H), &s, &Config::default(), selected, 0));
@@ -777,7 +867,7 @@ mod tests {
         for r in rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &all_extras(), true, 0))) {
             println!("{r}");
         }
-        for r in rows(&draw(30, 1, |f| render_compact(f, f.area(), &s, &Config::default(), true))) {
+        for r in rows(&draw(30, 1, |f| render_compact(f, f.area(), &s, &Config::default(), true, 0))) {
             println!("{r}");
         }
     }

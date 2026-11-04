@@ -136,6 +136,93 @@ fn tree_item(line: &str) -> Option<(&'static str, String)> {
     ok.then(|| (kind, id.to_ascii_uppercase()))
 }
 
+/// One entry of `cmux list-notifications`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub id: String,
+    pub workspace_id: String,
+    pub surface_id: String,
+    /// The read column says `unread`.
+    pub unread: bool,
+    pub title: String,
+    /// Raw ISO-8601 time (`2026-01-01T00:00:00Z`).
+    pub timestamp: String,
+    pub workspace_title: String,
+}
+
+/// Whether a field looks like the notification time: `YYYY-MM-DDTHH:MM:SS…Z`.
+fn is_timestamp(field: &str) -> bool {
+    let b = field.as_bytes();
+    b.len() >= 20
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[13] == b':'
+        && b.ends_with(b"Z")
+        && field.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'-' | b':' | b'.' | b'T' | b'Z'))
+}
+
+/// Whether a line starts a notification record: `index:id|ws|surface|read|…`.
+/// Anything else continues the previous record's body (bodies may hold newlines).
+fn starts_record(line: &str) -> bool {
+    let mut f = line.split('|');
+    let head = f.next().unwrap_or_default();
+    let index_ok = match head.split_once(':') {
+        Some((i, id)) => !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()) && !id.is_empty(),
+        None => false,
+    };
+    index_ok && matches!(f.nth(2), Some("read" | "unread"))
+}
+
+/// Parses `cmux list-notifications` output, one record per
+/// `index:id|workspace|surface|read|app|title|body|timestamp|workspace title`.
+/// The body may contain `|` and newlines, so the leading five fields are taken
+/// from the left and the timestamp is the rightmost field that looks like one;
+/// the workspace title is everything after it. The title is the field after
+/// the app. Records with a bad read column, empty ids or no timestamp are
+/// skipped, as is any text before the first record.
+pub fn parse_notifications(output: &str) -> Vec<Notification> {
+    let mut records: Vec<String> = Vec::new();
+    for line in output.lines() {
+        if starts_record(line) {
+            records.push(line.to_string());
+        } else if let Some(last) = records.last_mut() {
+            last.push('\n');
+            last.push_str(line);
+        }
+    }
+    records.iter().filter_map(|r| parse_notification(r)).collect()
+}
+
+fn parse_notification(record: &str) -> Option<Notification> {
+    let mut head = record.splitn(6, '|');
+    let (_, id) = head.next()?.split_once(':')?;
+    let workspace_id = head.next()?;
+    let surface_id = head.next()?;
+    let unread = match head.next()? {
+        "unread" => true,
+        "read" => false,
+        _ => return None,
+    };
+    let _app = head.next()?;
+    let rest: Vec<&str> = head.next()?.split('|').collect();
+    // rest = title | body… | timestamp | workspace title…
+    let ts = (1..rest.len()).rev().find(|&i| is_timestamp(rest[i]))?;
+    if id.is_empty() || workspace_id.is_empty() || surface_id.is_empty() {
+        return None;
+    }
+    Some(Notification {
+        id: id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        surface_id: surface_id.to_string(),
+        unread,
+        title: rest[0].to_string(),
+        timestamp: rest[ts].to_string(),
+        workspace_title: rest[ts + 1..].join("|"),
+    })
+}
+
 pub trait Cmux {
     fn sessions(&self) -> Result<Vec<CmuxSessionRef>>;
     /// Every surface (tab) that currently exists in cmux, with its window.
@@ -146,6 +233,8 @@ pub trait Cmux {
     /// Last `lines` non-blank lines of a surface's screen. `workspace_id` is
     /// required: cmux otherwise defaults to the caller's own workspace.
     fn read_screen(&self, workspace_id: &str, surface_id: &str, lines: u16) -> Result<String>;
+    /// Every queued notification (read and unread), read-only.
+    fn notifications(&self) -> Result<Vec<Notification>>;
 }
 
 /// Real implementation shelling out to the `cmux` binary, 2s timeout per call.
@@ -265,6 +354,10 @@ impl Cmux for CmuxCli {
         let lines = lines.max(1).to_string();
         self.run(&["read-screen", "--workspace", workspace_id, "--surface", surface_id, "--lines", &lines])
     }
+
+    fn notifications(&self) -> Result<Vec<Notification>> {
+        Ok(parse_notifications(&self.run(&["list-notifications"])?))
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +370,8 @@ pub struct FakeCmux {
     /// Per-surface screens; surfaces not listed get `read_screen_result`.
     pub screens: std::collections::HashMap<String, Result<String, String>>,
     pub focus_result: Result<(), String>,
+    /// Defaults to no notifications.
+    pub notifications_result: Result<Vec<Notification>, String>,
     /// Recorded calls, e.g. `sessions`, `focus ws surface`, `read_screen ws surface`.
     pub calls: std::sync::Mutex<Vec<String>>,
     /// `lines` argument of every `read_screen` call, in order.
@@ -296,6 +391,7 @@ impl FakeCmux {
             read_screen_result: Ok(String::new()),
             screens: Default::default(),
             focus_result: Ok(()),
+            notifications_result: Ok(Vec::new()),
             calls: Default::default(),
             read_lines: Default::default(),
         }
@@ -328,6 +424,11 @@ impl Cmux for FakeCmux {
         self.read_lines.lock().unwrap().push(lines);
         let result = self.screens.get(surface_id).unwrap_or(&self.read_screen_result);
         result.clone().map_err(|e| anyhow!(e))
+    }
+
+    fn notifications(&self) -> Result<Vec<Notification>> {
+        self.calls.lock().unwrap().push("notifications".into());
+        self.notifications_result.clone().map_err(|e| anyhow!(e))
     }
 }
 
@@ -495,8 +596,9 @@ mod tests {
         f.focus("w", "s").unwrap();
         f.read_screen("w", "s", 12).unwrap();
         f.tree().unwrap();
+        assert!(f.notifications().unwrap().is_empty());
         assert_eq!(*f.read_lines.lock().unwrap(), vec![12]);
-        assert_eq!(f.calls(), vec!["sessions", "focus w s", "read_screen w s", "tree"]);
+        assert_eq!(f.calls(), vec!["sessions", "focus w s", "read_screen w s", "tree", "notifications"]);
     }
 
     const TREE: &str = "\
@@ -559,6 +661,79 @@ window AAAAAAAA-0000-0000-0000-0000000000F2
         └── surface bbbbbbbb-0000-0000-0000-000000000003 [terminal] \"window z\" tty=ttys002
 window ???
 ";
+
+    const NOTES: &str = "\
+0:N0000000-0000-0000-0000-000000000001|AAAAAAAA-0000-0000-0000-000000000001|BBBBBBBB-0000-0000-0000-000000000001|unread|Claude Code|Done|Finished the task|2026-01-01T00:00:05Z|proj a
+1:N0000000-0000-0000-0000-000000000002|AAAAAAAA-0000-0000-0000-000000000001|BBBBBBBB-0000-0000-0000-000000000002|read|Claude Code|Waiting|a | b | c|2026-01-01T00:00:04Z|ws | with pipe
+2:N0000000-0000-0000-0000-000000000003|AAAAAAAA-0000-0000-0000-000000000002|bbbbbbbb-0000-0000-0000-000000000003|unread|Claude Code|Multi|line one
+line two | still body
+3: not a record
+line three|2026-01-01T00:00:03.250Z|proj c
+";
+
+    #[test]
+    fn parse_notifications_reads_state_title_and_ids() {
+        let v = parse_notifications(NOTES);
+        assert_eq!(v.len(), 3, "{v:?}");
+        assert_eq!(v[0].id, "N0000000-0000-0000-0000-000000000001");
+        assert_eq!(v[0].workspace_id, "AAAAAAAA-0000-0000-0000-000000000001");
+        assert_eq!(v[0].surface_id, "BBBBBBBB-0000-0000-0000-000000000001");
+        assert!(v[0].unread);
+        assert_eq!(v[0].title, "Done");
+        assert_eq!(v[0].timestamp, "2026-01-01T00:00:05Z");
+        assert_eq!(v[0].workspace_title, "proj a");
+        // a body with `|` and a workspace title with `|`: both ends stay right
+        assert!(!v[1].unread);
+        assert_eq!(v[1].title, "Waiting");
+        assert_eq!(v[1].timestamp, "2026-01-01T00:00:04Z");
+        assert_eq!(v[1].workspace_title, "ws | with pipe");
+        // a body spanning lines (even one that looks like `3: …`) is one record
+        assert!(v[2].unread);
+        assert_eq!(v[2].surface_id, "bbbbbbbb-0000-0000-0000-000000000003");
+        assert_eq!(v[2].title, "Multi");
+        assert_eq!(v[2].timestamp, "2026-01-01T00:00:03.250Z");
+        assert_eq!(v[2].workspace_title, "proj c");
+    }
+
+    #[test]
+    fn parse_notifications_empty_and_malformed() {
+        assert!(parse_notifications("").is_empty());
+        assert!(parse_notifications("\n\n").is_empty());
+        assert!(parse_notifications("No notifications\n").is_empty());
+        let bad = "\
+garbage
+0:N1|ws|sf|maybe|Claude Code|t|b|2026-01-01T00:00:00Z|w
+1:N2||sf|unread|Claude Code|t|b|2026-01-01T00:00:00Z|w
+2:N3|ws||unread|Claude Code|t|b|2026-01-01T00:00:00Z|w
+3:N4|ws|sf|unread|Claude Code|t|b|no time|w
+4:N5|ws|sf|unread
+x5:N6|ws|sf|unread|Claude Code|t|b|2026-01-01T00:00:00Z|w
+6:N7|ws|sf|unread|Claude Code|ok||2026-01-01T00:00:00Z|
+";
+        let v = parse_notifications(bad);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].id, "N7");
+        assert_eq!(v[0].title, "ok");
+        assert_eq!(v[0].workspace_title, "");
+    }
+
+    #[test]
+    fn cli_notifications_runs_list_notifications_and_fails_cleanly() {
+        let _g = lock();
+        let d = tempfile::tempdir().unwrap();
+        let log = d.path().join("log.txt");
+        let fx = d.path().join("notes.txt");
+        std::fs::write(&fx, NOTES).unwrap();
+        let ok = script(&d, &format!("echo \"$@\" >> {}; cat {}", log.display(), fx.display()));
+        assert_eq!(CmuxCli::with_bin(ok, TIMEOUT).notifications().unwrap().len(), 3);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "list-notifications\n");
+        let fail = script(&d, "exit 1");
+        assert!(CmuxCli::with_bin(fail, TIMEOUT).notifications().is_err());
+        let hang = script(&d, "exec sleep 5");
+        let t = Instant::now();
+        assert!(CmuxCli::with_bin(hang, Duration::from_millis(300)).notifications().is_err());
+        assert!(t.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn tree_parse_maps_surfaces_to_windows_in_order() {
