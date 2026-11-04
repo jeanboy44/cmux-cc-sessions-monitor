@@ -64,11 +64,8 @@ const MAGIC_BIG_AT: f32 = 50.0;
 /// Context usage above which the body flickers red.
 const WARNING_ABOVE: f32 = 90.0;
 /// Canvas width (sub-pixels) of a spirit casting big magic: 17 cells, the
-/// card's inner width minus a one-column left pad.
+/// standard card's inner width minus a one-column left pad.
 const BIG_MAGIC_W: usize = 34;
-/// The same for the quarter-area [`Size::XS`] spirit: 9 cells, about half
-/// the extra room S gets.
-const XS_BIG_MAGIC_W: usize = 18;
 
 /// How strong the cast magic (RUNNING, see `magic`) is; driven by context usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -130,10 +127,11 @@ pub fn warning(ctx_percent: Option<f32>) -> bool {
 /// Spirit size step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Size {
-    /// The large card's quarter-area spirit: 6 x 2 cells (12 x 8
-    /// sub-pixels), body radius 3.5 sub-pixels. Same eyes (one whole cell
-    /// each, on the top row), cues, element looks, pose and stages; the cast
-    /// magic is drawn at about half size (see [`magic_scale`]).
+    /// The standard card's small spirit: a round body of about 5 x 3 cells
+    /// (10 x 10 sub-pixels, body radius 4.75 sub-pixels) centred in a 7 x 4
+    /// grid. Its eyes are two single white dots (see `eyes`); same cues,
+    /// element looks, pose and stages as S; its magic is drawn bolder and
+    /// simpler so it reads at this size (see `magic`).
     XS,
     S,
     M,
@@ -141,36 +139,28 @@ pub enum Size {
 }
 
 impl Size {
-    /// The 4-row card band variants (XS is a 2-row size of its own).
+    /// The bigger variants (the large card draws S); XS is the standard
+    /// card's own small size.
     pub const ALL: [Size; 3] = [Size::S, Size::M, Size::L];
 
-    /// Card variants: every size is 4 rows tall (16 sub-pixels) so a 20x10
-    /// card never changes size; bigger steps get a bigger body and more room
-    /// to the right for the cast magic. The body centre sits at 1/3 of the
-    /// width (as in the reference design) and high enough that the eye row
-    /// (cell row 1) has body above and below it.
+    /// Every size is 4 rows tall (16 sub-pixels), the card band; bigger
+    /// steps get a bigger body and more room to the right for the cast
+    /// magic. The body centre sits at 1/3 of the width (as in the reference
+    /// design) and high enough that the eye row (cell row 1) has body above
+    /// and below it.
     const fn geom(self) -> Geom {
         match self {
             // 11 x 4 cells, body radius 5.5 sub-pixels
-            Size::S => Geom { ppu: 5.5 / BASE_R, w: 22, h: 16, rcx: 7.0, rcy: 8.0, small: true },
+            Size::S => Geom { ppu: 5.5 / BASE_R, w: 22, h: 16, rcx: 7.0, rcy: 8.0, small: true, dot_eyes: false },
             // 14 x 4 cells, body radius 6 sub-pixels
-            Size::M => Geom { ppu: 6.0 / BASE_R, w: 28, h: 16, rcx: 9.0, rcy: 8.0, small: true },
+            Size::M => Geom { ppu: 6.0 / BASE_R, w: 28, h: 16, rcx: 9.0, rcy: 8.0, small: true, dot_eyes: false },
             // 17 x 4 cells, body radius 6.5 sub-pixels
-            Size::L => Geom { ppu: 6.5 / BASE_R, w: 34, h: 16, rcx: 11.0, rcy: 8.0, small: true },
-            // 6 x 2 cells, body radius 3.5 sub-pixels: the body fills cells
-            // 0..4, the magic starts right of it
-            Size::XS => Geom { ppu: 3.5 / BASE_R, w: 12, h: 8, rcx: 4.0, rcy: 4.0, small: true },
+            Size::L => Geom { ppu: 6.5 / BASE_R, w: 34, h: 16, rcx: 11.0, rcy: 8.0, small: true, dot_eyes: false },
+            // 7 x 4 cells, body radius 4.75 sub-pixels: the round body
+            // fills cells 1..5 and is centred on the band's middle row line;
+            // the magic starts at column 6
+            Size::XS => Geom { ppu: 4.75 / BASE_R, w: 14, h: 16, rcx: 7.0, rcy: 8.0, small: true, dot_eyes: true },
         }
-    }
-}
-
-/// How big the cast magic is drawn for a size: particle size, reach and
-/// spread are scaled by this (the level order Small < Normal < Big holds at
-/// every scale). 1 for the card band sizes, about half for [`Size::XS`].
-pub const fn magic_scale(size: Size) -> f32 {
-    match size {
-        Size::XS => 0.5,
-        Size::S | Size::M | Size::L => 1.0,
     }
 }
 
@@ -196,9 +186,8 @@ pub const fn grid_size_for(size: Size, magic: Magic) -> (u16, u16) {
 
 const fn geom_for(size: Size, magic: Magic) -> Geom {
     let mut g = size.geom();
-    let big = if matches!(size, Size::XS) { XS_BIG_MAGIC_W } else { BIG_MAGIC_W };
-    if matches!(magic, Magic::Big) && g.w < big {
-        g.w = big;
+    if matches!(magic, Magic::Big) && g.w < BIG_MAGIC_W {
+        g.w = BIG_MAGIC_W;
     }
     g
 }
@@ -295,8 +284,8 @@ struct Ctx {
     /// water ripple line in design units, inside this size's canvas
     floor: f32,
     magic: Magic,
-    /// size of the cast magic (see [`magic_scale`])
-    ms: f32,
+    /// the small [`Size::XS`] spirit: its magic is drawn bolder and simpler
+    xs: bool,
     /// right edge of the canvas in design units (particles die past it)
     right: f32,
 }
@@ -324,7 +313,7 @@ impl Ctx {
             small: g.small,
             floor: floor_y(&g),
             magic: p.magic,
-            ms: magic_scale(p.size),
+            xs: matches!(p.size, Size::XS),
             // the reference design width (unchanged look), or the wider big-magic canvas
             right: if matches!(p.magic, Magic::Big) { DW.max(CX + (g.w as f32 - g.rcx) / g.ppu) } else { DW },
         }
@@ -336,14 +325,14 @@ pub fn render(p: &SpiritParams) -> SpiritGrid {
     render_with(p, true)
 }
 
-/// Sub-pixels per design unit of bob on a two-row canvas: its real scale
-/// would round every bob to 0, so it moves like an S body (one sub-pixel at
-/// the peaks of a lively bob, more often when struggling).
+/// Sub-pixels per design unit of bob of a small body: its real scale would
+/// round most bobs to 0, so it moves like an S body (one sub-pixel at the
+/// peaks of a lively bob, more often when struggling).
 const SHORT_BOB_PPU: f32 = 0.65;
 
 /// Body bob plus the casting pose's vertical shift, in real sub-pixels.
 fn bob_px(ctx: &Ctx, g: &Geom, pose: &state::Pose) -> f32 {
-    let k = if g.h < 16 { SHORT_BOB_PPU } else { g.ppu };
+    let k = if g.dot_eyes { SHORT_BOB_PPU } else { g.ppu };
     (state::bob_at(ctx.stage, ctx.state, ctx.seed, ctx.tf) * k).round() + pose.dy
 }
 
@@ -739,14 +728,19 @@ mod tests {
     /// [`LevelMetrics`] over seeds 4/11/23 x 240 running ticks at stage 2
     /// in the 17-column card, ambient particles off.
     fn level_metrics(theme: Theme, magic: Magic) -> LevelMetrics {
+        level_metrics_for(Size::S, CARD_COLS, theme, magic)
+    }
+
+    /// [`level_metrics`] of a spirit of `size` given `cols` card columns.
+    fn level_metrics_for(size: Size, cols: u16, theme: Theme, magic: Magic) -> LevelMetrics {
         particles::NO_AMBIENT.with(|c| c.set(true));
         let (mut cells, mut frames, mut lit, mut dots) = (0usize, 0usize, 0usize, 0usize);
         let (mut width, mut height, mut far) = (0usize, 0usize, 0usize);
         let (mut max_height, mut max_far) = (0usize, 0u16);
-        let mut cols = std::collections::BTreeSet::new();
+        let mut painted = std::collections::BTreeSet::new();
         for seed in [4, 11, 23] {
             for t in 0..240 {
-                let d = magic_dots(&SpiritParams { magic, cols: CARD_COLS, ..params(theme, Status::Running, Size::S, t, seed) });
+                let d = magic_dots(&SpiritParams { magic, cols, ..params(theme, Status::Running, size, t, seed) });
                 let c: std::collections::BTreeSet<(u16, u16)> = d.iter().map(|&(x, y)| ((x / 2) as u16, (y / 4) as u16)).collect();
                 frames += 1;
                 dots += d.len();
@@ -762,7 +756,7 @@ mod tests {
                 far += usize::from(hi);
                 max_height = max_height.max(rows.len());
                 max_far = max_far.max(hi);
-                cols.extend(c.iter().map(|p| p.0));
+                painted.extend(c.iter().map(|p| p.0));
             }
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
@@ -775,7 +769,7 @@ mod tests {
             max_height,
             far: per(far),
             max_far,
-            union: cols.first().zip(cols.last()).map_or(0, |(lo, hi)| i32::from(*hi) - i32::from(*lo) + 1),
+            union: painted.first().zip(painted.last()).map_or(0, |(lo, hi)| i32::from(*hi) - i32::from(*lo) + 1),
             dots: dots as f32 / frames as f32,
         }
     }
@@ -849,7 +843,7 @@ mod tests {
     fn centred_magic_sits_in_the_middle_of_its_area() {
         particles::NO_AMBIENT.with(|c| c.set(true));
         for theme in [Theme::Water, Theme::Poison, Theme::Lightning] {
-            for cols in [0u16, CARD_COLS, 40] {
+            for cols in [0u16, CARD_COLS, LARGE_COLS, 40] {
                 for magic in Magic::ALL {
                     let (mut worst, mut frames) = (0.0f32, 0);
                     for seed in [4, 11, 23, 706_312_658] {
@@ -894,7 +888,7 @@ mod tests {
     fn centred_magic_grows_with_the_level_and_fire_keeps_its_length() {
         particles::NO_AMBIENT.with(|c| c.set(true));
         for theme in [Theme::Water, Theme::Poison, Theme::Lightning] {
-            for cols in [0u16, CARD_COLS, 40] {
+            for cols in [0u16, CARD_COLS, LARGE_COLS, 40] {
                 // mean painted width per frame
                 let width = |magic| {
                     let w: Vec<i32> = [4, 11, 23]
@@ -911,9 +905,10 @@ mod tests {
             }
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
-        // the breath's length is set by its level, not by the card room: a
-        // wider room adds only empty columns
-        for magic in Magic::ALL {
+        // the Small and Normal breath's length is set by its level, not by
+        // the card room: a wider room adds only empty columns (Big roars to
+        // the room's right edge, see `big_magic_reaches_into_the_large_card_area`)
+        for magic in [Magic::Small, Magic::Normal] {
             for t in 0..200 {
                 for status in STATUSES {
                     let p = SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Fire, status, Size::S, t, 4) };
@@ -939,6 +934,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn big_magic_reaches_into_the_large_card_area() {
+        // the large card gives the S spirit 29 columns: a magic area of 22
+        // columns right of the body (column 7 on)
+        let g = geom_of(&SpiritParams { cols: LARGE_COLS, ..params(Theme::Water, Status::Running, Size::S, 1, 4) });
+        let area = (g.w as f32 - (body_center_x(Size::S) + 3.0).ceil() * 2.0) / 2.0;
+        assert!(area >= 18.0, "magic area {area} columns");
+        for theme in Theme::ALL {
+            let [s, n, b] = Magic::ALL.map(|m| level_metrics_for(Size::S, LARGE_COLS, theme, m));
+            println!("{theme:?} large: far {} {} {}, width {:.1} {:.1} {:.1}", s.max_far, n.max_far, b.max_far, s.width, n.width, b.width);
+            // Big reaches past the standard card's 17 columns, inside the card
+            assert!(b.max_far >= 19 && b.max_far < LARGE_COLS, "{theme:?}: big reaches col {}", b.max_far);
+            assert!(s.cells < n.cells && n.cells < b.cells && s.width < n.width && n.width < b.width, "{theme:?}: levels ordered");
+        }
+        // the Big fire roars to the right edge of the room
+        let fire = level_metrics_for(Size::S, LARGE_COLS, Theme::Fire, Magic::Big);
+        assert!(fire.max_far >= LARGE_COLS - 2, "fire reaches col {}", fire.max_far);
     }
 
     #[test]
@@ -1828,7 +1842,12 @@ mod tests {
     /// the skull's box, as a bitmap over [`magic::SKULL`]'s rows; and how many
     /// dots differ from the skull.
     fn skull_at(magic: Magic, seed: u32, t: u64) -> (Vec<String>, usize) {
-        let p = SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Poison, Status::Running, Size::S, t, seed) };
+        skull_at_for(Size::S, CARD_COLS, magic, seed, t)
+    }
+
+    /// [`skull_at`] for a spirit of `size` given `cols` card columns.
+    fn skull_at_for(size: Size, cols: u16, magic: Magic, seed: u32, t: u64) -> (Vec<String>, usize) {
+        let p = SpiritParams { magic, cols, ..params(Theme::Poison, Status::Running, size, t, seed) };
         particles::NO_AMBIENT.with(|c| c.set(true));
         let d = dots(&render_with(&p, false));
         particles::NO_AMBIENT.with(|c| c.set(false));
@@ -1943,10 +1962,15 @@ mod tests {
     /// The bolt plans of every cast of seeds 1..30 in ticks 1..300 in the
     /// standard card, with the centre of the magic area (sub-pixels).
     fn bolt_plans(magic: Magic) -> Vec<(u32, u64, f32, Vec<magic::PlannedBolt>)> {
+        bolt_plans_for(Size::S, CARD_COLS, magic)
+    }
+
+    /// [`bolt_plans`] for a spirit of `size` given `cols` card columns.
+    fn bolt_plans_for(size: Size, cols: u16, magic: Magic) -> Vec<(u32, u64, f32, Vec<magic::PlannedBolt>)> {
         let mut out = Vec::new();
         for seed in 1..30u32 {
             for t in (1..300).filter(|&t| state::casts_at(seed, t)) {
-                let p = SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Lightning, Status::Running, Size::S, t, seed) };
+                let p = SpiritParams { magic, cols, ..params(Theme::Lightning, Status::Running, size, t, seed) };
                 let g = geom_of(&p);
                 out.push((seed, t, magic::area_mid(&g), magic::bolt_plan(&g, &Ctx::new(&p))));
             }
@@ -2386,24 +2410,40 @@ mod tests {
         }
     }
 
-    // ---- Size::XS: the quarter-area spirit of the large card ----
+    // ---- Size::XS: the small spirit of the standard card ----
 
-    /// Columns the large card gives its spirit (inner width 26 minus the pad).
-    const LARGE_COLS: u16 = 25;
+    /// Columns the standard card gives its XS spirit (inner width 18 minus the pad).
+    const STD_COLS: u16 = 17;
+    /// Columns the large card gives its S spirit (inner width 30 minus the pad).
+    const LARGE_COLS: u16 = 29;
     const STAGES: [Stage; 3] = [Stage::Relaxed, Stage::Lively, Stage::Struggling];
+    /// First sub-pixel column of the XS magic area (the body is left of it).
+    const XS_AREA: i32 = 12;
 
     fn xs(theme: Theme, status: Status, tick: u64, seed: u32) -> SpiritParams {
         params(theme, status, Size::XS, tick, seed)
     }
 
+    /// Body dots of a frame: magic, poison bubbles and ambient bits off,
+    /// everything left of the magic area.
+    fn xs_body(p: &SpiritParams) -> std::collections::BTreeSet<(i32, i32)> {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        magic::NO_MAGIC.with(|c| c.set(true));
+        let g = render_with(p, false);
+        magic::NO_MAGIC.with(|c| c.set(false));
+        particles::NO_AMBIENT.with(|c| c.set(false));
+        let marks: Vec<(i32, i32)> = chars(&g).into_iter().filter(|c| !is_braille(c.2) && c.2 != ' ').map(|c| (i32::from(c.0), i32::from(c.1))).collect();
+        dots(&g).into_iter().filter(|d| d.0 < XS_AREA && !marks.contains(&(d.0 / 2, d.1 / 4))).collect()
+    }
+
     #[test]
-    fn xs_is_a_quarter_area_two_row_spirit() {
-        assert_eq!(grid_size(Size::XS), (6, 2), "about a quarter of the 11x4 card spirit");
-        assert!(!Size::ALL.contains(&Size::XS), "the 4-row card band variants stay S/M/L");
-        assert_eq!(max_grid_size(), (17, 4), "the standard card band is unchanged");
-        assert_eq!(grid_size_for(Size::XS, Magic::Small), (6, 2));
-        assert_eq!(grid_size_for(Size::XS, Magic::Normal), (6, 2));
-        assert_eq!(grid_size_for(Size::XS, Magic::Big), (9, 2), "big magic gets room, half the S widening");
+    fn xs_is_a_small_round_spirit_centred_in_the_band() {
+        assert_eq!(grid_size(Size::XS), (7, 4), "7 columns, as tall as the 4-row card band");
+        assert!(!Size::ALL.contains(&Size::XS), "S/M/L stay the large card's sizes");
+        assert_eq!(max_grid_size(), (17, 4));
+        assert_eq!(grid_size_for(Size::XS, Magic::Small), (7, 4));
+        assert_eq!(grid_size_for(Size::XS, Magic::Normal), (7, 4));
+        assert_eq!(grid_size_for(Size::XS, Magic::Big), (17, 4), "big magic gets the standard card's 17 columns");
         for theme in Theme::ALL {
             for status in STATUSES {
                 for magic in Magic::ALL {
@@ -2412,32 +2452,106 @@ mod tests {
                     assert_eq!(g.cells.len(), usize::from(g.cols) * usize::from(g.rows));
                 }
                 // a running spirit widens to the card room for its magic, like S
-                let g = render(&SpiritParams { cols: LARGE_COLS, ..xs(theme, status, 30, 1) });
+                let g = render(&SpiritParams { cols: STD_COLS, ..xs(theme, status, 30, 1) });
                 let wide = status == Status::Running;
-                assert_eq!(g.cols, if wide { LARGE_COLS } else { 6 }, "{theme:?} {status:?}");
+                assert_eq!(g.cols, if wide { STD_COLS } else { 7 }, "{theme:?} {status:?}");
             }
         }
-        // the body is smaller than S's
+        // a round body about 7 x 3 cells (14 x 12 sub-pixels), centred in the
+        // 4-row band: no longer a 2-row strip
+        for theme in Theme::ALL {
+            for t in [0, 17, 33] {
+                let b = xs_body(&xs(theme, Status::Idle, t, 3));
+                let (x0, x1) = (b.iter().map(|d| d.0).min().unwrap(), b.iter().map(|d| d.0).max().unwrap());
+                let (y0, y1) = (b.iter().map(|d| d.1).min().unwrap(), b.iter().map(|d| d.1).max().unwrap());
+                let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
+                // (fire tongues may add a dot row on top, the water's ripple line one below)
+                assert!((7..=12).contains(&w) && (7..=14).contains(&h), "{theme:?} {t}: body {w}x{h} sub-pixels");
+                let rows: std::collections::BTreeSet<i32> = b.iter().map(|d| d.1 / 4).collect();
+                assert!(rows.len() >= 3, "{theme:?} {t}: body on {rows:?}");
+                // (the fire's tongues rise a little above its round body)
+                let mid = (y0 + y1 + 1) as f32 / 2.0;
+                assert!((mid - 8.0).abs() <= 2.0, "{theme:?} {t}: body centre y {mid} (band centre 8)");
+            }
+        }
+        // smaller than the S spirit
         let body = |size| -> u32 { render(&params(Theme::Water, Status::Idle, size, 0, 3)).cells.iter().filter(|c| is_braille(c.ch)).map(|c| (c.ch as u32 - 0x2800).count_ones()).sum() };
-        assert!(body(Size::XS) * 2 < body(Size::S), "XS {} vs S {}", body(Size::XS), body(Size::S));
+        assert!(body(Size::XS) * 10 < body(Size::S) * 8, "XS {} vs S {}", body(Size::XS), body(Size::S));
     }
 
     #[test]
-    fn xs_every_state_theme_and_stage_renders() {
+    fn xs_every_state_theme_stage_and_magic_renders() {
         for theme in Theme::ALL {
             for status in STATUSES {
                 for stage in STAGES {
-                    let g = render(&SpiritParams { stage, ..xs(theme, status, 40, 3) });
-                    let n = g.cells.iter().filter(|c| is_braille(c.ch)).count();
-                    assert!(n >= 5, "{theme:?} {status:?} {stage:?}: {n} braille cells");
-                    assert!(g.cells.iter().all(|c| c.fg.is_some() || c.ch == ' '), "drawn cells have a colour");
+                    for magic in Magic::ALL {
+                        for cols in [0, STD_COLS] {
+                            let g = render(&SpiritParams { stage, magic, cols, ..xs(theme, status, 40, 3) });
+                            let n = g.cells.iter().filter(|c| is_braille(c.ch)).count();
+                            assert!(n >= 8, "{theme:?} {status:?} {stage:?} {magic:?}: {n} braille cells");
+                            assert!(g.cells.iter().all(|c| c.fg.is_some() || c.ch == ' '), "drawn cells have a colour");
+                        }
+                    }
                 }
             }
         }
     }
 
     #[test]
-    fn xs_eyes_are_whole_cells_with_one_white_dot_in_every_state() {
+    fn xs_eyes_are_two_small_white_dots() {
+        let g = Size::XS.geom();
+        for facing in [false, true] {
+            for blink in [false, true] {
+                let plan = eyes::plan(&g, facing, blink);
+                for e in &plan {
+                    // a dot with at most a one-dot dark halo, never a cleared cell
+                    assert!(e.clear.len() <= 2, "{facing} {blink}: {} cleared dots", e.clear.len());
+                    match e.white {
+                        Some(w) => {
+                            assert!(!blink);
+                            assert!(e.clear.iter().all(|&c| c != w && (c.0 - w.0).abs() <= 1 && (c.1 - w.1).abs() <= 1), "halo touches the dot: {:?} {:?}", w, e.clear);
+                        }
+                        None => assert!(blink && !e.dash.is_empty() && e.dash.len() <= 2, "blink: a short dash {:?}", e.dash),
+                    }
+                }
+            }
+        }
+        // the S eyes clear a whole cell; the XS ones are clearly smaller
+        let s = eyes::plan(&Size::S.geom(), false, false);
+        let x = eyes::plan(&g, false, false);
+        assert!(s.iter().all(|e| e.clear.len() >= 8) && x.iter().all(|e| e.clear.len() + 1 <= 3), "S clears {} dots, XS {}", s[0].clear.len(), x[0].clear.len());
+        // proportional to the body: each eye (dot and halo) spans at most a
+        // quarter of the body width
+        for theme in Theme::ALL {
+            let b = xs_body(&xs(theme, Status::Idle, first_tick(9, false), 9));
+            let bw = b.iter().map(|d| d.0).max().unwrap() - b.iter().map(|d| d.0).min().unwrap() + 1;
+            for facing in [false, true] {
+                for e in eyes::plan(&g, facing, false) {
+                    let xs: Vec<i32> = e.clear.iter().chain(e.white.iter()).map(|d| d.0).collect();
+                    let w = xs.iter().max().unwrap() - xs.iter().min().unwrap() + 1;
+                    assert!(w as f32 <= 0.25 * bw as f32, "{theme:?}: eye {w} of body {bw} sub-pixels");
+                }
+            }
+        }
+        // in the frame: two white dots in separate cells with body between,
+        // left and right of them, and below them (UNKNOWN: no cue beside them)
+        let t = first_tick(9, false);
+        for theme in Theme::ALL {
+            let gr = render(&xs(theme, Status::Unknown, t, 9));
+            let white = white_cells(&gr);
+            assert_eq!(white.len(), 2, "{theme:?}: {white:?}");
+            let ((l, row), r) = ((white[0].0, white[0].1), white[1].0);
+            assert_eq!(white[1].1, row, "{theme:?}: eyes on one row");
+            assert!(r >= l + 2, "{theme:?}: eyes in separate cells, {l} and {r}");
+            let body = |c: u16, rr: u16| is_braille(cell(&gr, c, rr).ch) && cell(&gr, c, rr).fg != WHITE;
+            assert!((l + 1..r).all(|c| body(c, row)), "{theme:?}: body between the eyes");
+            assert!(l >= 1 && body(l - 1, row) && body(r + 1, row), "{theme:?}: body left and right of the eyes");
+            assert!(body(l, row + 1) && body(r, row + 1), "{theme:?}: body under the eyes");
+        }
+    }
+
+    #[test]
+    fn xs_eyes_keep_their_structure_in_every_state_theme_and_stage() {
         for seed in [1, 9, 706_312_658] {
             for stage in STAGES {
                 for (theme, status) in Theme::ALL.into_iter().flat_map(|t| STATUSES.map(|s| (t, s))) {
@@ -2447,6 +2561,7 @@ mod tests {
                         let white = white_cells(&g);
                         assert_eq!(white.len(), 2, "{p:?}: {white:?}");
                         assert_eq!(white[0].1, white[1].1, "eyes on one row");
+                        // the dot looks one sub-pixel toward the magic while casting
                         let facing = state::pose_at(stage, theme, status, seed, t).facing;
                         let dot = if facing { '\u{2810}' } else { '\u{2802}' };
                         assert!(white.iter().all(|w| w.2 == dot), "{p:?}: one white dot ({dot}) per eye: {white:?}");
@@ -2457,32 +2572,26 @@ mod tests {
                 }
             }
         }
-        // the eye cells sit in the body: body below each, and body on the row beside them
-        let t = first_tick(9, false);
-        for theme in Theme::ALL {
-            let g = render(&xs(theme, Status::Idle, t, 9));
-            for (col, row, _) in white_cells(&g) {
-                assert_eq!(row, 0, "{theme:?}: eyes on the top row of a 2-row spirit");
-                assert!(is_braille(cell(&g, col, row + 1).ch), "{theme:?}: body under the eye");
-            }
-            let (l, r) = (white_cells(&g)[0].0, white_cells(&g)[1].0);
-            assert!(l >= 1 && is_braille(cell(&g, l - 1, 0).ch) && is_braille(cell(&g, r + 1, 0).ch), "{theme:?}: body left and right of the eyes");
-        }
     }
 
     #[test]
     fn xs_blink_hides_the_dot_and_shows_a_dash() {
         let seed = 5;
-        let t = (1..1000).find(|&t| eyes::blinking(seed, t)).unwrap();
+        let starts: Vec<u64> = (1..1000).filter(|&t| eyes::blinking(seed, t) && !eyes::blinking(seed, t - 1)).collect();
+        assert!(starts.len() >= 10);
+        for &t in &starts {
+            assert!(eyes::blinking(seed, t + 1) && !eyes::blinking(seed, t + 2), "two frames");
+        }
+        let t = starts[0];
         for theme in Theme::ALL {
-            for status in [Status::NeedsInput, Status::Idle, Status::Done, Status::Unknown] {
+            for status in STATUSES {
                 let g = render(&xs(theme, status, t, seed));
                 assert!(white_cells(&g).is_empty(), "{theme:?} {status:?}: no white while blinking");
                 let open = white_cells(&render(&xs(theme, status, t - 1, seed)));
                 assert_eq!(open.len(), 2);
                 for (col, row, _) in open {
                     let c = cell(&g, col, row);
-                    assert!(c.ch == '\u{2824}' && c.fg.is_some() && c.fg != WHITE, "{theme:?} {status:?}: ⠤ dash in the eye cell, got {c:?}");
+                    assert!(c.ch == '\u{2812}' && c.fg.is_some() && c.fg != WHITE, "{theme:?} {status:?}: ⠒ dash in the eye cell, got {c:?}");
                 }
             }
         }
@@ -2526,23 +2635,25 @@ mod tests {
         for t in 0..300 {
             let p = xs(Theme::Poison, Status::Done, t, 4);
             for (_, py, _) in bubble_spots(&p) {
-                assert!(py >= 4, "{t}: bubble at {py} on the eye row");
+                assert!(py >= 8, "{t}: bubble at {py} on the eye row");
                 bubbles += 1;
             }
             let (g, bare) = (render_with(&p, true), render_with(&p, false));
             assert_eq!(white_cells(&g), white_cells(&bare), "{t}: bubbles leave the eyes alone");
         }
         assert!(bubbles > 20, "{bubbles} bubbles");
-        // only eyes and poison bubbles are pure white
+        // only eyes and poison bubbles are pure white, and nothing is a solid bright tile
         for (theme, status) in Theme::ALL.into_iter().flat_map(|t| STATUSES.map(|s| (t, s))) {
-            for t in 0..120 {
-                let p = SpiritParams { cols: LARGE_COLS, ..xs(theme, status, t, 41) };
-                let (g, bare) = (render_with(&p, true), render_with(&p, false));
-                for (i, c) in g.cells.iter().enumerate().filter(|(_, c)| c.fg == WHITE) {
-                    if bits(c).count_ones() == 1 && bare.cells[i] == *c {
-                        continue;
+            for magic in Magic::ALL {
+                for t in 0..120 {
+                    let p = SpiritParams { magic, cols: STD_COLS, ..xs(theme, status, t, 41) };
+                    let (g, bare) = (render_with(&p, true), render_with(&p, false));
+                    for (i, c) in g.cells.iter().enumerate().filter(|(_, c)| c.fg == WHITE) {
+                        if bits(c).count_ones() == 1 && bare.cells[i] == *c {
+                            continue;
+                        }
+                        assert!(theme == Theme::Poison && bare.cells[i] != *c && bits(c).count_ones() >= 2 && i as u16 / g.cols >= 2, "{p:?} cell {i}: {c:?}");
                     }
-                    assert!(theme == Theme::Poison && bare.cells[i] != *c && bits(c).count_ones() >= 2 && i as u16 / g.cols >= 1, "{p:?} cell {i}: {c:?}");
                 }
             }
         }
@@ -2552,29 +2663,22 @@ mod tests {
         for seed in [4, 11, 23] {
             let start = first_cast(seed) + 3;
             for t in start..start + 60 {
-                let p = xs(Theme::Fire, Status::Running, t, seed);
+                let p = SpiritParams { cols: STD_COLS, ..xs(Theme::Fire, Status::Running, t, seed) };
                 let m = magic_dots(&p);
                 let Some(first) = m.iter().map(|d| d.0).min() else { continue };
-                magic::NO_MAGIC.with(|c| c.set(true));
-                let body = dots(&render_with(&p, false));
-                magic::NO_MAGIC.with(|c| c.set(false));
-                let edge = body.iter().filter(|d| d.0 < 9).map(|d| d.0).max().unwrap();
+                let edge = xs_body(&p).iter().map(|d| d.0).max().unwrap();
                 n += 1;
-                if first >= edge + 2 {
+                if first == edge + 2 {
                     ok += 1;
                 }
             }
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
-        assert!(n > 30 && ok * 10 >= n * 9, "a gap before the flame on {ok} of {n} frames");
-        // the casting pose leans toward the magic, then recoils: the body sits
-        // further right on the last wind-up frame than on the release
+        assert!(n > 30 && ok * 10 >= n * 9, "the flame starts one dot off the mouth on {ok} of {n} frames");
+        // the casting pose leans toward the magic, then recoils
         for theme in Theme::ALL {
             let mean_x = |t: u64, seed: u32| {
-                magic::NO_MAGIC.with(|c| c.set(true));
-                let g = render_with(&xs(theme, Status::Running, t, seed), false);
-                magic::NO_MAGIC.with(|c| c.set(false));
-                let d: Vec<f32> = dots(&g).iter().filter(|d| d.0 < 9).map(|d| d.0 as f32).collect();
+                let d: Vec<f32> = xs_body(&xs(theme, Status::Running, t, seed)).iter().map(|d| d.0 as f32).collect();
                 d.iter().sum::<f32>() / d.len().max(1) as f32
             };
             let (mut lean, mut n) = (0.0f32, 0);
@@ -2588,63 +2692,166 @@ mod tests {
         }
     }
 
-    /// Magic dots and painted width (sub-pixels) of an XS spirit in the large
-    /// card over a few casts.
-    fn xs_magic_stats(theme: Theme, magic: Magic, size: Size) -> (usize, i32) {
+    #[test]
+    fn xs_magic_levels_are_clear_steps() {
+        for theme in Theme::ALL {
+            let [s, n, b] = Magic::ALL.map(|m| level_metrics_for(Size::XS, STD_COLS, theme, m));
+            println!("{theme:?} XS: cells S {:.1} N {:.1} B {:.1}; width S {:.1} N {:.1} B {:.1}; height S {:.2} N {:.2} B {:.2}; far {} {} {}", s.cells, n.cells, b.cells, s.width, n.width, b.width, s.height, n.height, b.height, s.max_far, n.max_far, b.max_far);
+            assert!(s.cells < 0.75 * n.cells && n.cells < 0.75 * b.cells, "{theme:?}: cells {} < {} < {}", s.cells, n.cells, b.cells);
+            assert!(s.lit_cells < n.lit_cells && n.lit_cells < b.lit_cells, "{theme:?}: lit cells {} < {} < {}", s.lit_cells, n.lit_cells, b.lit_cells);
+            assert!(s.width + 1.0 <= n.width && n.width + 1.0 <= b.width, "{theme:?}: width {} < {} < {}", s.width, n.width, b.width);
+            assert!(s.union <= n.union && n.union < b.union, "{theme:?}: extent {} {} {}", s.union, n.union, b.union);
+            // small is a clear little shape, never a stray dot
+            assert!(s.lit_cells >= 2.0, "{theme:?}: small paints {} cells", s.lit_cells);
+            // everything stays in the standard card's area
+            assert!(b.max_far < STD_COLS, "{theme:?}: big reaches col {}", b.max_far);
+        }
+    }
+
+    /// Bounding box (columns, rows) of the cells holding `d`.
+    fn cell_box(d: &std::collections::BTreeSet<(i32, i32)>) -> (i32, i32) {
+        let cols: std::collections::BTreeSet<i32> = d.iter().map(|p| p.0 / 2).collect();
+        let rows: std::collections::BTreeSet<i32> = d.iter().map(|p| p.1 / 4).collect();
+        match (cols.first().zip(cols.last()), rows.first().zip(rows.last())) {
+            (Some((c0, c1)), Some((r0, r1))) => (c1 - c0 + 1, r1 - r0 + 1),
+            _ => (0, 0),
+        }
+    }
+
+    /// The largest cell box of a running XS element's magic over a few casts.
+    fn xs_peak_box(theme: Theme, magic: Magic) -> (i32, i32) {
         particles::NO_AMBIENT.with(|c| c.set(true));
-        let (mut n, mut all) = (0usize, std::collections::BTreeSet::new());
-        for seed in [4, 11] {
-            for t in 0..160 {
-                let cols = if size == Size::XS { LARGE_COLS } else { CARD_COLS };
-                let d = magic_dots(&SpiritParams { magic, cols, ..params(theme, Status::Running, size, t, seed) });
-                n += d.len();
-                all.extend(d.into_iter().map(|p| p.0));
+        let mut best = (0, 0);
+        for seed in [4, 11, 23] {
+            for t in 1..200 {
+                let bx = cell_box(&magic_dots(&SpiritParams { magic, cols: STD_COLS, ..xs(theme, Status::Running, t, seed) }));
+                if bx.0 * bx.1 > best.0 * best.1 {
+                    best = bx;
+                }
             }
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
-        let w = all.first().zip(all.last()).map_or(0, |(lo, hi)| hi - lo + 1);
-        (n, w)
+        best
     }
 
     #[test]
-    fn xs_magic_is_smaller_but_still_scales_and_centres() {
-        for theme in Theme::ALL {
-            let [(s_n, s_w), (n_n, n_w), (b_n, b_w)] = Magic::ALL.map(|m| xs_magic_stats(theme, m, Size::XS));
-            println!("{theme:?} XS: dots {s_n} {n_n} {b_n}, width {s_w} {n_w} {b_w}");
-            assert!(s_n < n_n && n_n < b_n, "{theme:?}: dots {s_n} < {n_n} < {b_n}");
-            assert!(s_w < n_w && n_w < b_w, "{theme:?}: width {s_w} < {n_w} < {b_w}");
-            // about half the standard spirit's magic
-            let (sn, _) = xs_magic_stats(theme, Magic::Normal, Size::S);
-            assert!(n_n * 10 <= sn * 7, "{theme:?}: XS normal {n_n} dots vs S {sn}");
+    fn xs_magic_is_big_and_bold_enough_to_read() {
+        // fire: a bright breath at least 3 columns long at Normal, starting
+        // one dot off the mouth (column 6)
+        let n = level_metrics_for(Size::XS, STD_COLS, Theme::Fire, Magic::Normal);
+        assert!(n.far - 5.0 >= 3.0, "normal flame {} columns", n.far - 5.0);
+        let mut bright = 0;
+        for t in 1..200 {
+            let g = render(&SpiritParams { cols: STD_COLS, ..xs(Theme::Fire, Status::Running, t, 4) });
+            bright += (6..g.cols).flat_map(|c| (0..g.rows).map(move |r| (c, r))).filter(|&(c, r)| cell(&g, c, r).fg.is_some_and(|f| f.0 > 240 && f.1 > 190)).count();
         }
-        // water, poison and lightning sit in the middle of the magic area
+        assert!(bright > 100, "a bright yellow flame: {bright} cells");
+        // water: a disc of at least 3 x 2 cells with a bright highlight
+        let (w, h) = xs_peak_box(Theme::Water, Magic::Normal);
+        assert!(w >= 3 && h >= 2, "water normal disc {w}x{h} cells");
+        let glint = (1..200).any(|t| {
+            let g = render(&SpiritParams { cols: STD_COLS, ..xs(Theme::Water, Status::Running, t, 4) });
+            (6..g.cols).flat_map(|c| (0..g.rows).map(move |r| (c, r))).any(|(c, r)| cell(&g, c, r).fg.is_some_and(|f| f.0 > 200 && f.1 > 230 && f.2 > 240))
+        });
+        assert!(glint, "water highlight");
+        // poison: round puffs of at least 3 x 2 cells
+        let (w, h) = xs_peak_box(Theme::Poison, Magic::Normal);
+        assert!(w >= 3 && h >= 2, "poison normal puffs {w}x{h} cells");
+        // every element's Normal and Big are at least 3 x 2 cells
+        for theme in Theme::ALL {
+            for magic in [Magic::Normal, Magic::Big] {
+                let (w, h) = xs_peak_box(theme, magic);
+                assert!(w >= 3 && h >= 2, "{theme:?} {magic:?}: {w}x{h} cells");
+            }
+        }
+        // lightning: thin bolts one dot wide, the thick one at least two;
+        // Normal four thin, Big one thick and three thin, inside the area
+        for magic in Magic::ALL {
+            let plans = bolt_plans_for(Size::XS, STD_COLS, magic);
+            assert!(plans.len() >= 100);
+            for (seed, t, mid, plan) in &plans {
+                let thick: Vec<i32> = plan.iter().map(|b| b.width).filter(|&w| w > 1).collect();
+                let thin = plan.iter().filter(|b| b.width == 1).count();
+                let want = match magic {
+                    Magic::Small => (0, 1),
+                    Magic::Normal => (0, 4),
+                    Magic::Big => (1, 3),
+                };
+                assert_eq!((thick.len(), thin), want, "{magic:?} {seed} {t}");
+                assert!(thick.iter().all(|&w| w >= 2), "{magic:?}: thick {thick:?}");
+                for b in plan {
+                    assert!(b.pts.iter().all(|p| p.0 >= XS_AREA as f32 && p.0 < 34.0), "{magic:?} {seed} {t}: inside the area {:?}", b.pts);
+                }
+                let w: f32 = plan.iter().map(|b| b.width as f32).sum();
+                let cx = plan.iter().map(|b| bolt_x(b) * b.width as f32).sum::<f32>() / w;
+                assert!((cx - mid).abs() <= 2.0, "{magic:?} {seed} {t}: group centroid {cx} vs {mid}");
+            }
+        }
+    }
+
+    #[test]
+    fn xs_big_poison_settles_into_a_skull_on_the_standard_card() {
+        // the skull is 7 x 3.5 cells: it fits the standard card's magic area
+        let skull_dots = magic::SKULL.iter().flat_map(|r| r.chars()).filter(|&c| c == '#').count();
+        let (hold, _) = magic::skull_window();
+        let mut checked = 0;
+        for seed in [4, 11, 23, 37] {
+            for c in skull_casts(seed) {
+                for age in hold.clone() {
+                    let (rows, off) = skull_at_for(Size::XS, STD_COLS, Magic::Big, seed, c + age);
+                    assert!(off <= 4, "{seed} {c}+{age}: {off} dots off the skull\n{}", rows.join("\n"));
+                }
+                assert!(skull_at_for(Size::XS, STD_COLS, Magic::Normal, seed, c + hold.start).1 > skull_dots / 2, "{seed} {c}: no skull at Normal");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 6, "{checked} casts checked");
+        let p = SpiritParams { magic: Magic::Big, cols: STD_COLS, ..xs(Theme::Poison, Status::Running, 1, 4) };
+        let (x0, y0) = magic::skull_origin(&geom_of(&p));
+        assert!(x0 >= XS_AREA && x0 + magic::SKULL[0].len() as i32 <= i32::from(STD_COLS) * 2 && y0 >= 0 && y0 + magic::SKULL.len() as i32 <= 16, "skull at ({x0}, {y0}) inside the area");
+    }
+
+    #[test]
+    fn xs_magic_is_centred_and_fire_leaves_the_mouth() {
         particles::NO_AMBIENT.with(|c| c.set(true));
         for theme in [Theme::Water, Theme::Poison, Theme::Lightning] {
             for magic in Magic::ALL {
-                let (mut sum, mut n) = (0.0f32, 0usize);
-                for seed in [4, 11, 23] {
-                    for t in 1..300 {
-                        let p = SpiritParams { magic, cols: LARGE_COLS, ..xs(theme, Status::Running, t, seed) };
-                        for d in magic_dots(&p) {
-                            sum += d.0 as f32 + 0.5;
-                            n += 1;
+                for cols in [STD_COLS, 30] {
+                    let (mut sum, mut n) = (0.0f32, 0usize);
+                    for seed in [4, 11, 23] {
+                        for t in 1..300 {
+                            let p = SpiritParams { magic, cols, ..xs(theme, Status::Running, t, seed) };
+                            for d in magic_dots(&p) {
+                                sum += d.0 as f32 + 0.5;
+                                n += 1;
+                            }
                         }
                     }
+                    let g = geom_of(&SpiritParams { magic, cols, ..xs(theme, Status::Running, 1, 4) });
+                    let mid = magic::area_mid(&g);
+                    let cx = sum / n.max(1) as f32;
+                    assert!(n > 20 && (cx - mid).abs() <= 2.0, "{theme:?} {magic:?} {cols}: centroid {cx} vs area centre {mid} ({n} dots)");
                 }
-                let g = geom_of(&SpiritParams { magic, cols: LARGE_COLS, ..xs(theme, Status::Running, 1, 4) });
-                let mid = magic::area_mid(&g);
-                let cx = sum / n.max(1) as f32;
-                assert!(n > 20 && (cx - mid).abs() <= 2.0, "{theme:?} {magic:?}: centroid {cx} vs area centre {mid} ({n} dots)");
             }
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
+        // Small and Normal fire keep their length in a wider room; Big
+        // roars to the right edge of the room
+        for magic in Magic::ALL {
+            let far = |cols| level_metrics_for(Size::XS, cols, Theme::Fire, magic).max_far;
+            let (std, wide) = (far(STD_COLS), far(30));
+            match magic {
+                Magic::Big => assert!(wide >= 27 && std >= 15, "{magic:?}: reaches {std} / {wide}"),
+                _ => assert_eq!(std, wide, "{magic:?}: same length"),
+            }
+        }
     }
 
     #[test]
     fn xs_stages_order_the_motion() {
         for theme in Theme::ALL {
             let centroid = |stage, t| {
-                let d: Vec<f32> = dots(&render(&SpiritParams { stage, ..xs(theme, Status::Running, t, 4) })).iter().filter(|p| p.0 < 9).map(|p| p.1 as f32).collect();
+                let d: Vec<f32> = dots(&render(&SpiritParams { stage, ..xs(theme, Status::Running, t, 4) })).iter().filter(|p| p.0 < XS_AREA).map(|p| p.1 as f32).collect();
                 d.iter().sum::<f32>() / d.len().max(1) as f32
             };
             let sd = |stage| {
@@ -2656,9 +2863,11 @@ mod tests {
             println!("{theme:?} XS: centroid sd {r1:.3} {r2:.3} {r3:.3}");
             assert!(r1 < r2 && r2 < r3, "{theme:?}: relaxed {r1} < lively {r2} < struggling {r3}");
         }
-        // stage 3 sweats a drop now and then
-        let sweat = (0..400u64).filter(|&t| !state::sweat_drops(&Ctx::new(&SpiritParams { stage: Stage::Struggling, ..xs(Theme::Water, Status::Running, t, 4) }), &geom_for(Size::XS, Magic::Normal), CY).is_empty()).count();
-        assert!(sweat > 20, "{sweat} sweat frames");
+        // stage 3 sweats a drop now and then, visible beside the body
+        let g = geom_for(Size::XS, Magic::Normal);
+        let drops: Vec<(i32, i32, f32)> = (0..400u64).flat_map(|t| state::sweat_drops(&Ctx::new(&SpiritParams { stage: Stage::Struggling, ..xs(Theme::Water, Status::Running, t, 4) }), &g, CY)).collect();
+        assert!(drops.len() > 20, "{} sweat frames", drops.len());
+        assert!(drops.iter().all(|d| d.0 >= 0 && d.1 >= 0 && (d.1 as usize) < g.h), "drops on the canvas: {drops:?}");
     }
 
     #[test]
@@ -2667,12 +2876,12 @@ mod tests {
         for stage in STAGES {
             for (theme, status) in Theme::ALL.into_iter().flat_map(|t| STATUSES.map(|s| (t, s))) {
                 for magic in Magic::ALL {
-                    for cols in [0, 3, LARGE_COLS, 60] {
+                    for cols in [0, 3, STD_COLS, 60] {
                         for (tick, seed) in ticks.iter().flat_map(|&t| [0, 1, u32::MAX].map(|s| (t, s))) {
                             let p = SpiritParams { stage, magic, cols, warning: tick % 2 == 0, ..xs(theme, status, tick, seed) };
                             let g = render(&p);
                             assert_eq!(g, render(&p), "deterministic");
-                            assert_eq!(g.rows, 2);
+                            assert_eq!(g.rows, 4);
                             assert_eq!(g.cells.len(), usize::from(g.cols) * usize::from(g.rows));
                         }
                     }
@@ -2681,29 +2890,83 @@ mod tests {
         }
     }
 
-    /// One XS frame per element at stage 2, running (`cargo test dump_xs -- --ignored --nocapture`).
+    /// (magic, tick, seed) of the XS golden frames, rendered for every
+    /// element and state in the standard card (17 columns).
+    const XS_GOLDEN_CASES: [(Magic, u64, u32); 3] = [(Magic::Normal, 37, 7), (Magic::Big, 121, 706_312_658), (Magic::Small, 260, 41)];
+
+    /// Hashes of the XS golden frames (theme-major, then state, then
+    /// `XS_GOLDEN_CASES`), captured when the standard card switched to the
+    /// redesigned 7 x 4 XS spirit; `SPIRIT_GOLDEN_PRINT=1` prints them.
+    #[rustfmt::skip]
+    const XS_GOLDEN: [u64; 60] = [
+        0x9551e9333745cd6e, 0xdf3e1a25a64d7685, 0xde5f3b842dbe0876, 0x8c4d12bcaade4c91, 0xe03014127d2a7d60, 0x4eceaf8677977634,
+        0x76dae5d953ecc50b, 0xce3e1ea1af447b5e, 0xd0f87e8dcacd0112, 0xca2b781017ea0a19, 0x4a6c7b71d9234dc1, 0x3c78f4e14dd70080,
+        0x51e58b4b661fe6da, 0x88ca151c2fea63a4, 0x10dbf51a4aa54620, 0xb5bc5303d1827c2c, 0xb8ba786841e73a6d, 0xbb733524326638ed,
+        0xadf281763c8442a2, 0xd251b8529bb0014c, 0x80552ac87dd9d191, 0x7347d102f2e3a7d0, 0x526ac1823fd5c4b3, 0x8b62eaff1ff1d85b,
+        0x622283c0042efcd2, 0xb4cc8ffe5745f19c, 0xe06ec5df04641e20, 0x843e78e5e6303f67, 0xfbcc7acbba84cda8, 0xf3e52a21fa050d29,
+        0x53a61336823e090d, 0x5f63ae1363cede27, 0x7d2fa0bd10439e38, 0x81c25ec7e3715ee4, 0x3e4c86f438a19153, 0xf4ff42277cda4cdc,
+        0x50093fd1738b1d8b, 0xb244de3ecceea0af, 0x7660524feb653a52, 0xb36713694cf59a69, 0x6b9dbaa9614d8012, 0x3755773239293a38,
+        0x664ca2df343f6c6b, 0x46401a4f374a6171, 0x66f62f6585feb717, 0x55977cad98989d8d, 0xf1c71edc3fa9a8d0, 0xd30aea150cce9a90,
+        0x0cf2c17a7f336fd0, 0xeeab5429268d6078, 0xfd079c364d29b5c3, 0xeeb8cb4fbee6bdd4, 0x8b885a2befa052a5, 0x4d90ebd192feca9d,
+        0x9304bde111bcb14b, 0x233be88dcdd929ea, 0xa27c1622d1417215, 0x1dd4a914bfb989c0, 0xe9a19b0927d932cf, 0x19863f428cc452c5,
+    ];
+
+    #[test]
+    fn xs_golden_frames() {
+        let mut ps = Vec::new();
+        for theme in Theme::ALL {
+            for status in STATUSES {
+                for (magic, tick, seed) in XS_GOLDEN_CASES {
+                    ps.push(SpiritParams { magic, cols: STD_COLS, ..xs(theme, status, tick, seed) });
+                }
+            }
+        }
+        let hashes: Vec<u64> = ps.iter().map(|p| grid_hash(&render(p))).collect();
+        if std::env::var("SPIRIT_GOLDEN_PRINT").is_ok() {
+            for chunk in hashes.chunks(6) {
+                println!("        {},", chunk.iter().map(|h| format!("0x{h:016x}")).collect::<Vec<_>>().join(", "));
+            }
+        }
+        for (i, (p, (got, want))) in ps.iter().zip(hashes.iter().zip(XS_GOLDEN)).enumerate() {
+            assert_eq!(*got, want, "XS golden frame {i}: {p:?}");
+        }
+    }
+
+    /// Prints `g` as rows, in 24-bit colour when `ansi`.
+    fn print_grid(g: &SpiritGrid, ansi: bool) {
+        for row in 0..g.rows {
+            let mut line = String::new();
+            for c in 0..g.cols {
+                let x = cell(g, c, row);
+                match (ansi, x.fg) {
+                    (true, Some((r, gg, b))) => line += &format!("\x1b[38;2;{r};{gg};{b}m{}\x1b[0m", x.ch),
+                    _ => line.push(x.ch),
+                }
+            }
+            println!("|{line}|");
+        }
+    }
+
+    /// XS frames per element: at rest (idle), casting at Normal and at Big,
+    /// in the standard card (`cargo test dump_xs -- --ignored --nocapture`;
+    /// `SPIRIT_ANSI=1` adds colour, `SPIRIT_SEED=…`).
     #[test]
     #[ignore]
     fn dump_xs() {
-        let tick = std::env::var("SPIRIT_TICK").ok().and_then(|v| v.parse().ok()).unwrap_or(44);
-        let cols = std::env::var("SPIRIT_COLS").ok().and_then(|v| v.parse().ok()).unwrap_or(LARGE_COLS);
-        for status in STATUSES {
-            for theme in Theme::ALL {
-                let magic = match std::env::var("SPIRIT_MAGIC").as_deref() {
-                    Ok("small") => Magic::Small,
-                    Ok("big") => Magic::Big,
-                    _ => Magic::Normal,
-                };
-                let stage = match magic {
-                    Magic::Small => Stage::Relaxed,
-                    Magic::Normal => Stage::Lively,
-                    Magic::Big => Stage::Struggling,
-                };
-                let g = render(&SpiritParams { cols, magic, stage, ..xs(theme, status, tick, 4) });
-                println!("{theme:?} {status:?}");
-                for row in 0..g.rows {
-                    println!("|{}|", (0..g.cols).map(|c| cell(&g, c, row).ch).collect::<String>());
-                }
+        let ansi = std::env::var("SPIRIT_ANSI").is_ok();
+        let seed = std::env::var("SPIRIT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+        let cast = first_cast(seed);
+        for theme in Theme::ALL {
+            let after = match theme {
+                Theme::Poison => 8,
+                Theme::Lightning => 0,
+                _ => 5,
+            };
+            println!("{theme:?} rest");
+            print_grid(&render(&SpiritParams { cols: STD_COLS, ..xs(theme, Status::Idle, cast + after, seed) }), ansi);
+            for (magic, stage) in [(Magic::Normal, Stage::Lively), (Magic::Big, Stage::Struggling)] {
+                println!("{theme:?} casting {magic:?}");
+                print_grid(&render(&SpiritParams { cols: STD_COLS, magic, stage, ..xs(theme, Status::Running, cast + after, seed) }), ansi);
             }
         }
     }

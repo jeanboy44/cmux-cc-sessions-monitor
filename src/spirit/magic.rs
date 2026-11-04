@@ -14,7 +14,13 @@
 //! Water, poison and lightning are centred in the magic area: the columns
 //! from just right of the body to the right edge of the canvas (which the
 //! card widens to its inner width, see `SpiritParams::cols`). Fire keeps
-//! breathing from the mouth, its length set by the level.
+//! breathing from the mouth, its length set by the level (Big roars to the
+//! right edge of the room).
+//!
+//! The small spirit (`Ctx::xs`) casts simpler, bolder shapes sized for
+//! readability rather than scaled down: a short bright flame, a solid disc
+//! with a clear highlight, dense round puffs (and the skull, which fits the
+//! standard card's area), and the same bolts as the S spirit.
 
 use std::f32::consts::TAU;
 
@@ -128,17 +134,21 @@ const BREATH_GAP: f32 = 1.8;
 /// (sub-pixels); the big flame's tip is the card area's edge.
 const EMBER_DRIFT: f32 = 2.0;
 
-/// Fire breath per magic level at magic scale 1: (flame reach past the gap
-/// in sub-pixels, half height of the cone's end in sub-pixels, wave
-/// amplitude in sub-pixels, embers, smoke puffs). Small is a short steady jet about three columns long, one
-/// or two rows tall and without smoke; Normal about five to six columns,
-/// two (at most three) rows at its end; Big roars to the right edge of
-/// the big-magic canvas (the 17-column card area), however wide the room.
-fn breath_style(m: Magic) -> (f32, f32, f32, u32, u32) {
-    match m {
-        Magic::Small => (6.2, 0.8, 0.35, 0, 0),
-        Magic::Normal => (9.3, 1.0, 0.55, 2, 1),
-        Magic::Big => (20.1, 4.6, 0.9, 7, 4),
+/// Fire breath per magic level: (flame reach past the gap in sub-pixels,
+/// half height of the cone's end in sub-pixels, wave amplitude in
+/// sub-pixels, embers, smoke puffs). Small is a short steady jet about three
+/// columns long, one or two rows tall and without smoke; Normal about five
+/// to six columns, two (at most three) rows at its end; Big roars to the
+/// right edge of the room (the card's inner edge). The small spirit's
+/// flame is two, four and all the columns long, slimmer, with fewer embers.
+fn breath_style(m: Magic, xs: bool) -> (f32, f32, f32, u32, u32) {
+    match (m, xs) {
+        (Magic::Small, false) => (6.2, 0.8, 0.35, 0, 0),
+        (Magic::Normal, false) => (9.3, 1.0, 0.55, 2, 1),
+        (Magic::Big, false) => (f32::INFINITY, 4.6, 0.9, 7, 4),
+        (Magic::Small, true) => (4.4, 0.7, 0.3, 0, 0),
+        (Magic::Normal, true) => (7.4, 1.1, 0.45, 1, 0),
+        (Magic::Big, true) => (f32::INFINITY, 3.4, 0.7, 4, 2),
     }
 }
 
@@ -147,18 +157,14 @@ fn breath_style(m: Magic) -> (f32, f32, f32, u32, u32) {
 /// a cone, densest along its middle, flickering and breaking up at the end
 /// with embers flying off and a little smoke.
 fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u64) {
-    let (reach, w_end, wave, embers, smokes) = breath_style(ctx.magic);
-    // a smaller spirit breathes a shorter, thinner cone with fewer embers
-    // and smoke puffs
-    let scaled = |n: u32| (n as f32 * ctx.ms).round() as u32;
-    let (w_end, embers, smokes) = (w_end * ctx.ms, scaled(embers), scaled(smokes));
+    let (reach, w_end, wave, embers, smokes) = breath_style(ctx.magic, ctx.xs);
     // the first flame column: one empty dot column right of the body
     let edge = cv.body_right().unwrap_or(a.ox.floor() as i32);
     let xs = (edge + 2) as f32;
     // the tip of the level's flame, measured from the mouth past the gap
     // (so the casting pose does not stretch it); embers of the shorter
     // flames drift a little past it
-    let tip = (a.ox + BREATH_GAP + reach * ctx.ms).min(a.end).round();
+    let tip = (a.ox + BREATH_GAP + reach).min(a.end).round();
     let drift = if ctx.magic == Magic::Big { 0.0 } else { EMBER_DRIFT };
     let a = &Area { end: (tip + drift).min(a.end), ..*a };
     let full = tip - xs;
@@ -210,12 +216,13 @@ fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u6
             let n = hf((x as u32).wrapping_mul(31).wrapping_add((y as u32).wrapping_mul(7)).wrapping_add(ctx.seed), ctx.t as u32);
             // densest along the middle of the jet, ragged at its edges
             let dens = (0.5 + 0.45 * (std::f32::consts::PI * u).sin()) * (1.0 - 0.55 * dy) + 0.25 * (1.0 - dy);
-            // the end breaks up into tongues
+            // the end breaks up into tongues; the small spirit's cone is
+            // solid (no ragged edges) and hotter, so it reads at its size
             let tip = u < 0.78 || n > (u - 0.78) * 2.6;
-            if !centre && (!tip || n > dens) {
+            if !centre && (!tip || (!ctx.xs && n > dens)) {
                 continue;
             }
-            let heat = (1.0 - dy) * (1.0 - 0.55 * u);
+            let heat = if ctx.xs { (1.0 - 0.6 * dy) * (1.0 - 0.35 * u) } else { (1.0 - dy) * (1.0 - 0.55 * u) };
             let col = if heat > 0.62 {
                 [255., 242., 168.]
             } else if heat > 0.4 {
@@ -273,12 +280,15 @@ pub(super) fn vortex_rot(ctx: &Ctx) -> f32 {
 /// the arms spin), with droplets trailing the arm tips and foam sparkles.
 /// It opens after each cast and closes again, centred in the magic area.
 fn vortex(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
-    let (dur, major, arms): (u64, f32, u32) = match ctx.magic {
-        Magic::Small => (20, 1.9, 1),
-        Magic::Normal => (18, 3.6, 2),
-        Magic::Big => (30, 7.6, 3),
+    let (dur, major, arms): (u64, f32, u32) = match (ctx.magic, ctx.xs) {
+        (Magic::Small, false) => (20, 1.9, 1),
+        (Magic::Normal, false) => (18, 3.6, 2),
+        (Magic::Big, false) => (30, 7.6, 3),
+        // the small spirit's disc keeps at least 3 x 2 cells at Normal
+        (Magic::Small, true) => (20, 2.4, 1),
+        (Magic::Normal, true) => (18, 4.0, 2),
+        (Magic::Big, true) => (30, 6.4, 3),
     };
-    let major = major * ctx.ms;
     if since_cast >= dur {
         return;
     }
@@ -307,12 +317,23 @@ fn vortex(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
             }
             let phi = q.atan2(p);
             let (nx, ny) = (px / hx, py / hy);
-            let spec = (nx + 0.36).powi(2) + (ny + 0.4).powi(2) < 0.1;
+            let spec = (nx + 0.36).powi(2) + (ny + 0.4).powi(2) < if ctx.xs { 0.16 } else { 0.1 };
             let s = ((phi + twist * rho - rot) * arms_f / TAU).rem_euclid(1.0);
             let on_arm = s < 0.2 + 0.14 * rho;
             let n = hf((x as u32).wrapping_mul(97).wrapping_add((y as u32).wrapping_mul(13)), ctx.seed);
             let (c, paint) = if spec {
                 ([228., 248., 255.], true)
+            } else if ctx.xs {
+                // the small disc: denser and lighter blues, so it reads as a solid shape
+                if rho > 0.86 {
+                    ([110., 185., 250.], n < 0.9)
+                } else if on_arm && rho > 0.2 {
+                    (lerp([60., 130., 225.], [170., 230., 255.], (rho - 0.2) / 0.66), true)
+                } else if rho < 0.34 {
+                    ([40., 95., 210.], n < 0.95)
+                } else {
+                    ([55., 120., 215.], n < 0.7)
+                }
             } else if rho > 0.86 {
                 ([78., 150., 232.], n < 0.7)
             } else if on_arm && rho > 0.2 {
@@ -355,9 +376,6 @@ fn vortex(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
 pub(super) fn fog_anchor(g: &Geom) -> (f32, f32) {
     (area_mid(g), g.rcy)
 }
-
-/// Smallest puff radius (sub-pixels) at any magic scale.
-const MIN_FOG_R: f32 = 1.6;
 
 /// Ticks one cast's toxic puffs live.
 pub(super) fn fog_life(m: Magic) -> u64 {
@@ -412,6 +430,12 @@ fn skull_alpha(age: u64) -> f32 {
         a if a < SKULL_FADE => 1.0,
         a => (SKULL_END - a) as f32 / (SKULL_END - SKULL_FADE + 1) as f32,
     }
+}
+
+/// Whether the skull fits the canvas: as tall as the skull, and the magic
+/// area at least a column wider on each side.
+fn skull_fits(g: &Geom) -> bool {
+    g.h >= SKULL.len() && g.w as f32 - area_start(g) >= SKULL[0].len() as f32 + 2.0
 }
 
 /// Top-left sub-pixel of the skull: centred on the burst anchor, snapped so
@@ -469,21 +493,23 @@ fn skull(cv: &mut Canvas, ctx: &Ctx, a: &Area, left: i32, alpha: f32) {
 /// edges wobbling in smooth noise; Normal and Big casts puff several
 /// overlapping clouds. The dither pattern is fixed, so the fog creeps
 /// instead of flickering. At the end of a Big cast the fog settles into a
-/// [`SKULL`] that shows for a few ticks and fades out (not at the half-size
-/// magic scale, whose canvas is too small for it).
+/// [`SKULL`] that shows for a few ticks and fades out (only where it fits,
+/// see [`skull_fits`]). The small spirit puffs smaller but denser, brighter
+/// clouds.
 fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
-    let (rmax, puffs, spread, thick): (f32, u32, f32, f32) = match ctx.magic {
-        Magic::Small => (2.5, 1, 0.0, 1.0),
-        Magic::Normal => (5.0, 2, 3.4, 1.0),
-        Magic::Big => (9.5, 3, 2.6, 1.2),
+    let (rmax, puffs, spread, thick): (f32, u32, f32, f32) = match (ctx.magic, ctx.xs) {
+        (Magic::Small, false) => (2.5, 1, 0.0, 1.0),
+        (Magic::Normal, false) => (5.0, 2, 3.4, 1.0),
+        (Magic::Big, false) => (9.5, 3, 2.6, 1.2),
+        (Magic::Small, true) => (3.0, 1, 0.0, 1.1),
+        (Magic::Normal, true) => (4.6, 2, 2.6, 1.15),
+        (Magic::Big, true) => (7.0, 3, 2.4, 1.3),
     };
-    // a scaled-down puff keeps enough radius to cover a dot centre
-    let (rmax, spread) = ((rmax * ctx.ms).max(MIN_FOG_R), spread * ctx.ms);
     let life = fog_life(ctx.magic);
     let (ax, ay) = fog_anchor(&cv.g);
     // (centre x, centre y, radius, strength, wobble phase) of every live puff
     let mut live: Vec<(f32, f32, f32, f32, f32)> = Vec::new();
-    let skulls = ctx.magic == Magic::Big && ctx.ms >= 1.0;
+    let skulls = ctx.magic == Magic::Big && skull_fits(&cv.g);
     let mut alpha = 0.0f32;
     for age in 0..if skulls { life.max(SKULL_END) } else { life } {
         let Some(c) = ctx.t.checked_sub(age) else { break };
@@ -563,34 +589,36 @@ fn fog_puffs(cv: &mut Canvas, ctx: &Ctx, a: &Area, live: &mut [(f32, f32, f32, f
             // the dither mirrors about the anchor, so it never leans the cloud
             let mx = ((xf - ax).abs() * 2.0) as u32;
             let q = hf(mx.wrapping_mul(131).wrapping_add((y as u32).wrapping_mul(17)), ctx.seed);
-            if dens < q * 0.8 + 0.12 {
+            // the small spirit's puffs are denser and brighter
+            let (cut, lo, hi) = if ctx.xs { (q * 0.45 + 0.1, [70., 150., 70.], [185., 255., 130.]) } else { (q * 0.8 + 0.12, [48., 105., 52.], [165., 250., 115.]) };
+            if dens < cut {
                 continue;
             }
-            a.dot(cv, x, y, lerp([48., 105., 52.], [165., 250., 115.], dens), 1);
+            a.dot(cv, x, y, lerp(lo, hi, dens), 1);
         }
     }
 }
 
-/// Lightning per magic level at magic scale `ms`: (flicker duration of
-/// one bolt, zig-zag amplitude of the main bolt in sub-pixels, spark burst
-/// reach of the main bolt, main bolt width in dots).
-fn bolt_style(m: Magic, ms: f32) -> (u64, f32, i32, i32) {
-    let (dur, amp, burst, width) = match m {
+/// Lightning per magic level: (flicker duration of one bolt, zig-zag
+/// amplitude of the main bolt in sub-pixels, spark burst reach of the main
+/// bolt, main bolt width in dots). Every size strikes the same bolts: thin
+/// ones are one dot wide, the thick one three, which reads even at the
+/// small spirit's size.
+fn bolt_style(m: Magic) -> (u64, f32, i32, i32) {
+    match m {
         Magic::Small => (3, 0.8, 1, 1),
         Magic::Normal => (3, 0.8, 1, 1),
         Magic::Big => (7, 1.0, 4, 3),
-    };
-    let scaled = |n: i32| (n as f32 * ms).ceil() as i32;
-    (dur, amp * ms, scaled(burst), scaled(width))
+    }
 }
 
 /// Ticks a bolt may flash after its cast: the bolts of a Normal or Big cast
 /// are staggered by up to this much so they never all flash at once.
 const MAX_DELAY: u64 = 2;
-/// Half the span (sub-pixels, at magic scale 1) the four Normal bolts spread
-/// over; the magic area may cut it shorter.
+/// Half the span (sub-pixels) the four Normal bolts spread over; the magic
+/// area may cut it shorter.
 const NORMAL_SPREAD: f32 = 5.5;
-/// Zig-zag amplitude (sub-pixels, at magic scale 1) of a thin side bolt.
+/// Zig-zag amplitude (sub-pixels) of a thin side bolt.
 const THIN_AMP: f32 = 0.7;
 
 /// One bolt of a cast: its zig-zag points from the top row to the bottom
@@ -613,8 +641,7 @@ pub(super) struct PlannedBolt {
 /// random distances around it, two on one side and one on the other, clear
 /// of it. Normal and Big bolts flash a random tick or two apart.
 fn bolts(ctx: &Ctx, lo: f32, mid: f32, end: f32, bottom: f32, cast: u64) -> Vec<PlannedBolt> {
-    let (_, amp, burst, width) = bolt_style(ctx.magic, ctx.ms);
-    let ms = ctx.ms;
+    let (_, amp, burst, width) = bolt_style(ctx.magic);
     let ck = (cast as u32) ^ ((cast >> 32) as u32);
     let key = ctx.seed ^ 0xB017;
     // keeps a bolt in the magic area (Small keeps its original path)
@@ -646,7 +673,7 @@ fn bolts(ctx: &Ctx, lo: f32, mid: f32, end: f32, bottom: f32, cast: u64) -> Vec<
         Magic::Normal => {
             // four slots across the spread, a random offset in each, the
             // group shifted back onto the centre
-            let half = (NORMAL_SPREAD * ms).min((hi - lo) / 2.0 - 0.5).max(0.0);
+            let half = NORMAL_SPREAD.min((hi - lo) / 2.0 - 0.5).max(0.0);
             let slot_w = 2.0 * half / 4.0;
             let mut xs: Vec<f32> = (0..4u32).map(|k| -half + (k as f32 + 0.5) * slot_w + (hf(key ^ 0x4E0 ^ k, ck) - 0.5) * 0.6 * slot_w).collect();
             let shift = xs.iter().sum::<f32>() / 4.0;
@@ -678,11 +705,10 @@ fn bolts(ctx: &Ctx, lo: f32, mid: f32, end: f32, bottom: f32, cast: u64) -> Vec<
             // thin bolts keep a clear dot column off the thick one's reach
             let half_w = ((width - 1) / 2) as f32;
             let clear = amp + half_w + 1.5;
-            let step = 2.0 * ms.max(0.5);
-            let d1 = clear + hf(key ^ 0xB10, ck) * ms;
-            let d2 = d1 + step + hf(key ^ 0xB11, ck) * ms;
+            let d1 = clear + hf(key ^ 0xB10, ck);
+            let d2 = d1 + 2.0 + hf(key ^ 0xB11, ck);
             // the lone bolt on the other side balances the pair
-            let d3 = ((d1 + d2) / 2.0 + 0.5 + (hf(key ^ 0xB12, ck) - 0.5) * 1.5 * ms).max(clear + 0.5);
+            let d3 = ((d1 + d2) / 2.0 + 0.5 + (hf(key ^ 0xB12, ck) - 0.5) * 1.5).max(clear + 0.5);
             let side = if hf(key ^ 0xB13, ck) < 0.5 { -1.0 } else { 1.0 };
             let mut out = vec![thick];
             for (k, (d, s)) in [(d1, side), (d2, side), (d3, -side)].into_iter().enumerate() {
@@ -690,7 +716,7 @@ fn bolts(ctx: &Ctx, lo: f32, mid: f32, end: f32, bottom: f32, cast: u64) -> Vec<
                 let keep = move |x: f32| if s > 0.0 { x.max(near) } else { x.min(near) }.clamp(lo, hi);
                 let fin = Some(s);
                 let delay = delay(k as u32) % (MAX_DELAY + 1);
-                out.push(thin(path(key ^ 0x70 ^ k as u32, mid + s * d, THIN_AMP * ms, fin, &keep), delay));
+                out.push(thin(path(key ^ 0x70 ^ k as u32, mid + s * d, THIN_AMP, fin, &keep), delay));
             }
             // never all on the cast tick
             if out.iter().all(|b| b.delay == 0) {
@@ -714,7 +740,7 @@ fn bolts(ctx: &Ctx, lo: f32, mid: f32, end: f32, bottom: f32, cast: u64) -> Vec<
 /// canvas `g` (the main or thick bolt first).
 #[cfg(test)]
 pub(super) fn bolt_plan(g: &Geom, ctx: &Ctx) -> Vec<PlannedBolt> {
-    let (dur, ..) = bolt_style(ctx.magic, ctx.ms);
+    let (dur, ..) = bolt_style(ctx.magic);
     let Some((since_cast, _)) = stream(ctx.seed, ctx.t) else { return Vec::new() };
     if since_cast >= dur + MAX_DELAY {
         return Vec::new();
@@ -729,7 +755,7 @@ pub(super) fn bolt_plan(g: &Geom, ctx: &Ctx) -> Vec<PlannedBolt> {
 /// tick or two apart; Big one thick bolt (three dots) in the centre with a
 /// strong burst and three thin ones around it.
 fn bolt(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
-    let (dur, ..) = bolt_style(ctx.magic, ctx.ms);
+    let (dur, ..) = bolt_style(ctx.magic);
     if since_cast >= dur + MAX_DELAY {
         return;
     }

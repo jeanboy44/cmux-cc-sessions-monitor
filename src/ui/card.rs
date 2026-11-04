@@ -3,10 +3,11 @@
 //!
 //! Full card: always [`CARD_W`] x [`CARD_H`] = 20 x 10 cells (borders
 //! included; inner 18 x 8; user decision: narrowed from 24 because it looked
-//! wide, then one row taller for the summary), whatever the spirit size: a
-//! spirit band of [`SCENE_ROWS`] rows (every spirit size is that tall; the
-//! body sits on the left and the magic it casts, scaled by context usage,
-//! fills the right) and [`INFO_ROWS`] text rows: name, status badge (+
+//! wide, then one row taller for the summary): a spirit band of
+//! [`SCENE_ROWS`] rows with the small [`Size::XS`] spirit (user decision: a
+//! small card gets the small spirit; its body sits on the left and the
+//! magic it casts, scaled by context usage, fills the right) and
+//! [`INFO_ROWS`] text rows: name, status badge (+
 //! elapsed / last activity), one extra (the PR chip, else the branch), then
 //! the one-line summary (rows of disabled or unknown extras collapse; with no
 //! summary the last row shows the next extra, e.g. the branch the PR took the
@@ -14,8 +15,9 @@
 //!
 //! Large card ([`CardLayout::Large`], `v`): at least [`LARGE_W`] x
 //! [`LARGE_H`] = 32 x 14 (inner 30 x 12, as wide as the preview's side
-//! list): the quarter-area [`Size::XS`] spirit in a [`LARGE_SCENE_ROWS`]-row
-//! band at the top left with its magic to the right, then name, status badge
+//! list): the bigger [`Size::S`] spirit in a [`LARGE_SCENE_ROWS`]-row band at
+//! the top left with its magic in the wide area to the right, then name,
+//! status badge
 //! (+ elapsed / last activity, the model family word on the right), branch,
 //! PR, and the summary on up to three lines; unused rows stay blank. In the
 //! grid a large card fills its cell (see [`crate::ui::grid::card_rect`]).
@@ -48,6 +50,7 @@ use crate::ui::style::{self, fmt_duration, truncate_to_width};
 /// Spirit band size in cells: room for the largest spirit.
 pub const SCENE_COLS: u16 = max_grid_size().0;
 pub const SCENE_ROWS: u16 = max_grid_size().1;
+const _: () = assert!(spirit::grid_size(Size::XS).1 == SCENE_ROWS, "the XS spirit fills the standard band");
 /// Text rows below the spirit band.
 pub const INFO_ROWS: u16 = 4;
 /// Inner width of a card.
@@ -61,14 +64,24 @@ const _: () = assert!(SCENE_COLS <= INNER_W, "the largest spirit fits the card")
 /// stretches it wider to fill its cell; never narrower.
 pub const LARGE_W: u16 = 32;
 pub const LARGE_H: u16 = 14;
-/// Spirit band of the large card: as tall as the XS spirit.
-pub const LARGE_SCENE_ROWS: u16 = spirit::grid_size(Size::XS).1;
+/// Spirit band of the large card: as tall as the S spirit.
+pub const LARGE_SCENE_ROWS: u16 = spirit::grid_size(Size::S).1;
 /// Summary lines of the large card.
 const LARGE_SUMMARY_ROWS: usize = 3;
 const _: () = assert!(
-    spirit::grid_size_for(Size::XS, Magic::Big).0 + SPIRIT_LEFT_PAD <= LARGE_W - 2,
-    "big magic fits right of the padded XS body"
+    spirit::grid_size_for(Size::S, Magic::Big).0 + SPIRIT_LEFT_PAD <= LARGE_W - 2,
+    "big magic fits right of the padded S body"
 );
+const _: () = assert!(LARGE_SCENE_ROWS + 7 <= LARGE_H - 2, "band, name, badge, branch, PR and three summary lines");
+
+/// The spirit size a card layout draws (user decision: the standard card
+/// gets the small spirit, the large card the bigger one).
+pub const fn spirit_size(layout: CardLayout) -> Size {
+    match layout {
+        CardLayout::Standard => Size::XS,
+        CardLayout::Large => Size::S,
+    }
+}
 
 /// Full card size (columns, rows) of a layout, borders included.
 pub const fn card_size(layout: CardLayout) -> (u16, u16) {
@@ -116,7 +129,7 @@ pub fn reset_spirit_renders() {
 /// Free columns between the card border and the spirit grid.
 const SPIRIT_LEFT_PAD: u16 = 1;
 const _: () = assert!(
-    spirit::grid_size_for(Size::S, Magic::Big).0 + SPIRIT_LEFT_PAD <= INNER_W,
+    spirit::grid_size_for(Size::XS, Magic::Big).0 + SPIRIT_LEFT_PAD <= INNER_W,
     "big magic fits right of the padded body"
 );
 
@@ -186,8 +199,8 @@ fn render_full(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: b
     f.render_widget(block, rect);
 
     let (size, scene_rows) = match layout {
-        CardLayout::Standard => (Size::S, SCENE_ROWS),
-        CardLayout::Large => (Size::XS, LARGE_SCENE_ROWS),
+        CardLayout::Standard => (spirit_size(layout), SCENE_ROWS),
+        CardLayout::Large => (spirit_size(layout), LARGE_SCENE_ROWS),
     };
     let band = Rect { height: scene_rows.min(inner.height), ..inner };
     let params = SpiritParams {
@@ -591,7 +604,7 @@ mod tests {
     fn every_spirit_grid_sits_left_inside_the_band() {
         // user decision: the body sits on the left so the magic has room on the right
         let band = Rect::new(1, 1, CARD_W - 2, SCENE_ROWS);
-        for size in Size::ALL {
+        for size in [Size::XS, Size::S, Size::M, Size::L] {
             for magic in Magic::ALL {
                 for tick in [0, 30, 61] {
                     let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick, seed: 1, warning: false, magic, stage: Default::default(), cols: 0 };
@@ -625,7 +638,8 @@ mod tests {
         for theme in Theme::ALL {
             for status in [Status::Idle, Status::Running] {
                 for magic in Magic::ALL {
-                    let params = SpiritParams { theme, status, size: Size::S, tick: 3, seed: 1, warning: false, magic, stage: Default::default(), cols: 0 };
+                    let size = spirit_size(CardLayout::Standard);
+                    let params = SpiritParams { theme, status, size, tick: 3, seed: 1, warning: false, magic, stage: Default::default(), cols: 0 };
                     let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
                     draw_spirit(&mut buf, band, &params);
                     let lo = (0..CARD_W)
@@ -633,7 +647,7 @@ mod tests {
                         .expect("painted");
                     // about one free column between the border and the body
                     assert!((band.x + 1..=band.x + 2).contains(&lo), "{theme:?} {status:?} {magic:?}: body left edge at {lo}");
-                    let body_c = band.x as f32 + SPIRIT_LEFT_PAD as f32 + spirit::body_center_x(Size::S);
+                    let body_c = band.x as f32 + SPIRIT_LEFT_PAD as f32 + spirit::body_center_x(size);
                     assert!(body_c < band.x as f32 + band.width as f32 / 2.0 - 3.0, "body left of centre: {body_c}");
                 }
             }
@@ -1145,8 +1159,9 @@ mod tests {
     fn layouts_have_exact_card_sizes() {
         assert_eq!(card_size(CardLayout::Standard), (20, 10));
         assert_eq!(card_size(CardLayout::Large), (32, 14), "about 2.3:1, as wide as the preview's side list");
-        assert_eq!((LARGE_W, LARGE_H, LARGE_SCENE_ROWS), (32, 14, 2));
-        assert_eq!(spirit::grid_size(Size::XS).1, LARGE_SCENE_ROWS, "the XS spirit fills the band");
+        assert_eq!((LARGE_W, LARGE_H, LARGE_SCENE_ROWS), (32, 14, 4));
+        assert_eq!(spirit::grid_size(Size::S).1, LARGE_SCENE_ROWS, "the S spirit fills the large band");
+        assert_eq!(spirit::grid_size(Size::XS).1, SCENE_ROWS, "the XS spirit fills the standard band");
         let s = opus("proj-a", Status::Running);
         for (layout, (w, h)) in [(CardLayout::Standard, (20u16, 10u16)), (CardLayout::Large, (32, 14))] {
             let cfg = Config { card_layout: layout, ..all_extras() };
@@ -1175,12 +1190,88 @@ mod tests {
         }
     }
 
+    /// The spirit band of a card drawn into `buf` at (x0, y0) matches the
+    /// spirit of `size` rendered for the session, cell for cell.
+    fn band_shows(buf: &Buffer, x0: u16, y0: u16, cols: u16, s: &Session, cfg: &Config, size: Size, tick: u64) -> bool {
+        let p = SpiritParams {
+            theme: theme_for(s, cfg),
+            status: s.status,
+            size,
+            tick,
+            seed: seed_for(s),
+            warning: spirit::warning(s.ctx_percent),
+            magic: spirit::magic_for(s.ctx_percent),
+            stage: spirit::stage_for(s.ctx_percent),
+            cols,
+        };
+        let g = spirit::render(&p);
+        (0..g.rows).all(|r| {
+            (0..g.cols.min(cols)).all(|c| {
+                let want = g.cells[usize::from(r) * usize::from(g.cols) + usize::from(c)].ch;
+                buf[(x0 + 1 + SPIRIT_LEFT_PAD + c, y0 + 1 + r)].symbol() == want.to_string()
+            })
+        })
+    }
+
+    #[test]
+    fn standard_card_draws_the_small_sprite_and_large_card_the_s_sprite() {
+        // user decision: a small card gets the small spirit, a large card the bigger one
+        assert_eq!(spirit_size(CardLayout::Standard), Size::XS);
+        assert_eq!(spirit_size(CardLayout::Large), Size::S);
+        for status in [Status::Running, Status::Idle, Status::NeedsInput, Status::Done] {
+            for pct in [None, Some(10.0), Some(60.0)] {
+                for tick in [0, 7, 44] {
+                    let s = Session { ctx_percent: pct, ..session("proj-a", status) };
+                    for (layout, (w, h), stretch) in [(CardLayout::Standard, (CARD_W, CARD_H), 0u16), (CardLayout::Standard, (CARD_W, CARD_H), 12), (CardLayout::Large, (LARGE_W, LARGE_H), 0), (CardLayout::Large, (LARGE_W, LARGE_H), 9)] {
+                        let cfg = Config { card_layout: layout, ..all_extras() };
+                        let w = w + stretch;
+                        let buf = draw(w, h, |f| render_wide_card(f, f.area(), &s, &cfg, false, tick));
+                        let cols = w - 2 - SPIRIT_LEFT_PAD;
+                        let other = if layout == CardLayout::Standard { Size::S } else { Size::XS };
+                        assert!(band_shows(&buf, 0, 0, cols, &s, &cfg, spirit_size(layout), tick), "{layout:?} +{stretch} {status:?} {pct:?} {tick}");
+                        assert!(!band_shows(&buf, 0, 0, cols, &s, &cfg, other, tick), "{layout:?} {status:?}: not the {other:?} spirit");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn standard_cards_keep_the_small_sprite_and_its_magic_inside() {
+        // centred standard cards and the stretched ones of the preview column
+        let cfg = all_extras();
+        for (cw, pct) in [(CARD_W, 80.0), (CARD_W, 30.0), (CARD_W, 10.0), (26, 80.0), (34, 60.0), (40, 30.0)] {
+            for theme in Theme::ALL {
+                let cfg = Config { theme, ..cfg.clone() };
+                let s = Session { ctx_percent: Some(pct), ..session("proj-a", Status::Running) };
+                for t in [0, 9, 23, 44, 61, 90] {
+                    let rect = Rect::new(3, 2, cw, CARD_H);
+                    for stretch in [false, true] {
+                        let buf = draw(cw + 8, CARD_H + 5, |f| if stretch { render_wide_card(f, rect, &s, &cfg, false, t) } else { render_card(f, rect, &s, &cfg, false, t) });
+                        for y in 0..CARD_H + 5 {
+                            for x in 0..cw + 8 {
+                                let inside = (3..3 + cw).contains(&x) && (2..2 + CARD_H).contains(&y);
+                                assert!(inside || buf[(x, y)].symbol() == " ", "w={cw} t={t}: ({x},{y}) outside the card");
+                            }
+                        }
+                        let lit: Vec<(u16, u16)> = (0..CARD_H + 5).flat_map(|y| (0..cw + 8).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).collect();
+                        assert!(!lit.is_empty(), "w={cw} t={t}");
+                        // the card's left and right border columns
+                        let (l, r) = if stretch { (3, 3 + cw - 1) } else { (3 + (cw - CARD_W) / 2, 3 + (cw - CARD_W) / 2 + CARD_W - 1) };
+                        assert!(lit.iter().all(|&(x, y)| (3..=2 + SCENE_ROWS).contains(&y) && (l + 1..r).contains(&x)), "{theme:?} w={cw} t={t}: spirit and magic in the band: {lit:?}");
+                        assert!(lit.iter().map(|p| p.0).min().unwrap() <= l + 4, "w={cw}: body on the left");
+                    }
+                }
+            }
+        }
+    }
+
     fn rows_of(s: &Session, cfg: &Config, w: u16, h: u16) -> Vec<String> {
         rows(&draw(w, h, |f| render_card(f, f.area(), s, cfg, false, 0)))
     }
 
     #[test]
-    fn large_card_spirit_is_xs_in_a_two_row_band_body_left() {
+    fn large_card_spirit_is_s_in_a_four_row_band_body_left() {
         for theme in Theme::ALL {
             let mut cfg = large_cfg();
             cfg.theme = theme;
@@ -1200,13 +1291,13 @@ mod tests {
             }
         }
         // the magic grows with ctx in the area right of the body (cells
-        // painted from column 7 on, summed over a few casts)
+        // painted from column 9 on, summed over a few casts)
         let painted = |pct: f32| -> usize {
             let s = Session { ctx_percent: Some(pct), ..session("proj-a", Status::Running) };
             (0..120)
                 .map(|t| {
                     let buf = draw(LARGE_W, LARGE_H, |f| render_card(f, f.area(), &s, &large_cfg(), false, t));
-                    (1..=LARGE_SCENE_ROWS).flat_map(|y| (7..LARGE_W - 1).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).count()
+                    (1..=LARGE_SCENE_ROWS).flat_map(|y| (9..LARGE_W - 1).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).count()
                 })
                 .sum()
         };

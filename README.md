@@ -8,7 +8,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 
 ## Features
 
-- One 20x10 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, the git branch (or PR) and a one-line summary. `v` switches to a large card, at least 32x14 and stretched to fill its grid cell, with a quarter-size spirit and more text: the model family, branch and PR on their own rows, and the summary on up to three lines.
+- One 20x10 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, the git branch (or PR) and a one-line summary. `v` switches to a large card, at least 32x14 and stretched to fill its grid cell, with a bigger spirit, a wide area for its magic and more text: the model family, branch and PR on their own rows, and the summary on up to three lines.
 - Each spirit stands for a Claude model: fable is water, opus is fire, sonnet is lightning, haiku is poison (green). You can change the element per model in settings, and unknown models use the `theme` element (default fire).
 - The spirit's state is its animation: running (the body churns and casts its magic to the right: fire breath from the mouth, and a water vortex, poison fog or lightning bolts centred in the room right of the body), needs input (a bobbing `?`), idle (dim slow bob and `z`), done (sparkles), unknown (gray).
 - Context usage sets how hard the spirit works (relaxed, lively, struggling; see [Context usage setup](#context-usage-setup)) and, while running, the size of the magic: small under 20%, normal from 20%, big from 50%, and a red warning flicker above 90%.
@@ -50,7 +50,7 @@ The config file is `~/.config/cmux-magigent/config.toml` (if it does not exist y
 | `pr_poll_seconds` | `45` | PR lookup interval |
 | `guess_worktree` | `true` | Guess the worktree of sessions started in the main repository |
 | `done_retention_minutes` | `10` | How long finished sessions stay on screen |
-| `card_layout` | `"standard"` | `"standard"`: 20x10 cards (spirit, name, badge, branch or PR, one-line summary); `"large"`: 32x14 cards (stretched to fill the row) with a small spirit and more text (model, branch, PR, summary on up to three lines). Any other value loads as `"standard"`. Also switched with `v` and in settings |
+| `card_layout` | `"standard"` | `"standard"`: 20x10 cards (spirit, name, badge, branch or PR, one-line summary); `"large"`: 32x14 cards (stretched to fill the row) with a bigger spirit and more text (model, branch, PR, summary on up to three lines). Any other value loads as `"standard"`. Also switched with `v` and in settings |
 | `[extras]` | `branch`, `elapsed`, `summary` on; `last_activity`, `pr` off | Extra info shown on cards |
 
 ## Context usage setup
@@ -77,9 +77,9 @@ The usage drives three stages, on the same thresholds as the magic size:
 - Lively (20% to 50%, or unknown): the normal motion.
 - Struggling (50% and up): the body trembles and pants with a faster bob and a slight squash and stretch, pale sweat drops slide down its side, casts wind up longer and recoil harder, and an idle spirit slumps with heavy, slow breaths. Above 90% the body also flickers red.
 
-The water vortex, poison fog and lightning bolts are centred in the magic area, the columns from just right of the body to the card's inner right edge (the wider preview card gives them its full width); the fire breath leaves the mouth. At normal magic the water vortex turns very slowly (about one turn every 8 s) and four thin lightning bolts strike at random spots a tick or two apart; at big magic one thick bolt strikes in the centre among three thin ones, and the poison fog of each cast settles into a skull that lingers for about half a second before it fades.
+The water vortex, poison fog and lightning bolts are centred in the magic area, the columns from just right of the body to the card's inner right edge (a stretched card, in the grid or the preview column, gives them its full width); the fire breath leaves the mouth, and at big magic it roars to the card's inner right edge. At normal magic the water vortex turns very slowly (about one turn every 8 s) and four thin lightning bolts strike at random spots a tick or two apart; at big magic one thick bolt strikes in the centre among three thin ones, and the poison fog of each cast settles into a skull that lingers for about half a second before it fades.
 
-The large card's spirit is a quarter-size version (6x2 cells) with the same eyes, state cues, element looks, pose and stages; its magic is about half the size and follows the same placement rules.
+The card size picks the spirit size: the standard card (and the standard cards of the preview column) draws a small spirit, a round body of about 5x3 cells in a 7x4 grid, and the large card draws the bigger 11x4 spirit, whose magic gets an area of about 22 columns to its right. The small spirit has the same state cues, element looks, pose and stages; its eyes are two single white dots in proportion to its body, and its magic is drawn simpler and bolder so it reads at that size: a short bright flame, a solid disc with a clear highlight, dense round puffs (Big poison still settles into the skull, which fits the standard card), and the same bolts as the bigger spirit.
 
 ## How status is detected
 

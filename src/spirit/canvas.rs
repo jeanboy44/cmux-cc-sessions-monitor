@@ -42,6 +42,8 @@ pub(super) struct Geom {
     pub rcy: f32,
     /// low-resolution sizes exaggerate flames and spikes so they still read
     pub small: bool,
+    /// eyes are single white dots (the small spirit), not cleared cells
+    pub dot_eyes: bool,
 }
 
 pub(super) struct Canvas {
