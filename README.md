@@ -8,10 +8,10 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 
 ## Features
 
-- One 20x9 card per session: a small Gastly-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, and the git branch (or PR).
+- One 20x9 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, and the git branch (or PR).
 - Each spirit stands for a Claude model: fable is water, opus is fire, sonnet is lightning, haiku is poison (green). You can change the element per model in settings, and unknown models use the `theme` element (default fire).
 - The spirit's state is its animation: running (the body churns and casts its magic to the right: fire breath, water vortex, poison fog, lightning bolt), needs input (a bobbing `?`), idle (dim slow bob and `z`), done (sparkles), unknown (gray).
-- Context usage sets the size of the magic: small under 30%, normal, big from 70%, and a red warning flicker above 90%.
+- While running, context usage sets the size of the magic: small under 30%, normal, big from 70%, and a red warning flicker above 90%.
 - The card border blinks blue while the session has unread cmux notifications, for example when it finished.
 - `Enter` jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
 - Cards are grouped by cmux window. An optional PR chip shows the open pull request for the branch.
@@ -44,7 +44,7 @@ The config file is `~/.config/cmux-cc-monitor/config.toml`. It is optional, miss
 |---|---|---|
 | `theme` | `"fire"` | Element for sessions whose model is unknown (`fire`, `water`, `poison`, `lightning`) |
 | `model_themes` | fable `water`, opus `fire`, sonnet `lightning`, haiku `poison` | Element per model family, e.g. `[model_themes]` with `opus = "water"` |
-| `context_limit_tokens` | `200000` | Context window size used when usage is estimated from the transcript |
+| `context_limit_tokens` | `200000` | Context window size used when usage is estimated from the transcript; for 1M-context models without the statusline file, raise it (e.g. `1000000`) |
 | `ctx_fresh_seconds` | `300` | How long the statusline context file is trusted |
 | `pr_poll_seconds` | `45` | PR lookup interval |
 | `guess_worktree` | `true` | Guess the worktree of sessions started in the main repository |
@@ -58,11 +58,16 @@ The monitor reads context usage from `~/.cache/cmux-cc-monitor/ctx/<session_id>.
 ```sh
 input=$(cat)
 dir="$HOME/.cache/cmux-cc-monitor/ctx"; mkdir -p "$dir"
-echo "$input" | jq -c '{session_id: .session_id, used_percentage: (.context_window.used_percentage // 0)}' \
-  > "$dir/$(echo "$input" | jq -r .session_id).json"
+pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
+if [ -n "$pct" ]; then
+  echo "$input" | jq -c '{session_id: .session_id, used_percentage: .context_window.used_percentage}' \
+    > "$dir/$(echo "$input" | jq -r .session_id).json"
+fi
 ```
 
-Without it, the monitor falls back to the last usage recorded in the session transcript divided by `context_limit_tokens`.
+The file is written only once Claude Code reports a percentage, so no 0% is recorded before the first reply.
+
+Without it, the monitor falls back to the last usage recorded in the session transcript divided by `context_limit_tokens` (set it to `1000000` for 1M-context models).
 
 ## How status is detected
 
