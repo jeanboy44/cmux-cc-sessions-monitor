@@ -11,7 +11,10 @@
 //! - State ([`Status`]): RUNNING casts element magic to the right (see `magic`),
 //!   NEEDS_INPUT shows a bobbing `?` and a pulsing glow, IDLE is dim and slow
 //!   with a `z`, DONE sparkles and bounces, UNKNOWN is grey.
-//! - Eyes are the same in every state (see `eyes`).
+//! - Eyes are the same in every state (see `eyes`); while casting, the eye
+//!   dot looks one sub-pixel toward the magic.
+//! - Casting pose (RUNNING): a short wind-up leaning toward the magic before
+//!   each cast and a small recoil on release (see `state::pose`).
 
 mod body;
 mod canvas;
@@ -254,23 +257,27 @@ impl Ctx {
 pub fn render(p: &SpiritParams) -> SpiritGrid {
     let g = geom_for(p.size, p.magic);
     let ctx = Ctx::new(p);
-    let sim = particles::simulate(&ctx);
+    let parts = particles::simulate(&ctx);
     let pulse = state::pulse(ctx.state, ctx.tf);
-    let bob_px = (state::bob(ctx.state, ctx.seed, ctx.tf) * g.ppu).round();
+    let pose = state::pose(ctx.elem, ctx.state, ctx.seed, ctx.t);
+    let bob_px = (state::bob(ctx.state, ctx.seed, ctx.tf) * g.ppu).round() + pose.dy;
     let look = body::Look {
         cy: CY + bob_px / g.ppu,
         pulse,
         bright: state::brightness(ctx.state, pulse),
         flash: element::flashing(&ctx),
         warn: p.warning && (p.tick / WARN_HALF_PERIOD) % 2 == 0,
+        dx: pose.dx,
+        tilt: pose.tilt,
+        swell: pose.swell,
     };
     let mut cv = canvas::Canvas::new(g);
     body::draw(&mut cv, &ctx, &look);
-    element::decorate(&mut cv, &ctx, look.cy, look.bright);
-    particles::draw(&mut cv, &sim.parts);
-    magic::draw(&mut cv, &ctx, look.cy);
+    element::decorate(&mut cv, &ctx, CX + pose.dx / g.ppu, look.cy, look.bright);
+    particles::draw(&mut cv, &parts);
+    magic::draw(&mut cv, &ctx, CY + (bob_px - pose.dy) / g.ppu);
     state::sparkles(&mut cv, &ctx);
-    eyes::draw(&mut cv, sim.looking, eyes::blinking(ctx.seed, ctx.t), element::ramp(ctx.elem)[1], look.bright);
+    eyes::draw(&mut cv, pose.facing, eyes::blinking(ctx.seed, ctx.t), element::ramp(ctx.elem)[1], look.bright);
     let mut grid = cv.cells();
     state::marks(&mut grid, &cv, &ctx, pulse);
     grid
@@ -382,7 +389,10 @@ mod tests {
                     let g = render(&params(theme, status, size, t, seed));
                     let white = white_cells(&g);
                     assert_eq!(white.len(), 2, "{theme:?} {status:?} {size:?}: {white:?}");
-                    assert!(white.iter().all(|w| w.2 == '\u{2802}'), "one white dot (⠂) per eye: {white:?}");
+                    // casting: the dot faces the magic, one sub-pixel right in the same cell (⠐)
+                    let casting = status == Status::Running && state::cast_phase(seed, t).is_some();
+                    let dot = if casting { '\u{2810}' } else { '\u{2802}' };
+                    assert!(white.iter().all(|w| w.2 == dot), "one white dot ({dot}) per eye: {white:?}");
                     assert_eq!(white[0].1, white[1].1, "eyes on one row");
                 }
             }
@@ -436,17 +446,15 @@ mod tests {
         let seed = 11;
         let t = first_tick(seed, false);
         for (theme, size) in Theme::ALL.into_iter().flat_map(|t| Size::ALL.map(|s| (t, s))) {
-            let eyes_of = |status| white_cells(&render(&params(theme, status, size, t, seed)));
-            let base = eyes_of(Status::Idle);
+            let eyes_of = |status, t| white_cells(&render(&params(theme, status, size, t, seed)));
+            let base = eyes_of(Status::Idle, t);
             for status in STATUSES {
-                let e = eyes_of(status);
-                if status == Status::Running {
-                    // a running spirit may glance one cell to the right, where it casts
-                    let shifted: Vec<_> = base.iter().map(|&(c, r, ch)| (c + 1, r, ch)).collect();
-                    assert!(e == base || e == shifted, "{theme:?} {size:?}: {e:?} vs {base:?}");
-                } else {
-                    assert_eq!(e, base, "{theme:?} {status:?} {size:?}");
-                }
+                assert_eq!(eyes_of(status, t), base, "{theme:?} {status:?} {size:?}");
+            }
+            // casting only moves the dot inside its cell; the eye cells never move
+            for u in (0..200).filter(|&u| !eyes::blinking(seed, u)) {
+                let cells = |status| eyes_of(status, u).into_iter().map(|(c, r, _)| (c, r)).collect::<Vec<_>>();
+                assert_eq!(cells(Status::Running), cells(Status::Idle), "{theme:?} {size:?} {u}");
             }
         }
     }
@@ -824,15 +832,18 @@ mod tests {
         }
     }
 
-    /// Mean share of body cells (columns 0..7) whose glyph changes between adjacent ticks.
+    /// Mean share of body cells (columns 0..7) whose glyph changes between
+    /// adjacent ticks at rest: steps into or out of a casting pose (a
+    /// deliberate lean, see `casting_pose_leans_right_then_recoils`) are left out.
     fn churn(theme: Theme, seed: u32) -> f32 {
         let body = |t| {
             let g = render(&params(theme, Status::Running, Size::S, t, seed));
             (0..g.rows).flat_map(|r| (0..7).map(move |c| (c, r))).map(|(c, r)| cell(&g, c, r).ch).collect::<Vec<char>>()
         };
-        let frames: Vec<Vec<char>> = (100..340).map(body).collect();
-        let changed: usize = frames.windows(2).map(|w| w[0].iter().zip(&w[1]).filter(|(a, b)| a != b).count()).sum();
-        changed as f32 / ((frames.len() - 1) * frames[0].len()) as f32
+        let resting = |t| state::cast_phase(seed, t).is_none();
+        let pairs: Vec<(Vec<char>, Vec<char>)> = (100..340).filter(|&t| resting(t) && resting(t + 1)).map(|t| (body(t), body(t + 1))).collect();
+        let changed: usize = pairs.iter().map(|(a, b)| a.iter().zip(b).filter(|(a, b)| a != b).count()).sum();
+        changed as f32 / (pairs.len() * pairs[0].0.len()) as f32
     }
 
     #[test]
@@ -911,25 +922,313 @@ mod tests {
         particles::NO_AMBIENT.with(|c| c.set(false));
     }
 
-    /// Mean column of the lightning bolt's lowest-row strike (braille cells in
-    /// the bottom row right of the body) at each cast tick, over several seeds.
+    /// Mean column of the main lightning bolt's strike (where it hits the
+    /// bottom row, clipped to the magic area) at each cast tick, over several
+    /// seeds. Since several bolts strike at once (task 3c) the main bolt is
+    /// taken from the bolt plan; the render must paint the bottom row there.
     fn bolt_strike_mean(magic: Magic) -> f32 {
         particles::NO_AMBIENT.with(|c| c.set(true));
-        let body_right = (body_center_x(Size::S) + 3.0).ceil() as u16;
         let (mut sum, mut n) = (0.0f32, 0u32);
         for seed in [4, 11, 23, 37, 58, 91] {
             for t in (1..400).filter(|&t| state::casts_at(seed, t)) {
-                let g = render(&SpiritParams { magic, ..params(Theme::Lightning, Status::Running, Size::S, t, seed) });
+                let p = SpiritParams { magic, ..params(Theme::Lightning, Status::Running, Size::S, t, seed) };
+                let strikes = magic::strikes(&geom_for(Size::S, magic), &Ctx::new(&p));
+                let col = (strikes[0].round() / 2.0).floor();
+                let g = render(&p);
                 let row = g.rows - 1;
-                let cols: Vec<u16> = (body_right..g.cols).filter(|&c| is_braille(cell(&g, c, row).ch)).collect();
-                if !cols.is_empty() {
-                    sum += cols.iter().map(|&c| f32::from(c)).sum::<f32>() / cols.len() as f32;
-                    n += 1;
-                }
+                let near = (col as u16).saturating_sub(1)..=(col as u16 + 1).min(g.cols - 1);
+                assert!(near.into_iter().any(|c| is_braille(cell(&g, c, row).ch)), "{seed} {t} {magic:?}: strike painted at col {col}");
+                sum += col + 0.5;
+                n += 1;
             }
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
         sum / n.max(1) as f32
+    }
+
+    /// Braille dots of a grid as sub-pixel coordinates (x, y).
+    fn dots(g: &SpiritGrid) -> std::collections::BTreeSet<(i32, i32)> {
+        const BITS: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+        let mut out = std::collections::BTreeSet::new();
+        for row in 0..g.rows {
+            for col in 0..g.cols {
+                let ch = cell(g, col, row).ch;
+                if !is_braille(ch) {
+                    continue;
+                }
+                let bits = ch as u32 - 0x2800;
+                for (dx, column) in BITS.iter().enumerate() {
+                    for (dy, &b) in column.iter().enumerate() {
+                        if bits & b != 0 {
+                            out.insert((i32::from(col) * 2 + dx as i32, i32::from(row) * 4 + dy as i32));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Runs of consecutive x in dot row `y` from `x0` on: (start, length).
+    fn dot_runs(d: &std::collections::BTreeSet<(i32, i32)>, y: i32, x0: i32, x1: i32) -> Vec<(i32, i32)> {
+        let mut runs: Vec<(i32, i32)> = Vec::new();
+        for x in x0..x1 {
+            if d.contains(&(x, y)) {
+                match runs.last_mut() {
+                    Some((s, l)) if *s + *l == x => *l += 1,
+                    _ => runs.push((x, 1)),
+                }
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn cast_phase_winds_up_then_releases_with_each_cast() {
+        for seed in [4, 11, 23, 706_312_658] {
+            for t in (1..600).filter(|&t| state::casts_at(seed, t)) {
+                for k in 1..=3 {
+                    if t > k {
+                        assert_eq!(state::cast_phase(seed, t - k), Some(state::CastPhase::WindUp((3 - k) as u8)), "{seed} {t}-{k}");
+                    }
+                }
+                assert_eq!(state::cast_phase(seed, t), Some(state::CastPhase::Release(0)));
+                assert_eq!(state::cast_phase(seed, t + 1), Some(state::CastPhase::Release(1)));
+            }
+            // most ticks are at rest
+            let rest = (1..600).filter(|&t| state::cast_phase(seed, t).is_none()).count();
+            assert!(rest > 400, "{seed}: {rest} rest ticks");
+            // the magic spawns on the release frame: the lightning bolt appears exactly then
+            particles::NO_AMBIENT.with(|c| c.set(true));
+            let c = first_cast(seed);
+            let bolt = |t| magic_cells(&render(&params(Theme::Lightning, Status::Running, Size::S, t, seed))).iter().any(|p| p.0 >= 8);
+            assert!(bolt(c) && !bolt(c - 1), "{seed}: bolt on the release frame");
+            particles::NO_AMBIENT.with(|c| c.set(false));
+        }
+    }
+
+    #[test]
+    fn casting_pose_faces_the_magic() {
+        for seed in [4, 11, 706_312_658] {
+            for theme in Theme::ALL {
+                for t in (0..300).filter(|&t| !eyes::blinking(seed, t)) {
+                    let g = render(&params(theme, Status::Running, Size::S, t, seed));
+                    let white = white_cells(&g);
+                    assert_eq!(white.len(), 2, "{theme:?} {t}: still the only white thing");
+                    let rest = render(&params(theme, Status::Idle, Size::S, t, seed));
+                    let cells = |w: &[(u16, u16, char)]| w.iter().map(|&(c, r, _)| (c, r)).collect::<Vec<_>>();
+                    assert_eq!(cells(&white), cells(&white_cells(&rest)), "{theme:?} {t}: same eye cells");
+                    let casting = state::cast_phase(seed, t).is_some();
+                    let want = if casting { '\u{2810}' } else { '\u{2802}' };
+                    assert!(white.iter().all(|w| w.2 == want), "{theme:?} {t} casting {casting}: {white:?}");
+                }
+            }
+        }
+    }
+
+    /// Mean x of the leftmost body dot per dot row (the left side never holds magic).
+    fn left_edge(g: &SpiritGrid) -> f32 {
+        let d = dots(g);
+        let xs: Vec<f32> = (0..i32::from(g.rows) * 4).filter_map(|y| (0..12).find(|&x| d.contains(&(x, y)))).map(|x| x as f32).collect();
+        xs.iter().sum::<f32>() / xs.len().max(1) as f32
+    }
+
+    #[test]
+    fn casting_pose_leans_right_then_recoils() {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        for theme in Theme::ALL {
+            let (mut wind, mut release, mut rest) = (Vec::new(), Vec::new(), Vec::new());
+            for seed in [4, 11, 23, 37, 58, 706_312_658] {
+                for t in 1..600 {
+                    let e = left_edge(&render(&params(theme, Status::Running, Size::S, t, seed)));
+                    match state::cast_phase(seed, t) {
+                        Some(state::CastPhase::WindUp(f)) if f >= 1 => wind.push(e),
+                        Some(state::CastPhase::Release(_)) => release.push(e),
+                        None => rest.push(e),
+                        _ => {}
+                    }
+                }
+            }
+            let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+            let (w, r, s) = (mean(&wind), mean(&release), mean(&rest));
+            println!("{theme:?}: left edge wind-up {w:.2} release {r:.2} rest {s:.2}");
+            assert!(w > s + 0.4, "{theme:?}: leans right while winding up ({w} vs rest {s})");
+            assert!(r < s - 0.3, "{theme:?}: recoils left on release ({r} vs rest {s})");
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
+        // other states never pose
+        for t in 0..200 {
+            for status in [Status::Idle, Status::Done, Status::NeedsInput, Status::Unknown] {
+                let g = render(&params(Theme::Fire, status, Size::S, t, 4));
+                assert!(white_cells(&g).iter().all(|w| w.2 == '\u{2802}'), "{status:?} {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn fire_breath_starts_tiny_after_a_gap() {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        for magic in [Magic::Normal, Magic::Big] {
+            let run_len = if magic == Magic::Big { 14 } else { 6 };
+            let (mut ok_gap, mut ok_run, mut n) = (0, 0, 0);
+            let mut heights = [0f32; 5];
+            for seed in [4, 11, 23, 706_312_658] {
+                let start = first_cast(seed) + 3;
+                for t in start..start + 120 {
+                    let g = render(&SpiritParams { magic, ..params(Theme::Fire, Status::Running, Size::S, t, seed) });
+                    let d = dots(&g);
+                    let h = i32::from(g.rows) * 4;
+                    let occupied = |x: i32| (0..h).any(|y| d.contains(&(x, y)));
+                    let count = |x: i32| (0..h).filter(|&y| d.contains(&(x, y))).count() as f32;
+                    // the body edge: first empty dot column right of the body centre
+                    let Some(e) = (7..i32::from(g.cols) * 2).find(|&x| !occupied(x)) else { continue };
+                    n += 1;
+                    let s = e + 1;
+                    if occupied(s) || occupied(s + 1) {
+                        ok_gap += 1;
+                    }
+                    let s = if occupied(s) { s } else { s + 1 };
+                    if (s..s + run_len).all(occupied) {
+                        ok_run += 1;
+                    }
+                    for (i, hgt) in heights.iter_mut().enumerate() {
+                        *hgt += count(s + i as i32);
+                    }
+                }
+            }
+            let hs: Vec<f32> = heights.iter().map(|h| h / n as f32).collect();
+            println!("{magic:?}: gap {ok_gap}/{n} run {ok_run}/{n} heights {hs:?}");
+            assert!(ok_gap * 10 >= n * 9, "{magic:?}: an empty dot column between body and flame on {ok_gap} of {n} ticks");
+            assert!(ok_run * 10 >= n * 8, "{magic:?}: contiguous flame on {ok_run} of {n} ticks");
+            assert!(hs[0] <= 1.6, "{magic:?}: the breath starts tiny: {hs:?}");
+            assert!(hs.windows(2).all(|w| w[1] >= w[0] - 0.05) && hs[4] >= hs[0] + 1.5, "{magic:?}: the flame widens: {hs:?}");
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
+    }
+
+    fn lum((r, g, b): (u8, u8, u8)) -> f32 {
+        0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)
+    }
+
+    #[test]
+    fn water_vortex_is_glossy_and_shaded() {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        for seed in [4, 11, 23] {
+            let c = first_cast(seed);
+            for magic in [Magic::Normal, Magic::Big] {
+                let mut brightest = Vec::new();
+                let mut frames = Vec::new();
+                for t in c + 5..c + 13 {
+                    let g = render(&SpiritParams { magic, ..params(Theme::Water, Status::Running, Size::S, t, seed) });
+                    let cells: Vec<(u16, u16, f32)> = magic_cells(&g).into_iter().filter_map(|(col, row)| cell(&g, col, row).fg.map(|fg| (col, row, lum(fg)))).collect();
+                    let bands: std::collections::BTreeSet<u32> = cells.iter().map(|c| (c.2 / 50.0) as u32).collect();
+                    assert!(bands.len() >= 3, "{seed} {magic:?} {t}: luminance bands {bands:?}");
+                    let mean = cells.iter().map(|c| c.2).sum::<f32>() / cells.len() as f32;
+                    let top = cells.iter().cloned().fold((0, 0, 0.0f32), |a, b| if b.2 > a.2 { b } else { a });
+                    assert!(top.2 > mean + 45.0, "{seed} {magic:?} {t}: highlight {} vs mean {mean}", top.2);
+                    // lit from the upper left: the highlight sits up-left of the vortex
+                    let (cx, cy) = (cells.iter().map(|c| f32::from(c.0)).sum::<f32>() / cells.len() as f32, cells.iter().map(|c| f32::from(c.1)).sum::<f32>() / cells.len() as f32);
+                    assert!(f32::from(top.0) <= cx + 0.5 && f32::from(top.1) <= cy + 0.5, "{seed} {magic:?} {t}: highlight {top:?} vs centre ({cx}, {cy})");
+                    brightest.push((top.0, top.1));
+                    frames.push(cells.iter().map(|c| (c.0, c.1)).collect::<Vec<_>>());
+                }
+                assert!(frames.windows(2).filter(|w| w[0] != w[1]).count() >= 4, "{seed} {magic:?}: the arms rotate");
+                let still = brightest.windows(2).filter(|w| w[0] == w[1]).count();
+                assert!(still * 10 >= (brightest.len() - 1) * 6, "{seed} {magic:?}: the light stays put {brightest:?}");
+            }
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
+    }
+
+    #[test]
+    fn poison_fog_spreads_radially_from_an_anchor() {
+        let mut checked = 0;
+        for magic in [Magic::Normal, Magic::Big] {
+            let g0 = geom_for(Size::S, magic);
+            let (ax, ay) = magic::fog_anchor(&g0, magic);
+            let life = magic::fog_life(magic);
+            let x_min = 15;
+            for seed in 1..40u32 {
+                let casts: Vec<u64> = (1..800).filter(|&t| state::casts_at(seed, t)).collect();
+                for w in casts.windows(3) {
+                    let (prev, c, next) = (w[0], w[1], w[2]);
+                    if c - prev < life || next - c <= 12 {
+                        continue;
+                    }
+                    let at = |age: u64| -> Vec<(f32, f32)> {
+                        let g = render(&SpiritParams { magic, ..params(Theme::Poison, Status::Running, Size::S, c + age, seed) });
+                        dots(&g).into_iter().filter(|&(x, _)| x >= x_min).map(|(x, y)| (x as f32 + 0.5 - ax, y as f32 + 0.5 - ay)).collect()
+                    };
+                    let radius = |d: &[(f32, f32)]| d.iter().map(|p| p.0.hypot(p.1)).fold(0.0f32, f32::max);
+                    let (early, late) = (at(2), at(12));
+                    assert!(!early.is_empty() && !late.is_empty(), "{magic:?} {seed} {c}: fog shows");
+                    assert!(radius(&late) >= radius(&early) + 1.5, "{magic:?} {seed} {c}: grows {} -> {}", radius(&early), radius(&late));
+                    if magic == Magic::Big {
+                        for d in [&early, &at(6), &late] {
+                            let (mx, my) = (d.iter().map(|p| p.0).sum::<f32>() / d.len() as f32, d.iter().map(|p| p.1).sum::<f32>() / d.len() as f32);
+                            assert!(mx.abs() <= 2.0 && my.abs() <= 2.0, "{seed} {c}: centroid off the anchor by ({mx}, {my})");
+                        }
+                    }
+                    // thinner at the edge: inner half of the radius is denser than the outer ring
+                    let r = radius(&late);
+                    let in_canvas = |inner: bool| {
+                        let mut n = 0;
+                        for y in 0..i32::try_from(g0.h).unwrap_or(16) {
+                            for x in x_min..i32::try_from(g0.w).unwrap_or(22) {
+                                let dd = (x as f32 + 0.5 - ax).hypot(y as f32 + 0.5 - ay);
+                                if (dd < 0.5 * r) == inner && dd <= r {
+                                    n += 1;
+                                }
+                            }
+                        }
+                        n as f32
+                    };
+                    let inner = late.iter().filter(|p| p.0.hypot(p.1) < 0.5 * r).count() as f32 / in_canvas(true);
+                    let outer = late.iter().filter(|p| p.0.hypot(p.1) >= 0.5 * r).count() as f32 / in_canvas(false);
+                    assert!(inner > outer, "{magic:?} {seed} {c}: density inner {inner} vs edge {outer}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 6, "{checked} isolated casts checked");
+    }
+
+    #[test]
+    fn lightning_bolts_multiply_and_thicken() {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        let mut widths = Vec::new();
+        for magic in Magic::ALL {
+            let mut counts = std::collections::BTreeSet::new();
+            let mut runs = Vec::new();
+            for seed in 1..30u32 {
+                for t in (1..300).filter(|&t| state::casts_at(seed, t)) {
+                    let g = render(&SpiritParams { magic, ..params(Theme::Lightning, Status::Running, Size::S, t, seed) });
+                    let d = dots(&g);
+                    let w = i32::from(g.cols) * 2;
+                    let n = dot_runs(&d, 0, 15, w).len();
+                    counts.insert(n);
+                    for y in 2..i32::from(g.rows) * 4 - 3 {
+                        runs.extend(dot_runs(&d, y, 15, w).into_iter().map(|r| r.1));
+                    }
+                }
+            }
+            let mut hist = std::collections::BTreeMap::new();
+            for r in &runs {
+                *hist.entry(*r).or_insert(0) += 1;
+            }
+            let mode = hist.iter().max_by_key(|e| e.1).map(|e| *e.0).unwrap_or(0);
+            let mean = runs.iter().sum::<i32>() as f32 / runs.len() as f32;
+            println!("{magic:?}: bolts per cast {counts:?}, width mode {mode} mean {mean:.2}");
+            match magic {
+                Magic::Small => assert_eq!(counts, [1].into(), "one thin bolt"),
+                Magic::Normal => assert_eq!(counts, [1, 2].into(), "one or two bolts"),
+                Magic::Big => assert!(counts.iter().all(|&n| n >= 3), "three or more bolts: {counts:?}"),
+            }
+            widths.push((mode, mean));
+        }
+        assert_eq!(widths.iter().map(|w| w.0).collect::<Vec<_>>(), [1, 2, 3], "bolt width in dots: {widths:?}");
+        assert!(widths.windows(2).all(|w| w[1].1 > w[0].1), "thicker with more context: {widths:?}");
+        particles::NO_AMBIENT.with(|c| c.set(false));
     }
 
     #[test]
@@ -969,6 +1268,50 @@ mod tests {
                 println!("{line}");
             }
             println!();
+        }
+    }
+
+    /// Prints running frames per element for task 3c: a rest frame, a wind-up
+    /// and a release frame (casting pose) and the magic at Normal and Big a few
+    /// ticks after a cast (`cargo test dump_cast -- --ignored --nocapture`;
+    /// `SPIRIT_ANSI=1` adds 24-bit colour, `SPIRIT_SEED=…`).
+    #[test]
+    #[ignore]
+    fn dump_cast() {
+        let seed = std::env::var("SPIRIT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+        let ansi = std::env::var("SPIRIT_ANSI").is_ok();
+        let c = (40..).find(|&t| state::casts_at(seed, t)).expect("cast");
+        let show = |label: &str, frames: &[(String, SpiritGrid)]| {
+            println!("{label}");
+            println!("{}", frames.iter().map(|f| format!("{:<19}", f.0)).collect::<String>());
+            for row in 0..4 {
+                let mut line = String::new();
+                for (_, g) in frames {
+                    for col in 0..g.cols {
+                        let x = cell(g, col, row);
+                        match (ansi, x.fg) {
+                            (true, Some((r, gg, b))) => line += &format!("\x1b[38;2;{r};{gg};{b}m{}\x1b[0m", x.ch),
+                            _ => line.push(x.ch),
+                        }
+                    }
+                    line += &" ".repeat(19 - usize::from(g.cols));
+                }
+                println!("{line}");
+            }
+            println!();
+        };
+        for theme in Theme::ALL {
+            let at = |t, magic| render(&SpiritParams { magic, ..params(theme, Status::Running, Size::S, t, seed) });
+            let rest = (c - 12..c - 3).rev().find(|&t| state::cast_phase(seed, t).is_none() && !eyes::blinking(seed, t)).unwrap_or(c - 6);
+            let pose: Vec<(String, SpiritGrid)> = [(rest, "rest"), (c - 2, "wind-up"), (c - 1, "wind-up"), (c, "release"), (c + 1, "release")]
+                .iter()
+                .map(|&(t, l)| (format!("{l} t{t}"), at(t, Magic::Normal)))
+                .collect();
+            show(&format!("{theme:?} seed {seed}: casting pose (cast at {c})"), &pose);
+            for magic in [Magic::Normal, Magic::Big] {
+                let frames: Vec<(String, SpiritGrid)> = [c + 3, c + 6, c + 10].iter().map(|&t| (format!("{magic:?} t{t}"), at(t, magic))).collect();
+                show(&format!("{theme:?} {magic:?}"), &frames);
+            }
         }
     }
 

@@ -91,6 +91,11 @@ impl Canvas {
         }
     }
 
+    /// Rightmost body sub-pixel column over all rows, if any body is drawn.
+    pub(super) fn body_right(&self) -> Option<i32> {
+        (0..self.g.w).rev().find(|&x| (0..self.g.h).any(|y| self.body[y * self.g.w + x])).map(|x| x as i32)
+    }
+
     /// Fill the block of real pixels covered by the design unit whose top-left is (x, y).
     pub(super) fn blk(&mut self, x: f32, y: f32, c: Rgb, prio: u8, skip_body: bool) {
         let (x0, y0) = self.to_px(x, y);

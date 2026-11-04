@@ -5,7 +5,7 @@ use crate::model::Status;
 use super::canvas::{lerp, mul, Canvas, Rgb, CARD_BG};
 use super::element::{self, bolt_shape};
 use super::theme::Theme;
-use super::{Ctx, CX, CY};
+use super::{Ctx, BASE_R, CX, CY};
 
 /// Red the body flickers toward while the context window is nearly full.
 const WARN_RED: Rgb = [255., 45., 35.];
@@ -21,6 +21,10 @@ pub(super) struct Look {
     pub flash: bool,
     /// red warning tint is on this frame
     pub warn: bool,
+    /// casting pose: horizontal shift and top lean in real sub-pixels, radius scale
+    pub dx: f32,
+    pub tilt: f32,
+    pub swell: f32,
 }
 
 /// Shade tone (index into the ramp) of a body dot.
@@ -71,14 +75,18 @@ pub(super) fn draw(cv: &mut Canvas, ctx: &Ctx, look: &Look) {
     let g = cv.g;
     let ramp = element::ramp(ctx.elem);
     let cy = look.cy;
+    let (cy_px, rr) = (g.rcy + (cy - CY) * g.ppu, BASE_R * g.ppu);
     for ry in 0..g.h {
+        // the casting lean shifts the top of the body most, the bottom not at all
+        let up = ((cy_px - ry as f32 - 0.5) / rr).clamp(-1.0, 1.0);
+        let shift = look.dx + look.tilt * 0.5 * (up + 1.0);
         for rx in 0..g.w {
-            let u = CX + (rx as f32 + 0.5 - g.rcx) / g.ppu;
+            let u = CX + (rx as f32 + 0.5 - g.rcx - shift) / g.ppu;
             let v = CY + (ry as f32 + 0.5 - g.rcy) / g.ppu;
             let (dx, dy) = (u - CX, v - cy);
             let dist = (dx * dx + dy * dy).sqrt();
             let th = dy.atan2(dx);
-            let r = element::radius(ctx, th);
+            let r = element::radius(ctx, th) * look.swell;
             if dist > r {
                 // NEEDS_INPUT: a faint halo just outside the outline
                 if look.pulse > 0.35 && dist < r + 1.4 {

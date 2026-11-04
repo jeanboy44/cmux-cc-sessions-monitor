@@ -1,7 +1,8 @@
 //! Eyes: each eye clears its whole cell(s) of body dots (a dark hole where
 //! the card shows through) and keeps ONE white dot as the catchlight. On a
 //! blink the hole shows a thin dash of muted body-tone dots instead (no
-//! white) for 2 frames, every 3-5 s. Every state uses the same eyes.
+//! white) for 2 frames, every 3-5 s. Every state uses the same eye cells;
+//! while casting, the dot looks one sub-pixel toward the magic (right).
 
 use super::canvas::{mul, Canvas, Rgb, EYE_PRIO, WHITE};
 use super::noise::slot;
@@ -26,7 +27,7 @@ struct EyeSet {
     eh: i32,
 }
 
-fn eye_set(cv: &Canvas, looking: bool) -> EyeSet {
+fn eye_set(cv: &Canvas) -> EyeSet {
     let g = &cv.g;
     let k = g.ppu * BASE_R / 5.5;
     let (rx, ry) = (k, 1.6 * k);
@@ -36,15 +37,15 @@ fn eye_set(cv: &Canvas, looking: bool) -> EyeSet {
     let sep = 0.38 * rr;
     let lcol = ((g.rcx - sep) / 2.0 - ew as f32 / 2.0).round() as i32;
     let rcol = g.rcx as i32 - lcol - ew;
-    let gaze = i32::from(looking);
     let row0 = ((g.rcy - 0.25 * rr) / 4.0 - eh as f32 / 2.0).round() as i32;
-    EyeSet { eyes: [(lcol + gaze, row0), (rcol + gaze, row0)], ew, eh }
+    EyeSet { eyes: [(lcol, row0), (rcol, row0)], ew, eh }
 }
 
-/// Punches both eyes into the canvas. `body` is the body's dark tone (for the
-/// blink dash), `bright` the state brightness.
-pub(super) fn draw(cv: &mut Canvas, looking: bool, blink: bool, body: Rgb, bright: f32) {
-    let es = eye_set(cv, looking);
+/// Punches both eyes into the canvas. `facing`: the dot looks one sub-pixel
+/// right (casting); `body` is the body's dark tone (for the blink dash),
+/// `bright` the state brightness.
+pub(super) fn draw(cv: &mut Canvas, facing: bool, blink: bool, body: Rgb, bright: f32) {
+    let es = eye_set(cv);
     let dash = mul(body, 0.55 * bright);
     for &(col0, row0) in &es.eyes {
         let (x0, y0) = (col0 * 2, row0 * 4);
@@ -60,7 +61,9 @@ pub(super) fn draw(cv: &mut Canvas, looking: bool, blink: bool, body: Rgb, brigh
                 cv.set_px(px, y, dash, 2, false);
             }
         } else {
-            cv.set_px(x0 + w / 4, y0 + 1, WHITE, EYE_PRIO, false);
+            // the dot stays inside the cleared box
+            let x = (x0 + w / 4 + i32::from(facing)).min(x0 + w - 1);
+            cv.set_px(x, y0 + 1, WHITE, EYE_PRIO, false);
         }
     }
 }

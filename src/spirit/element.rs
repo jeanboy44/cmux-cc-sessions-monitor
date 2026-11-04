@@ -198,6 +198,24 @@ pub(super) fn bubbles(ctx: &Ctx) -> Vec<Bubble> {
         let r = BASE_R * (0.35 + 0.3 * hf(key ^ 0xB0B3, c));
         out.push(Bubble { dx: r * a.cos(), dy: r * a.sin() * 0.8, stage });
     }
+    // casting: one more bubble races through its stages and pops on the release
+    if ctx.state == Status::Running {
+        use super::state::CastPhase::{Release, WindUp};
+        let (t, f) = (ctx.t, |f: u8| u64::from(f));
+        let stage = match super::state::cast_phase(ctx.seed, t) {
+            Some(WindUp(0)) => Some((Stage::Bead, t + 3)),
+            Some(WindUp(1)) => Some((Stage::Ring, t + 2)),
+            Some(WindUp(k)) => Some((Stage::Swell, t + 3 - f(k))),
+            Some(Release(0)) => Some((Stage::Pop, t)),
+            _ => None,
+        };
+        if let Some((stage, cast)) = stage {
+            let c = cast as u32 ^ (cast >> 32) as u32;
+            let a = PI * (0.15 + 0.7 * hf(ctx.seed ^ 0xCA5B, c));
+            let r = BASE_R * (0.35 + 0.3 * hf(ctx.seed ^ 0xCA5C, c));
+            out.push(Bubble { dx: r * a.cos(), dy: r * a.sin() * 0.8, stage });
+        }
+    }
     out
 }
 
@@ -221,7 +239,8 @@ fn draw_bubble(cv: &mut Canvas, px: i32, py: i32, stage: Stage, bright: f32) {
 
 /// Element decorations around the body: orbiting droplets and floor ripples
 /// (water), bubbles forming and popping on the body (poison).
-pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cy: f32, bright: f32) {
+/// `cx`/`cy`: body centre in design units (after bobbing and the casting pose).
+pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cx: f32, cy: f32, bright: f32) {
     let (tf, sp) = (ctx.tf, ctx.sp);
     let ramp = ramp(ctx.elem);
     match ctx.elem {
@@ -249,7 +268,7 @@ pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cy: f32, bright: f32) {
         Theme::Poison => {
             let sx = sway(ctx);
             for b in bubbles(ctx) {
-                let (px, py) = cv.to_px(CX + sx + b.dx, cy + b.dy);
+                let (px, py) = cv.to_px(cx + sx + b.dx, cy + b.dy);
                 draw_bubble(cv, px, py, b.stage, bright);
             }
         }

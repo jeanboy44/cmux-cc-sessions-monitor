@@ -2,14 +2,9 @@
 //! generator keyed by (seed, tick), so replaying the last few ticks (as long
 //! as the longest particle life) reproduces the live simulation exactly.
 
-use crate::model::Status;
-
 use super::canvas::{lerp, Canvas, Rgb, CARD_BG};
 use super::noise::Rng;
 use super::{element, state, Ctx, CY};
-
-/// Ticks a running spirit keeps glancing at its target after a cast.
-const LOOK_TICKS: u64 = 10;
 
 pub(super) struct Particle {
     pub x: f32,
@@ -35,11 +30,6 @@ impl Particle {
     }
 }
 
-pub(super) struct Sim {
-    pub parts: Vec<Particle>,
-    /// running and just cast: the eyes glance one cell toward the target
-    pub looking: bool,
-}
 
 #[cfg(test)]
 thread_local! {
@@ -58,13 +48,11 @@ fn ambient_on() -> bool {
 }
 
 /// Particles alive at `ctx.t` (ticks start at 1; tick 0 has none).
-pub(super) fn simulate(ctx: &Ctx) -> Sim {
-    let window = element::max_life(ctx.elem).max(LOOK_TICKS) + 1;
+pub(super) fn simulate(ctx: &Ctx) -> Vec<Particle> {
+    let window = element::max_life(ctx.elem) + 1;
     let start = ctx.t.saturating_sub(window);
     let act = state::activity(ctx.state);
-    let running = ctx.state == Status::Running;
     let mut parts: Vec<Particle> = Vec::new();
-    let mut last_cast = None;
     for u in start + 1..=ctx.t {
         for p in &mut parts {
             p.x += p.vx;
@@ -79,13 +67,8 @@ pub(super) fn simulate(ctx: &Ctx) -> Sim {
         if ambient_on() {
             element::ambient(ctx.elem, act, cy, ctx.floor, &mut r, &mut parts);
         }
-        // the cast itself is drawn by `magic`; here it only steers the gaze
-        if running && state::casts_at(ctx.seed, u) {
-            last_cast = Some(u);
-        }
     }
-    let looking = last_cast.is_some_and(|c| ctx.t - c < LOOK_TICKS);
-    Sim { parts, looking }
+    parts
 }
 
 pub(super) fn draw(cv: &mut Canvas, parts: &[Particle]) {
