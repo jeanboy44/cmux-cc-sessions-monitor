@@ -84,11 +84,13 @@ struct Area {
 }
 
 impl Area {
-    fn new(g: &Geom, m: Magic, elem: Theme, cy: f32) -> Self {
+    fn new(g: &Geom, m: Magic, ms: f32, elem: Theme, cy: f32) -> Self {
         let ox = mouth_x(g);
         let end = match m {
-            // the small breath stays short; centred magic is sized by its level
-            Magic::Small if elem == Theme::Fire => ox + 3.5,
+            // the small breath stays short (a smaller spirit's a little
+            // shorter still, but past the one-dot gap); centred magic is
+            // sized by its level
+            Magic::Small if elem == Theme::Fire => ox + 3.5 * ms.max(0.8),
             _ => g.w as f32,
         };
         Area { ox, oy: g.rcy + (cy - CY) * g.ppu, mid: area_mid(g), end: end.min(g.w as f32) }
@@ -112,7 +114,7 @@ pub(super) fn draw(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
         return;
     }
     let Some((since_cast, since_start)) = stream(ctx.seed, ctx.t) else { return };
-    let a = Area::new(&cv.g, ctx.magic, ctx.elem, cy);
+    let a = Area::new(&cv.g, ctx.magic, ctx.ms, ctx.elem, cy);
     match ctx.elem {
         Theme::Fire => breath(cv, ctx, &a, since_cast, since_start),
         Theme::Water => vortex(cv, ctx, &a, since_cast),
@@ -126,11 +128,14 @@ pub(super) fn draw(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
 /// a cone, densest along its middle, flickering and breaking up at the end
 /// with embers flying off and a little smoke.
 fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u64) {
-    let (w_end, embers, smokes) = match ctx.magic {
+    let (w_end, embers, smokes): (f32, u32, u32) = match ctx.magic {
         Magic::Small => (1.0, 0, 0),
         Magic::Normal => (3.0, 3, 2),
         Magic::Big => (4.6, 7, 4),
     };
+    // a smaller spirit breathes a thinner cone with fewer embers and smoke puffs
+    let scaled = |n: u32| (n as f32 * ctx.ms).round() as u32;
+    let (w_end, embers, smokes) = (w_end * ctx.ms, scaled(embers), scaled(smokes));
     // the first flame column: one empty dot column right of the body
     let edge = cv.body_right().unwrap_or(a.ox.floor() as i32);
     let xs = (edge + 2) as f32;
@@ -202,7 +207,7 @@ fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u6
         }
     }
 
-    for k in 0..embers as u32 {
+    for k in 0..embers {
         let key = ctx.seed ^ k.wrapping_mul(0x2F1B);
         let period = 8 + u64::from(k % 3);
         let shifted = ctx.t.wrapping_add(slot(key, 0xE1, 0, period as u32));
@@ -236,6 +241,7 @@ fn vortex(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
         Magic::Normal => (22, 5.0, 2),
         Magic::Big => (30, 7.6, 3),
     };
+    let major = major * ctx.ms;
     if since_cast >= dur {
         return;
     }
@@ -313,6 +319,9 @@ pub(super) fn fog_anchor(g: &Geom) -> (f32, f32) {
     (area_mid(g), g.rcy)
 }
 
+/// Smallest puff radius (sub-pixels) at any magic scale.
+const MIN_FOG_R: f32 = 1.6;
+
 /// Ticks one cast's toxic puffs live.
 pub(super) fn fog_life(m: Magic) -> u64 {
     match m {
@@ -333,6 +342,8 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
         Magic::Normal => (6.5, 2, 1.6, 1.15),
         Magic::Big => (9.5, 3, 2.6, 1.2),
     };
+    // a scaled-down puff keeps enough radius to cover a dot centre
+    let (rmax, spread) = ((rmax * ctx.ms).max(MIN_FOG_R), spread * ctx.ms);
     let life = fog_life(ctx.magic);
     let (ax, ay) = fog_anchor(&cv.g);
     // (centre x, centre y, radius, strength, wobble phase) of every live puff
@@ -400,14 +411,16 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
     }
 }
 
-/// Lightning layout per magic level: (flicker duration, zig-zag amplitude,
-/// spark burst reach, bolt width in dots).
-fn bolt_style(m: Magic) -> (u64, f32, i32, i32) {
-    match m {
+/// Lightning layout per magic level at magic scale `ms`: (flicker
+/// duration, zig-zag amplitude, spark burst reach, bolt width in dots).
+fn bolt_style(m: Magic, ms: f32) -> (u64, f32, i32, i32) {
+    let (dur, amp, burst, width) = match m {
         Magic::Small => (3, 0.8, 1, 1),
         Magic::Normal => (5, 2.2, 2, 2),
         Magic::Big => (7, 3.4, 4, 3),
-    }
+    };
+    let scaled = |n: i32| (n as f32 * ms).ceil() as i32;
+    (dur, amp * ms, scaled(burst), scaled(width))
 }
 
 /// One bolt: its zig-zag points from the top row to the bottom row and
@@ -421,7 +434,8 @@ struct Bolt {
 /// area's centre): the main bolt first, then the extra bolts of higher
 /// levels at distinct x, and at Big sometimes a fork off the main bolt.
 fn bolts(ctx: &Ctx, mid: f32, bottom: f32, cast: u64) -> Vec<Bolt> {
-    let (_, amp, _, _) = bolt_style(ctx.magic);
+    let (_, amp, _, _) = bolt_style(ctx.magic, ctx.ms);
+    let ms = ctx.ms;
     let ck = (cast as u32) ^ ((cast >> 32) as u32);
     let key = ctx.seed ^ 0xB017;
     // a zig-zag from (top x around `mid`) down to the bottom; `last` forces the final swing
@@ -444,23 +458,23 @@ fn bolts(ctx: &Ctx, mid: f32, bottom: f32, cast: u64) -> Vec<Bolt> {
     // Normal casts a second, thinner-swinging bolt on about half the casts:
     // the pair straddles the centre
     let dual = matches!(ctx.magic, Magic::Normal) && hf(key ^ 5, ck) < 0.5;
-    let main = if dual { mid + 2.25 } else { mid };
+    let main = if dual { mid + 2.25 * ms } else { mid };
     let mut out = vec![Bolt { pts: path(key, main, amp, None), sparks: true }];
     match ctx.magic {
         Magic::Small => {}
         Magic::Normal => {
             if dual {
-                out.push(Bolt { pts: path(key ^ 0x51, mid - 2.25, 0.8, Some(-1.0)), sparks: true });
+                out.push(Bolt { pts: path(key ^ 0x51, mid - 2.25 * ms, 0.8 * ms, Some(-1.0)), sparks: true });
             }
         }
         // a bolt on each side of the main one, sometimes a fork off it
         Magic::Big => {
-            out.push(Bolt { pts: path(key ^ 0x52, main - 6.5, 1.4, Some(-1.0)), sparks: true });
-            out.push(Bolt { pts: path(key ^ 0x53, main + 6.5, 1.4, Some(1.0)), sparks: true });
+            out.push(Bolt { pts: path(key ^ 0x52, main - 6.5 * ms, 1.4 * ms, Some(-1.0)), sparks: true });
+            out.push(Bolt { pts: path(key ^ 0x53, main + 6.5 * ms, 1.4 * ms, Some(1.0)), sparks: true });
             if hf(key ^ 6, ck) < 0.6 {
                 let from = out[0].pts[out[0].pts.len() / 2];
                 let side = if hf(key ^ 7, ck) < 0.5 { -1.0 } else { 1.0 };
-                let fork = vec![from, (from.0 + side * 2.0, from.1 + 2.0), (from.0 + side * 2.5, (from.1 + 4.0).min(bottom))];
+                let fork = vec![from, (from.0 + side * 2.0 * ms, from.1 + 2.0), (from.0 + side * 2.5 * ms, (from.1 + 4.0).min(bottom))];
                 out.push(Bolt { pts: fork, sparks: false });
             }
         }
@@ -473,12 +487,12 @@ fn bolts(ctx: &Ctx, mid: f32, bottom: f32, cast: u64) -> Vec<Bolt> {
 /// bolt is showing.
 #[cfg(test)]
 pub(super) fn strikes(g: &Geom, ctx: &Ctx) -> Vec<f32> {
-    let (dur, ..) = bolt_style(ctx.magic);
+    let (dur, ..) = bolt_style(ctx.magic, ctx.ms);
     let Some((since_cast, _)) = stream(ctx.seed, ctx.t) else { return Vec::new() };
     if since_cast >= dur {
         return Vec::new();
     }
-    let a = Area::new(g, ctx.magic, Theme::Lightning, CY);
+    let a = Area::new(g, ctx.magic, ctx.ms, Theme::Lightning, CY);
     bolts(ctx, a.mid, g.h as f32 - 1.0, ctx.t - since_cast)
         .iter()
         .filter(|b| b.sparks)
@@ -491,7 +505,7 @@ pub(super) fn strikes(g: &Geom, ctx: &Ctx) -> Vec<f32> {
 /// one thin bolt, Normal one or two bolts two dots wide, Big three or four
 /// (with a fork) three dots wide and a bigger burst.
 fn bolt(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
-    let (dur, _, burst, width) = bolt_style(ctx.magic);
+    let (dur, _, burst, width) = bolt_style(ctx.magic, ctx.ms);
     if since_cast >= dur {
         return;
     }
@@ -499,7 +513,7 @@ fn bolt(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
     let all = bolts(ctx, a.mid, bottom, ctx.t - since_cast);
 
     // the bolts flicker: on, on, off, on (big: once more)
-    let shown = matches!(since_cast, 0 | 1 | 3) || (width >= 3 && since_cast == 5);
+    let shown = matches!(since_cast, 0 | 1 | 3) || (matches!(ctx.magic, Magic::Big) && since_cast == 5);
     if shown {
         let lo = -(width - 1) / 2;
         for b in &all {

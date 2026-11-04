@@ -332,7 +332,8 @@ pub(super) fn sparkles(cv: &mut Canvas, ctx: &Ctx) {
 pub(super) fn marks(grid: &mut SpiritGrid, cv: &Canvas, ctx: &Ctx, pulse: f32) {
     let g = &cv.g;
     let rr = BASE_R * g.ppu;
-    let qc = ((g.rcx + 0.95 * rr) / 2.0).floor() as i32;
+    // a two-row spirit has no room above its body: the mark goes right of it
+    let qc = if g.h < 16 { ((g.rcx + rr) / 2.0).ceil() as i32 } else { ((g.rcx + 0.95 * rr) / 2.0).floor() as i32 };
     // at least row 1, so the mark always has a row above to bob into
     let qr = (((g.rcy - 1.05 * rr) / 4.0).floor() as i32).max(1);
     let mark = match ctx.state {

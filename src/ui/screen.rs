@@ -11,7 +11,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
-use crate::ui::card::{compact_mode, render_card, render_compact, render_wide_card, CARD_H, CARD_W};
+use crate::ui::card::{card_size, compact_mode, render_card, render_compact, render_wide_card};
 use crate::ui::grid::{card_cols, cell_rect};
 use crate::ui::groups::{divider_text, place_rows, row_of, scroll_to_show_rows, Row};
 use crate::ui::hud::{render_hud, StatusCounts};
@@ -21,19 +21,19 @@ use crate::ui::style;
 
 pub const EMPTY_MESSAGE: &str = "cmux에서 실행 중인 Claude 세션이 없습니다";
 pub const LOADING_MESSAGE: &str = "세션을 불러오는 중…";
-pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter/Space 포커스 · p 미리보기 · i 설정 · q 종료 ";
+pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter/Space 포커스 · v 카드 · p 미리보기 · i 설정 · q 종료 ";
 
 /// Draws the full frame. Updates `app.cols`, `app.scroll`, `app.grid_rect`,
 /// `app.preview_too_small` and the preview's read line count from the layout.
 /// With the preview panel beside it the session list is one column of
-/// full cards stretched to the list width.
+/// full cards (of the configured layout) stretched to the list width.
 pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     let [hud, middle, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
     let counts = StatusCounts::from_statuses(app.sessions.iter().map(|s| s.status));
     render_hud(f, hud, &counts);
 
-    let layout = preview_layout(middle, app.preview);
+    let layout = preview_layout(middle, app.preview, app.config.card_layout);
     let grid = layout.list;
     app.grid_rect = grid;
     app.preview_too_small = app.preview && layout.panel.is_none();
@@ -62,20 +62,24 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
 /// Card grid (grouped by cmux window, see [`crate::ui::groups`]) with
 /// vertical scrolling in layout rows; returns (more above, more below).
 /// `one_column` (the preview's side list): one full card per row, stretched
-/// to the list width. In compact mode (the area cannot hold one full card,
-/// see [`compact_mode`]) every session is one line in a single column.
+/// to the list width. Columns, rows and scrolling follow the card size of
+/// the configured layout. In compact mode (the area cannot hold one full
+/// card of that layout, see [`compact_mode`]) every session is one line in
+/// a single column.
 /// Only placed (visible) rows are drawn, so off-screen cards never render a
 /// spirit; `app.spirits_visible` tells the event loop whether to animate.
 fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool, tick: u64) -> (bool, bool) {
     if area.is_empty() {
         return (false, false);
     }
-    let compact = compact_mode(area);
-    let cols = if compact || one_column { 1 } else { card_cols(area.width) };
+    let card_layout = app.config.card_layout;
+    let (card_w, card_h) = card_size(card_layout);
+    let compact = compact_mode(area, card_layout);
+    let cols = if compact || one_column { 1 } else { card_cols(area.width, card_layout) };
     app.cols = cols;
     app.clamp_selection();
     let rows = app.grid_rows();
-    let card_row_h = if compact { 1 } else { CARD_H };
+    let card_row_h = if compact { 1 } else { card_h };
     let heights: Vec<u16> =
         rows.iter().map(|r| if matches!(r, Row::Divider { .. }) { 1 } else { card_row_h }).collect();
     let sel_row = row_of(&rows, app.selected).unwrap_or(0);
@@ -98,8 +102,8 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool, tick: u
             if compact {
                 render_compact(f, Rect { height: 1, ..*row_rect }, s, &app.config, selected, tick);
             } else {
-                let rect = cell_rect(*row_rect, cols, col, 0);
-                app.spirits_visible |= rect.width >= CARD_W && rect.height >= CARD_H;
+                let rect = cell_rect(*row_rect, cols, col, 0, card_layout);
+                app.spirits_visible |= rect.width >= card_w && rect.height >= card_h;
                 if one_column {
                     render_wide_card(f, rect, s, &app.config, selected, tick);
                 } else {
@@ -164,10 +168,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, above: bool, below: bool, n
 mod tests {
     use super::*;
     use crate::app::{fake_session, Dir};
-    use crate::config::Config;
+    use crate::config::{CardLayout, Config};
     use crate::model::Status;
     use crate::refresh::Snapshot;
     use crate::ui::style;
+    use crate::ui::card::{CARD_H, CARD_W};
     use crate::ui::test_util::{draw as draw_buf, rows};
 
     fn render(app: &mut App, w: u16, h: u16, tick: u64) -> Vec<String> {
@@ -493,7 +498,7 @@ mod tests {
         let screen = rows(&buf);
         // middle 60x30: list clamp(30*2/5, 10, 11) = 11 rows, preview 19 below
         assert_eq!(app.grid_rect, Rect::new(0, 1, 60, 11));
-        assert_eq!(app.cols, crate::ui::grid::card_cols(60), "the usual grid inside the strip");
+        assert_eq!(app.cols, crate::ui::grid::card_cols(60, CardLayout::Standard), "the usual grid inside the strip");
         assert!(screen[12].starts_with('╭') && screen[12].contains("미리보기 · proj-t9"), "{}", screen[12]);
         assert!(screen[30].starts_with('╰'), "{}", screen[30]);
         assert!(screen.join("\n").contains(crate::ui::preview::PREVIEW_LOADING), "t9 not read yet");
@@ -532,7 +537,7 @@ mod tests {
         for _ in 0..2 {
             let screen = render(&mut app, 150, 30, 0);
             assert_eq!(app.grid_rect, Rect::new(0, 1, 150, 28));
-            assert_eq!(app.cols, crate::ui::grid::card_cols(150), "normal grid");
+            assert_eq!(app.cols, crate::ui::grid::card_cols(150, CardLayout::Standard), "normal grid");
             assert!(screen.join("\n").contains("proj-t10"));
             app.toggle_preview();
             assert!(app.preview);
@@ -562,7 +567,7 @@ mod tests {
             let screen = render(&mut app, w, h, 0);
             assert!(app.preview_too_small, "{w}x{h}");
             assert_eq!(app.grid_rect, Rect::new(0, 1, w, h - 2));
-            let want_cols = if cards { crate::ui::grid::card_cols(w) } else { 1 };
+            let want_cols = if cards { crate::ui::grid::card_cols(w, CardLayout::Standard) } else { 1 };
             assert_eq!(app.cols, want_cols, "{w}x{h}: the normal grid (2 cards across at 60-69)");
             // cards are centered in their grid cells
             assert_eq!(screen[1].trim_start().starts_with('╭'), cards, "{w}x{h}: normal grid, not the preview list");
@@ -677,6 +682,175 @@ mod tests {
         }
         assert_eq!(app.scroll, 0);
         assert!(render(&mut app, 150, 22, 0)[1].starts_with("── 창 1 · 세션 12"));
+    }
+
+    // ---- both card layouts ----
+
+    fn with_layout(mut app: App, layout: CardLayout) -> App {
+        app.config.card_layout = layout;
+        app
+    }
+
+    #[test]
+    fn large_layout_grid_at_120x40() {
+        use crate::ui::card::{LARGE_H, LARGE_SCENE_ROWS, LARGE_W};
+        let mut app = with_layout(App::new(Config::default()), CardLayout::Large);
+        app.apply_snapshot(Snapshot { sessions: ten_sessions(), ..Default::default() });
+        let buf = draw_buf(120, 40, |f| draw(f, &mut app, 0, Instant::now()));
+        let screen = rows(&buf);
+        assert_eq!(app.cols, 4, "120 / 28");
+        // 4 cells of 30 columns, a 28-wide card centred in each; rows of 13
+        let corners: Vec<(u16, u16)> = card_corners(&buf, 120);
+        let want: Vec<(u16, u16)> = [1u16, 14].iter().flat_map(|&y| [1u16, 31, 61, 91].map(|x| (x, y))).collect();
+        assert_eq!(corners, want, "{}", screen.join("\n"));
+        for &(x, y) in &corners {
+            assert_eq!(buf[(x + LARGE_W - 1, y)].symbol(), "╮");
+            assert_eq!(buf[(x, y + LARGE_H - 1)].symbol(), "╰");
+        }
+        assert!(screen[1 + 1 + usize::from(LARGE_SCENE_ROWS)].contains("proj-t0"), "{}", screen.join("\n"));
+        assert!(has_braille(&screen.join("\n")) && app.spirits_visible);
+        assert!(screen.last().unwrap().contains("▼ more"), "8 of 10 cards fit");
+        assert_eq!(buf[(1, 1)].fg, style::SELECTED);
+    }
+
+    #[test]
+    fn grid_cols_and_scroll_follow_the_layout() {
+        for layout in [CardLayout::Standard, CardLayout::Large] {
+            for w in [60u16, 100, 150] {
+                let mut app = with_layout(twenty_sessions(), layout);
+                render(&mut app, w, 40, 0);
+                assert_eq!(app.cols, crate::ui::grid::card_cols(w, layout), "{layout:?} {w}");
+            }
+            // 20 sessions: walking every card keeps the selected one fully on screen
+            let mut app = with_layout(twenty_sessions(), layout);
+            let (_, card_h) = crate::ui::card::card_size(layout);
+            for sel in (0..20).chain((0..20).rev()) {
+                app.selected = sel;
+                let buf = draw_buf(100, 30, |f| draw(f, &mut app, 0, Instant::now()));
+                let blue: Vec<(u16, u16)> = card_corners(&buf, 100).into_iter().filter(|&p| buf[p].fg == style::SELECTED).collect();
+                assert_eq!(blue.len(), 1, "{layout:?} sel={sel} scroll={}", app.scroll);
+                assert!(blue[0].1 + card_h <= 29, "{layout:?} sel={sel}: the whole card is above the footer");
+                let text = rows(&buf)[1..29].join("\n");
+                assert!(text.contains(&format!("proj-t{sel} ")), "{layout:?} sel={sel}: {text}");
+            }
+            assert_eq!(app.scroll, 0);
+        }
+    }
+
+    #[test]
+    fn spirits_render_only_for_visible_cards_in_both_layouts() {
+        use crate::ui::card::{reset_spirit_renders, spirit_renders};
+        // (layout, normal 100x30, scrolled to the end, preview 150x30): middle 28 rows;
+        // large: 3 across, 2 rows of 13, the last row holds 2 cards
+        for (layout, normal, scrolled, side) in [(CardLayout::Standard, 10, 10, 2), (CardLayout::Large, 6, 5, 2)] {
+            let mut app = with_layout(twenty_sessions(), layout);
+            reset_spirit_renders();
+            render(&mut app, 100, 30, 0);
+            assert_eq!(spirit_renders(), normal, "{layout:?}: only visible cards");
+            app.selected = 19;
+            reset_spirit_renders();
+            render(&mut app, 100, 30, 1);
+            assert_eq!(spirit_renders(), scrolled, "{layout:?}: scrolled");
+            app.preview = true;
+            reset_spirit_renders();
+            render(&mut app, 150, 30, 2);
+            assert_eq!(spirit_renders(), side, "{layout:?}: preview list");
+            assert!(app.spirits_visible);
+        }
+    }
+
+    #[test]
+    fn preview_with_the_large_layout_side_and_stacked() {
+        use crate::ui::card::{LARGE_H, LARGE_W};
+        let mut app = with_layout(preview_app(6), CardLayout::Large);
+        let buf = draw_buf(120, 40, |f| draw(f, &mut app, 0, Instant::now()));
+        let screen = rows(&buf);
+        assert_eq!(app.grid_rect, Rect::new(0, 1, LARGE_W, 38), "the side list is one large card wide");
+        assert_eq!(app.cols, 1);
+        assert_eq!(card_corners(&buf, LARGE_W), vec![(0, 1), (0, 14)], "two 13-row cards fit 38 rows: {}", screen.join("\n"));
+        assert!(screen[1].chars().nth(27) == Some('╮') && screen[1].chars().nth(28) == Some('╭'), "{}", screen[1]);
+        assert!(screen[1].contains("미리보기 · proj-t0"), "{}", screen[1]);
+        assert_eq!(app.preview_target().map(|t| t.lines), Some(36));
+        // stacked (narrow but tall): one row of large cards on top
+        app.selected = 5;
+        let screen = render(&mut app, 60, 32, 0);
+        // middle 60x30: strip clamp(30*2/5, 13, 14) = 13 rows, preview 17 below
+        assert_eq!(app.grid_rect, Rect::new(0, 1, 60, LARGE_H));
+        assert_eq!(app.cols, crate::ui::grid::card_cols(60, CardLayout::Large));
+        let strip = screen[1..14].join("\n");
+        assert!(strip.contains("proj-t5") && has_braille(&strip), "{strip}");
+        assert!(screen[14].starts_with('╭') && screen[14].contains("미리보기 · proj-t5"), "{}", screen[14]);
+        // v flips the list between the layouts while the preview is on
+        app.config.card_layout = CardLayout::Standard;
+        render(&mut app, 120, 40, 0);
+        assert_eq!(app.grid_rect.width, 26);
+    }
+
+    #[test]
+    fn tiny_terminals_fall_back_to_compact_cards_in_the_large_layout() {
+        let mut app = with_layout(App::new(Config::default()), CardLayout::Large);
+        app.set_sessions(ten_sessions());
+        app.selected = 9;
+        // middle 40x12 (< 13 rows) and 27x20 (< 28 columns): one-line cards
+        for (w, h) in [(40, 14), (27, 22)] {
+            let screen = render(&mut app, w, h, 0);
+            let text = screen.join("\n");
+            assert!(!text.contains('╭') && !has_braille(&text), "{w}x{h}: {text}");
+            assert!(text.contains("proj-t9"), "{w}x{h}: selection visible: {text}");
+            assert!(!app.spirits_visible);
+        }
+        // exactly one large card fits
+        let screen = render(&mut app, 28, 15, 0).join("\n");
+        assert!(screen.contains('╭') && has_braille(&screen), "{screen}");
+        for (w, h) in [(0, 0), (1, 1), (5, 2), (27, 15), (28, 14), (200, 3), (3, 60)] {
+            for preview in [false, true] {
+                app.preview = preview;
+                assert_eq!(render(&mut app, w, h, u64::MAX).len(), h as usize);
+            }
+        }
+    }
+
+    /// Text screenshots of both layouts in the normal and the preview mode
+    /// (`cargo test dump_card_layouts -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn dump_card_layouts() {
+        let sessions = || -> Vec<crate::model::Session> {
+            let statuses = [Status::Running, Status::NeedsInput, Status::Idle, Status::Done, Status::Running, Status::Unknown];
+            let models = ["claude-opus-4-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5"];
+            let sums = ["로그인 화면의 토큰 갱신 버그를 고치고 테스트를 추가하는 중", "fixing the flaky parser test", "", "README 정리"];
+            (0..10)
+                .map(|i| {
+                    let mut s = fake_session(&format!("t{i}"), statuses[i % statuses.len()]);
+                    s.model = Some(models[i % 4].into());
+                    s.summary = Some(sums[i % 4].into()).filter(|x: &String| !x.is_empty());
+                    s.branch = Some(format!("feat/task-{i}"));
+                    s.ctx_percent = Some([12.0, 45.0, 80.0][i % 3]);
+                    if i % 3 == 0 {
+                        s.pr = Some(crate::model::Pr { number: 100 + i as u64, title: "x".into(), state: crate::model::PrState::ReviewPending });
+                    }
+                    s
+                })
+                .collect()
+        };
+        for layout in [CardLayout::Standard, CardLayout::Large] {
+            for preview in [false, true] {
+                let mut cfg = Config::default();
+                cfg.card_layout = layout;
+                cfg.extras.pr = true;
+                let mut app = App::new(cfg);
+                app.apply_snapshot(Snapshot { sessions: sessions(), ..Default::default() });
+                if preview {
+                    app.toggle_preview();
+                    let (cache, _) = app.preview_shared();
+                    cache.put("t0", crate::preview::PreviewEntry { screen: Ok("$ cargo test\n   Compiling demo v0.1.0\n    Finished test\ntest result: ok. 12 passed\n\n❯ ".into()), fetched_at: Instant::now() });
+                }
+                println!("--- {layout:?}, preview {preview}, 120x40 ---");
+                for r in render(&mut app, 120, 40, 44) {
+                    println!("{}", r.trim_end());
+                }
+            }
+        }
     }
 
     /// Text look of the preview layout. Run with

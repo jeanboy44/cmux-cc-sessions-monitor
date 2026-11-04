@@ -11,13 +11,15 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::Config;
+use crate::config::{CardLayout, Config};
 use crate::model::ModelFamily;
 use crate::spirit::theme::Theme;
 use crate::ui::style::{self, cursor_visible, window_block, CURSOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsItem {
+    /// Standard or large cards (also `v`).
+    CardLayout,
     Theme,
     /// Spirit element of one model family.
     ModelTheme(ModelFamily),
@@ -29,7 +31,8 @@ pub enum SettingsItem {
     GuessWorktree,
 }
 
-pub const ALL_ITEMS: [SettingsItem; 11] = [
+pub const ALL_ITEMS: [SettingsItem; 12] = [
+    SettingsItem::CardLayout,
     SettingsItem::Theme,
     SettingsItem::ModelTheme(ModelFamily::Fable),
     SettingsItem::ModelTheme(ModelFamily::Opus),
@@ -47,11 +50,13 @@ pub const HELP: &str = "j/k 이동  Enter/Space 변경  Esc 닫기";
 pub const PR_UNAVAILABLE: &str = "사용 불가";
 const TITLE: &str = " ⚙ SETTINGS ";
 
-/// Theme items cycle (see [`Theme::next`]); every other item flips its flag.
+/// Theme items cycle (see [`Theme::next`]), the card layout switches
+/// between its two values; every other item flips its flag.
 /// A model row cycles from the family's current element, so a family missing
 /// from a hand-edited map starts from its default.
 pub fn toggle(cfg: &mut Config, item: SettingsItem) {
     match item {
+        SettingsItem::CardLayout => cfg.card_layout = cfg.card_layout.next(),
         SettingsItem::Theme => cfg.theme = cfg.theme.next(),
         SettingsItem::ModelTheme(f) => {
             let next = cfg.model_theme(f).next();
@@ -68,6 +73,7 @@ pub fn toggle(cfg: &mut Config, item: SettingsItem) {
 
 pub fn item_label(item: SettingsItem) -> &'static str {
     match item {
+        SettingsItem::CardLayout => "카드 레이아웃",
         SettingsItem::Theme => "기본 테마",
         SettingsItem::ModelTheme(ModelFamily::Fable) => "fable 모델",
         SettingsItem::ModelTheme(ModelFamily::Opus) => "opus 모델",
@@ -82,10 +88,10 @@ pub fn item_label(item: SettingsItem) -> &'static str {
     }
 }
 
-/// Boolean state of a flag item; `None` for the theme items.
+/// Boolean state of a flag item; `None` for the theme and layout items.
 fn flag(cfg: &Config, item: SettingsItem) -> Option<bool> {
     match item {
-        SettingsItem::Theme | SettingsItem::ModelTheme(_) => None,
+        SettingsItem::CardLayout | SettingsItem::Theme | SettingsItem::ModelTheme(_) => None,
         SettingsItem::ExtraBranch => Some(cfg.extras.branch),
         SettingsItem::ExtraElapsed => Some(cfg.extras.elapsed),
         SettingsItem::ExtraLastActivity => Some(cfg.extras.last_activity),
@@ -99,8 +105,17 @@ pub fn item_value(cfg: &Config, item: SettingsItem) -> String {
     match (item, flag(cfg, item)) {
         (_, Some(true)) => "켜짐".into(),
         (_, Some(false)) => "꺼짐".into(),
+        (SettingsItem::CardLayout, None) => layout_label(cfg.card_layout).into(),
         (SettingsItem::ModelTheme(f), None) => theme_label(cfg.model_theme(f)).into(),
         (_, None) => theme_label(cfg.theme).into(),
+    }
+}
+
+/// Korean name of a card layout for the settings window.
+pub fn layout_label(layout: CardLayout) -> &'static str {
+    match layout {
+        CardLayout::Standard => "기본",
+        CardLayout::Large => "크게",
     }
 }
 
@@ -285,6 +300,23 @@ mod tests {
         c.model_themes.clear();
         toggle(&mut c, SettingsItem::ModelTheme(ModelFamily::Haiku));
         assert_eq!(c.model_themes.get("haiku"), Some(&Theme::Lightning));
+    }
+
+    #[test]
+    fn card_layout_row_cycles_standard_and_large() {
+        use crate::config::CardLayout;
+        assert_eq!(ALL_ITEMS[0], SettingsItem::CardLayout, "the first row");
+        assert_eq!(item_label(SettingsItem::CardLayout), "카드 레이아웃");
+        let mut c = Config::default();
+        assert_eq!(item_value(&c, SettingsItem::CardLayout), "기본");
+        toggle(&mut c, SettingsItem::CardLayout);
+        assert_eq!(c.card_layout, CardLayout::Large);
+        assert_eq!(item_value(&c, SettingsItem::CardLayout), "크게");
+        toggle(&mut c, SettingsItem::CardLayout);
+        assert_eq!(c, Config::default());
+        let text = screen(&Config { card_layout: CardLayout::Large, ..Config::default() }, 0, 0, None);
+        let row = text.iter().find(|l| l.contains("카드 레이아웃")).expect("row drawn");
+        assert!(row.contains(CURSOR) && row.trim_end_matches(['│', ' ']).ends_with("크게"), "{row}");
     }
 
     #[test]

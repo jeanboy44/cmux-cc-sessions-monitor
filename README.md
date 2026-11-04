@@ -8,7 +8,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 
 ## Features
 
-- One 20x10 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, the git branch (or PR) and a one-line summary.
+- One 20x10 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, the git branch (or PR) and a one-line summary. `v` switches to a large 28x13 card with a quarter-size spirit and more text: the model family, branch and PR on their own rows, and the summary on two lines.
 - Each spirit stands for a Claude model: fable is water, opus is fire, sonnet is lightning, haiku is poison (green). You can change the element per model in settings, and unknown models use the `theme` element (default fire).
 - The spirit's state is its animation: running (the body churns and casts its magic to the right: fire breath from the mouth, and a water vortex, poison fog or lightning bolts centred in the room right of the body), needs input (a bobbing `?`), idle (dim slow bob and `z`), done (sparkles), unknown (gray).
 - Context usage sets how hard the spirit works (relaxed, lively, struggling; see [Context usage setup](#context-usage-setup)) and, while running, the size of the magic: small under 30%, normal, big from 70%, and a red warning flicker above 90%.
@@ -30,7 +30,8 @@ Then run `cmux-magigent` in a cmux pane. Requires a Rust toolchain (1.89 or newe
 |---|---|
 | `h` `j` `k` `l` / arrows | Move between cards (rows wrap; from the last card `l`/`j` go to the first, from the first `h`/`k` go to the last) |
 | `Enter` / `Space` | Focus the selected session's cmux workspace and pane |
-| `p` | Toggle preview (one-line cards plus the session's screen) |
+| `v` | Switch the card layout: standard (20x10) or large (28x13); saved as `card_layout` |
+| `p` | Toggle preview (a column of cards of the current layout plus the session's screen) |
 | `i` | Open settings |
 | `q` / `Ctrl-C` | Quit |
 
@@ -49,6 +50,7 @@ The config file is `~/.config/cmux-magigent/config.toml` (if it does not exist y
 | `pr_poll_seconds` | `45` | PR lookup interval |
 | `guess_worktree` | `true` | Guess the worktree of sessions started in the main repository |
 | `done_retention_minutes` | `10` | How long finished sessions stay on screen |
+| `card_layout` | `"standard"` | `"standard"`: 20x10 cards (spirit, name, badge, branch or PR, one-line summary); `"large"`: 28x13 cards with a small spirit and more text (model, branch, PR, two-line summary). Any other value loads as `"standard"`. Also switched with `v` and in settings |
 | `[extras]` | `branch`, `elapsed`, `summary` on; `last_activity`, `pr` off | Extra info shown on cards |
 
 ## Context usage setup
@@ -76,6 +78,8 @@ The usage drives three stages, on the same thresholds as the magic size:
 - Struggling (70% and up): the body trembles and pants with a faster bob and a slight squash and stretch, pale sweat drops slide down its side, casts wind up longer and recoil harder, and an idle spirit slumps with heavy, slow breaths. Above 90% the body also flickers red.
 
 The water vortex, poison fog and lightning bolts are centred in the magic area, the columns from just right of the body to the card's inner right edge (the wider preview card gives them its full width); the fire breath leaves the mouth.
+
+The large card's spirit is a quarter-size version (6x2 cells) with the same eyes, state cues, element looks, pose and stages; its magic is about half the size and follows the same placement rules.
 
 ## How status is detected
 

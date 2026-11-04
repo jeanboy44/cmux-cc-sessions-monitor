@@ -12,12 +12,20 @@
 //! summary the last row shows the next extra, e.g. the branch the PR took the
 //! row from). A larger area gets the card centered across, at its top.
 //!
+//! Large card ([`CardLayout::Large`], `v`): [`LARGE_W`] x [`LARGE_H`] = 28 x
+//! 13 (inner 26 x 11, as wide as the preview's side list): the quarter-area
+//! [`Size::XS`] spirit in a [`LARGE_SCENE_ROWS`]-row band at the top left
+//! with its magic to the right, then name, status badge (+ elapsed / last
+//! activity, the model family word on the right), branch, PR, and the
+//! summary on two lines; unused rows stay blank.
+//!
 //! The preview list stretches the card across its column instead
 //! ([`render_wide_card`]): same height, the body stays on the left and the
 //! extra columns go to the text rows and the magic's room on the right.
 //!
-//! When a card does not fit a compact one-line card is drawn instead
-//! ([`render_compact`]). Empty areas draw nothing; no size panics.
+//! When a card of the configured layout does not fit a compact one-line card
+//! is drawn instead ([`render_compact`]). Empty areas draw nothing; no size
+//! panics.
 
 use std::time::SystemTime;
 
@@ -29,8 +37,8 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::Config;
-use crate::model::{PrState, Session, Status};
+use crate::config::{CardLayout, Config};
+use crate::model::{model_family, PrState, Session, Status};
 use crate::spirit::theme::Theme;
 use crate::spirit::{self, max_grid_size, Magic, Size, SpiritParams};
 use crate::ui::scene::draw_grid;
@@ -48,10 +56,31 @@ pub const CARD_W: u16 = INNER_W + 2;
 pub const CARD_H: u16 = SCENE_ROWS + INFO_ROWS + 2;
 const _: () = assert!(SCENE_COLS <= INNER_W, "the largest spirit fits the card");
 
+/// Large card size, borders included: 28 x 13 (inner 26 x 11).
+pub const LARGE_W: u16 = 28;
+pub const LARGE_H: u16 = 13;
+/// Spirit band of the large card: as tall as the XS spirit.
+pub const LARGE_SCENE_ROWS: u16 = spirit::grid_size(Size::XS).1;
+/// Summary lines of the large card.
+const LARGE_SUMMARY_ROWS: usize = 2;
+const _: () = assert!(
+    spirit::grid_size_for(Size::XS, Magic::Big).0 + SPIRIT_LEFT_PAD <= LARGE_W - 2,
+    "big magic fits right of the padded XS body"
+);
+
+/// Full card size (columns, rows) of a layout, borders included.
+pub const fn card_size(layout: CardLayout) -> (u16, u16) {
+    match layout {
+        CardLayout::Standard => (CARD_W, CARD_H),
+        CardLayout::Large => (LARGE_W, LARGE_H),
+    }
+}
+
 /// Whether the grid draws compact one-line cards: only when `area` cannot
-/// hold one full card (the preview list keeps full cards).
-pub fn compact_mode(area: Rect) -> bool {
-    area.width < CARD_W || area.height < CARD_H
+/// hold one full card of `layout` (the preview list keeps full cards).
+pub fn compact_mode(area: Rect, layout: CardLayout) -> bool {
+    let (w, h) = card_size(layout);
+    area.width < w || area.height < h
 }
 
 /// The card's element: the one mapped to the session's model family, or the
@@ -106,15 +135,15 @@ fn draw_spirit(buf: &mut Buffer, band: Rect, params: &SpiritParams) -> Rect {
     at
 }
 
-/// Draws one session card with its spirit at animation frame `tick`: a
-/// [`CARD_W`] x [`CARD_H`] card centered across the top of `area`. Too small
-/// an area falls back to [`render_compact`].
+/// Draws one session card with its spirit at animation frame `tick`: a card
+/// of the configured layout ([`card_size`]) centered across the top of
+/// `area`. Too small an area falls back to [`render_compact`].
 pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool, tick: u64) {
     render_full(f, area, s, cfg, selected, tick, false);
 }
 
-/// Like [`render_card`], but the card is as wide as `area` (at least
-/// [`CARD_W`]), at its top left: the preview's one-column list.
+/// Like [`render_card`], but the card is as wide as `area` (at least the
+/// layout's card width), at its top left: the preview's one-column list.
 pub fn render_wide_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool, tick: u64) {
     render_full(f, area, s, cfg, selected, tick, true);
 }
@@ -124,14 +153,16 @@ fn render_full(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: b
     if area.is_empty() {
         return;
     }
-    if compact_mode(area) {
+    let layout = cfg.card_layout;
+    if compact_mode(area, layout) {
         render_compact(f, area, s, cfg, selected, tick);
         return;
     }
+    let (card_w, card_h) = card_size(layout);
     let rect = if stretch {
-        Rect { height: CARD_H, ..area }
+        Rect { height: card_h, ..area }
     } else {
-        Rect::new(area.x + (area.width - CARD_W) / 2, area.y, CARD_W, CARD_H)
+        Rect::new(area.x + (area.width - card_w) / 2, area.y, card_w, card_h)
     };
     let done = s.status == Status::Done;
     let mut block = style::window_block(style::status_color(s.status), selected);
@@ -152,11 +183,15 @@ fn render_full(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: b
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
 
-    let band = Rect { height: SCENE_ROWS.min(inner.height), ..inner };
+    let (size, scene_rows) = match layout {
+        CardLayout::Standard => (Size::S, SCENE_ROWS),
+        CardLayout::Large => (Size::XS, LARGE_SCENE_ROWS),
+    };
+    let band = Rect { height: scene_rows.min(inner.height), ..inner };
     let params = SpiritParams {
         theme: theme_for(s, cfg),
         status: s.status,
-        size: Size::S,
+        size,
         tick,
         seed: seed_for(s),
         warning: spirit::warning(s.ctx_percent),
@@ -167,8 +202,12 @@ fn render_full(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: b
     draw_spirit(f.buffer_mut(), band, &params);
 
     let text_area = Rect::new(inner.x, inner.y + band.height, inner.width, inner.height - band.height);
-    let mut lines = text_lines(s, cfg, usize::from(text_area.width), SystemTime::now());
-    lines.truncate(usize::from(INFO_ROWS.min(text_area.height)));
+    let (width, now) = (usize::from(text_area.width), SystemTime::now());
+    let mut lines = match layout {
+        CardLayout::Standard => text_lines(s, cfg, width, now),
+        CardLayout::Large => large_text_lines(s, cfg, width, now),
+    };
+    lines.truncate(usize::from(text_area.height));
     let mut para = Paragraph::new(lines);
     if done {
         para = para.style(Style::new().add_modifier(Modifier::DIM));
@@ -264,16 +303,57 @@ fn pr_label(state: PrState) -> &'static str {
 /// with no summary the next extra (e.g. the branch the PR took the row from)
 /// takes its place.
 fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Line<'static>> {
-    let ex = &cfg.extras;
-    let color = style::status_color(s.status);
-    let text = Style::new().fg(style::TEXT);
-    let dim = Style::new().fg(style::TEXT_DIM);
-    let mut lines = vec![Line::styled(truncate_to_width(&s.name, width), text.add_modifier(Modifier::BOLD))];
+    let mut lines = vec![name_line(s, width), Line::from(badge_spans(s, cfg, width, now))];
+    let mut extras = extra_lines(s, cfg, width);
+    let summary = s.summary.as_ref().filter(|_| cfg.extras.summary).map(|sum| Line::styled(truncate_to_width(sum, width), dim()));
+    if !extras.is_empty() {
+        lines.push(extras.remove(0));
+    }
+    lines.extend(summary);
+    lines.extend(extras);
+    lines
+}
 
-    // Badge line: whole tokens only. When too narrow, last activity goes
-    // first, then elapsed; the badge itself is truncated as a last resort.
+/// Info lines of the large card: name, status badge (+ elapsed / last
+/// activity) with the model family word on the right when it fits, branch,
+/// PR chip (or `PR ?`), and the summary on up to two lines. Rows of disabled
+/// or unknown extras collapse.
+fn large_text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Line<'static>> {
+    let ex = &cfg.extras;
+    let mut badge = badge_spans(s, cfg, width, now);
+    let used: usize = badge.iter().map(Span::width).sum();
+    if let Some(word) = s.model.as_deref().and_then(model_family).map(|f| f.as_key()) {
+        // the badge keeps its tokens; the word goes when there is no room
+        if used + 1 + word.width() <= width {
+            badge.push(Span::raw(" ".repeat(width - used - word.width())));
+            badge.push(Span::styled(word, dim()));
+        }
+    }
+    let mut lines = vec![name_line(s, width), Line::from(badge)];
+    lines.extend(branch_line(s, cfg, width));
+    lines.extend(pr_line(s, cfg, width));
+    if let Some(sum) = s.summary.as_ref().filter(|_| ex.summary) {
+        lines.extend(summary_lines(sum, width, LARGE_SUMMARY_ROWS).into_iter().map(|l| Line::styled(l, dim())));
+    }
+    lines
+}
+
+fn dim() -> Style {
+    Style::new().fg(style::TEXT_DIM)
+}
+
+fn name_line(s: &Session, width: usize) -> Line<'static> {
+    Line::styled(truncate_to_width(&s.name, width), Style::new().fg(style::TEXT).add_modifier(Modifier::BOLD))
+}
+
+/// Badge row: whole tokens only. When too narrow, last activity goes first,
+/// then elapsed; the badge itself is truncated as a last resort.
+fn badge_spans(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Span<'static>> {
+    let ex = &cfg.extras;
+    let text = Style::new().fg(style::TEXT);
     let tag = truncate_to_width(&format!(" {} ", style::status_tag(s.status)), width);
     let mut used = tag.width();
+    let color = style::status_color(s.status);
     let mut badge = vec![Span::styled(tag, Style::new().fg(style::BADGE_FG).bg(color).add_modifier(Modifier::BOLD))];
     let elapsed = ex.elapsed.then(|| elapsed_text(s, now)).flatten().map(|d| format!(" {d}"));
     let last = ex.last_activity.then(|| since(s.updated_at, now)).flatten().map(|d| format!(" ·{d} ago"));
@@ -289,50 +369,95 @@ fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<L
         badge.push(Span::styled(e, text));
     }
     if let Some(l) = last.filter(|_| keep_last && used + lw <= width) {
-        badge.push(Span::styled(l, dim));
+        badge.push(Span::styled(l, dim()));
     }
-    lines.push(Line::from(badge));
-
-    let mut extras = extra_lines(s, cfg, width);
-    let summary = s.summary.as_ref().filter(|_| ex.summary).map(|sum| Line::styled(truncate_to_width(sum, width), dim));
-    if !extras.is_empty() {
-        lines.push(extras.remove(0));
-    }
-    lines.extend(summary);
-    lines.extend(extras);
-    lines
+    badge
 }
 
-/// The enabled extras in priority order: PR chip, branch (`~` when guessed),
-/// `PR ?` (lookup failed), each cut to `width`.
-fn extra_lines(s: &Session, cfg: &Config, width: usize) -> Vec<Line<'static>> {
-    let ex = &cfg.extras;
-    let text = Style::new().fg(style::TEXT);
-    let dim = Style::new().fg(style::TEXT_DIM);
-    let mut lines = Vec::new();
-    if let Some(pr) = s.pr.as_ref().filter(|_| ex.pr) {
-        let pr_color = match pr.state {
-            PrState::Approved => style::DONE,
-            PrState::Conflict => style::FLASH_ALERT,
-            _ => style::TEXT_DIM,
-        };
-        lines.push(Line::styled(truncate_to_width(&format!("#{} {}", pr.number, pr_label(pr.state)), width), Style::new().fg(pr_color)));
+/// The PR chip, else `PR ?` when the lookup failed (PR extra on).
+fn pr_line(s: &Session, cfg: &Config, width: usize) -> Option<Line<'static>> {
+    if !cfg.extras.pr {
+        return None;
     }
-    if let Some(b) = s.branch.as_ref().filter(|_| ex.branch) {
-        let tilde = if s.branch_guessed { "~" } else { "" };
-        lines.push(Line::styled(truncate_to_width(&format!("⎇ {tilde}{b}"), width), text));
-    }
-    if ex.pr && s.pr.is_none() && s.pr_unavailable {
+    match &s.pr {
+        Some(pr) => {
+            let pr_color = match pr.state {
+                PrState::Approved => style::DONE,
+                PrState::Conflict => style::FLASH_ALERT,
+                _ => style::TEXT_DIM,
+            };
+            Some(Line::styled(truncate_to_width(&format!("#{} {}", pr.number, pr_label(pr.state)), width), Style::new().fg(pr_color)))
+        }
         // The lookup failed; the footer says why.
-        lines.push(Line::styled(truncate_to_width("PR ?", width), dim));
+        None if s.pr_unavailable => Some(Line::styled(truncate_to_width("PR ?", width), dim())),
+        None => None,
     }
-    lines
+}
+
+/// The branch (`~` when guessed), branch extra on.
+fn branch_line(s: &Session, cfg: &Config, width: usize) -> Option<Line<'static>> {
+    let b = s.branch.as_ref().filter(|_| cfg.extras.branch)?;
+    let tilde = if s.branch_guessed { "~" } else { "" };
+    Some(Line::styled(truncate_to_width(&format!("⎇ {tilde}{b}"), width), Style::new().fg(style::TEXT)))
+}
+
+/// The enabled extras in priority order: PR chip, branch, `PR ?` (a known
+/// branch beats an unknown PR).
+fn extra_lines(s: &Session, cfg: &Config, width: usize) -> Vec<Line<'static>> {
+    let (pr, branch) = (pr_line(s, cfg, width), branch_line(s, cfg, width));
+    match (s.pr.is_some(), pr, branch) {
+        (true, pr, branch) => pr.into_iter().chain(branch).collect(),
+        (false, pr, branch) => branch.into_iter().chain(pr).collect(),
+    }
+}
+
+/// `text` wrapped onto at most `rows` lines of `width` columns (CJK-aware:
+/// wide characters count two). A line breaks at the last space when the
+/// break would split a word and that space is past half the line; the last
+/// line is cut with `…`. Control characters show as spaces.
+fn summary_lines(text: &str, width: usize, rows: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    if width == 0 {
+        return out;
+    }
+    let clean: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let mut rest = clean.trim();
+    while !rest.is_empty() && out.len() < rows {
+        if out.len() + 1 == rows || rest.width() <= width {
+            out.push(truncate_to_width(rest, width));
+            break;
+        }
+        let (mut used, mut cut) = (0, 0);
+        for (i, c) in rest.char_indices() {
+            let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if used + w > width {
+                break;
+            }
+            used += w;
+            cut = i + c.len_utf8();
+        }
+        if cut == 0 {
+            // a character wider than the line
+            out.push(truncate_to_width(rest, width));
+            break;
+        }
+        if rest[cut..].starts_with(|c: char| !c.is_whitespace()) {
+            if let Some(sp) = rest[..cut].rfind(char::is_whitespace) {
+                if rest[..sp].width() * 2 >= width {
+                    cut = sp;
+                }
+            }
+        }
+        out.push(rest[..cut].trim_end().to_string());
+        rest = rest[cut..].trim_start();
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Extras;
+    use crate::config::{CardLayout, Extras};
     use crate::model::Pr;
     use crate::ui::test_util::{draw, rows};
     use ratatui::style::Color;
@@ -900,12 +1025,17 @@ mod tests {
 
     #[test]
     fn compact_mode_rules() {
-        let full = Rect::new(0, 0, CARD_W, CARD_H);
-        assert!(!compact_mode(full));
-        assert!(!compact_mode(Rect::new(0, 0, 500, 500)), "the preview list keeps full cards");
-        assert!(compact_mode(Rect { width: CARD_W - 1, ..full }));
-        assert!(compact_mode(Rect { height: CARD_H - 1, ..full }));
-        assert!(compact_mode(Rect::default()));
+        for layout in [CardLayout::Standard, CardLayout::Large] {
+            let (w, h) = card_size(layout);
+            let full = Rect::new(0, 0, w, h);
+            assert!(!compact_mode(full, layout));
+            assert!(!compact_mode(Rect::new(0, 0, 500, 500), layout), "the preview list keeps full cards");
+            assert!(compact_mode(Rect { width: w - 1, ..full }, layout));
+            assert!(compact_mode(Rect { height: h - 1, ..full }, layout));
+            assert!(compact_mode(Rect::default(), layout));
+        }
+        // a standard-sized area is too small for a large card
+        assert!(compact_mode(Rect::new(0, 0, CARD_W, CARD_H), CardLayout::Large));
     }
 
     fn wide(s: &Session, cfg: &Config, w: u16, selected: bool, tick: u64) -> Buffer {
@@ -985,6 +1115,196 @@ mod tests {
                 // rect partly outside the frame
                 draw(w, h, |f| render_card(f, Rect::new(w.saturating_sub(1), h.saturating_sub(1), CARD_W, CARD_H), &s, &Config::default(), selected, 0));
                 draw(w, h, |f| render_card(f, Rect::new(u16::MAX - 5, u16::MAX - 5, CARD_W, CARD_H), &s, &Config::default(), selected, 0));
+            }
+        }
+    }
+
+    // ---- the large layout (B) ----
+
+    fn large_cfg() -> Config {
+        Config { card_layout: CardLayout::Large, ..all_extras() }
+    }
+
+    fn opus(name: &str, status: Status) -> Session {
+        Session { model: Some("claude-opus-4-5".into()), ..session(name, status) }
+    }
+
+    fn large_rows(s: &Session, cfg: &Config) -> Vec<String> {
+        rows(&draw(LARGE_W, LARGE_H, |f| render_card(f, f.area(), s, cfg, false, 0)))
+    }
+
+    /// The text rows of a large card (inside the border, below the spirit band).
+    fn large_info(s: &Session, cfg: &Config) -> Vec<String> {
+        let rows = large_rows(s, cfg);
+        rows[1 + usize::from(LARGE_SCENE_ROWS)..usize::from(LARGE_H) - 1].iter().map(|r| info(r)).collect()
+    }
+
+    #[test]
+    fn layouts_have_exact_card_sizes() {
+        assert_eq!(card_size(CardLayout::Standard), (20, 10));
+        assert_eq!(card_size(CardLayout::Large), (28, 13), "about 1:2, as wide as the preview's side list");
+        assert_eq!((LARGE_W, LARGE_H, LARGE_SCENE_ROWS), (28, 13, 2));
+        assert_eq!(spirit::grid_size(Size::XS).1, LARGE_SCENE_ROWS, "the XS spirit fills the band");
+        let s = opus("proj-a", Status::Running);
+        for (layout, (w, h)) in [(CardLayout::Standard, (20u16, 10u16)), (CardLayout::Large, (28, 13))] {
+            let cfg = Config { card_layout: layout, ..all_extras() };
+            let rows = rows(&draw(w, h, |f| render_card(f, f.area(), &s, &cfg, true, 0)));
+            let last = usize::from(h) - 1;
+            assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮'), "{layout:?}: {rows:?}");
+            assert!(rows[last].starts_with('╰') && rows[last].ends_with('╯'), "{layout:?}: {rows:?}");
+            assert!(rows[1..last].iter().all(|r| r.starts_with('│') && r.ends_with('│') && r.width() == usize::from(w)), "{layout:?}: {rows:?}");
+            // a larger area: the card centered across at the top, nothing drawn outside it
+            let (aw, ah) = (w + 21, h + 7);
+            let buf = draw(aw, ah, |f| render_card(f, f.area(), &s, &cfg, false, 3));
+            let x0 = (aw - w) / 2;
+            assert_eq!(buf[(x0, 0)].symbol(), "╭", "{layout:?}");
+            assert_eq!(buf[(x0 + w - 1, h - 1)].symbol(), "╯", "{layout:?}");
+            for y in 0..ah {
+                for x in 0..aw {
+                    let inside = (x0..x0 + w).contains(&x) && y < h;
+                    assert!(inside || buf[(x, y)].symbol() == " ", "{layout:?}: ({x},{y}) drawn outside the card");
+                }
+            }
+            // one row or column short: the compact one-line card
+            for (cw, ch) in [(w - 1, h), (w, h - 1)] {
+                let r = rows_of(&s, &cfg, cw, ch);
+                assert!(r[0].contains("proj-a") && !r.join("").contains('╭'), "{layout:?} {cw}x{ch}: {r:?}");
+            }
+        }
+    }
+
+    fn rows_of(s: &Session, cfg: &Config, w: u16, h: u16) -> Vec<String> {
+        rows(&draw(w, h, |f| render_card(f, f.area(), s, cfg, false, 0)))
+    }
+
+    #[test]
+    fn large_card_spirit_is_xs_in_a_two_row_band_body_left() {
+        for theme in Theme::ALL {
+            let mut cfg = large_cfg();
+            cfg.theme = theme;
+            for status in [Status::Running, Status::Idle, Status::NeedsInput, Status::Done, Status::Unknown] {
+                for tick in [0, 7, 44] {
+                    let s = session("proj-a", status);
+                    let buf = draw(LARGE_W, LARGE_H, |f| render_card(f, f.area(), &s, &cfg, false, tick));
+                    let lit: Vec<(u16, u16)> = (0..LARGE_H).flat_map(|y| (0..LARGE_W).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).collect();
+                    assert!(!lit.is_empty(), "{theme:?} {status:?} {tick}");
+                    assert!(lit.iter().all(|&(x, y)| (1..=LARGE_SCENE_ROWS).contains(&y) && (1..LARGE_W - 1).contains(&x)), "{theme:?} {status:?} {tick}: spirit in the band: {lit:?}");
+                    let lo = lit.iter().map(|p| p.0).min().unwrap();
+                    assert!(lo <= 3, "{theme:?} {status:?}: body on the left ({lo})");
+                    for (x, y) in lit {
+                        assert_eq!(buf[(x, y)].bg, Color::Reset, "no background");
+                    }
+                }
+            }
+        }
+        // the magic grows with ctx in the area right of the body (cells
+        // painted from column 7 on, summed over a few casts)
+        let painted = |pct: f32| -> usize {
+            let s = Session { ctx_percent: Some(pct), ..session("proj-a", Status::Running) };
+            (0..120)
+                .map(|t| {
+                    let buf = draw(LARGE_W, LARGE_H, |f| render_card(f, f.area(), &s, &large_cfg(), false, t));
+                    (1..=LARGE_SCENE_ROWS).flat_map(|y| (7..LARGE_W - 1).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).count()
+                })
+                .sum()
+        };
+        let (low, mid, high) = (painted(10.0), painted(50.0), painted(80.0));
+        assert!(low < mid && mid < high, "fire breath grows: {low} {mid} {high}");
+    }
+
+    #[test]
+    fn large_card_text_rows_name_badge_model_branch_pr_summary() {
+        let s = opus("proj-a", Status::Running);
+        let rows = large_info(&s, &large_cfg());
+        assert_eq!(rows.len(), usize::from(LARGE_H - 2 - LARGE_SCENE_ROWS));
+        assert_eq!(rows[0], "proj-a");
+        assert!(rows[1].starts_with(" RUN  3h ·2m ago") && rows[1].ends_with("opus"), "model word on the right: {:?}", rows[1]);
+        assert_eq!(rows[1].width(), usize::from(LARGE_W - 2), "right-aligned to the inner edge: {:?}", rows[1]);
+        assert_eq!(rows[2..6], ["⎇ feat/login", "#42 approved", "fixing the parser", ""]);
+        assert!(rows[6..].iter().all(String::is_empty), "the rest is blank: {rows:?}");
+        // PR off: the summary moves up; no model: no word
+        let mut cfg = large_cfg();
+        cfg.extras.pr = false;
+        let plain = Session { model: None, ..s.clone() };
+        let rows = large_info(&plain, &cfg);
+        assert_eq!(rows[1], " RUN  3h ·2m ago");
+        assert_eq!(rows[2..4], ["⎇ feat/login", "fixing the parser"]);
+        // a failed PR lookup shows `PR ?` on the PR row
+        let unknown = Session { pr: None, pr_unavailable: true, ..s.clone() };
+        assert_eq!(large_info(&unknown, &large_cfg())[2..5], ["⎇ feat/login", "PR ?", "fixing the parser"]);
+        // every family word
+        for (m, w) in [("claude-fable-5-1", "fable"), ("claude-sonnet-5-5", "sonnet"), ("claude-haiku-5-5", "haiku")] {
+            let x = Session { model: Some(m.into()), ..s.clone() };
+            assert!(large_info(&x, &large_cfg())[1].ends_with(w), "{m}");
+        }
+        // a narrow badge row drops the model word rather than cutting the badge
+        let lines = large_text_lines(&s, &all_extras(), 18, SystemTime::now());
+        let badge: String = lines[1].spans.iter().map(|sp| sp.content.as_ref()).collect();
+        assert_eq!(badge, " RUN  3h ·2m ago", "{badge:?}");
+        // the standard card still never names the model
+        let std = rows_of(&s, &all_extras(), CARD_W, CARD_H).join("\n");
+        assert!(!std.contains("opus"), "{std}");
+    }
+
+    #[test]
+    fn large_card_wraps_the_summary_on_two_lines_cjk_aware() {
+        let mut s = session("proj-a", Status::Running);
+        s.pr = None;
+        s.summary = Some("한글 요약이 아주 길어서 두 줄로 나뉘고 그래도 넘치면 마지막에 잘려야 합니다 정말로".into());
+        let rows = large_rows(&s, &large_cfg());
+        assert!(rows.iter().all(|r| r.width() == usize::from(LARGE_W)), "borders intact: {rows:?}");
+        let info = large_info(&s, &large_cfg());
+        let (l1, l2) = (&info[3], &info[4]);
+        assert!(l1.starts_with("한글 요약이") && !l1.ends_with('…'), "{l1:?}");
+        assert!(l2.ends_with('…') && !l2.is_empty(), "{l2:?}");
+        assert!(l1.width() <= 26 && l2.width() <= 26, "{l1:?} {l2:?}");
+        assert!(info[5].is_empty(), "two lines at most: {info:?}");
+        // words are not split when a space is near the end of the first line
+        s.summary = Some("alpha beta gamma delta epsilon zeta eta theta".into());
+        let info = large_info(&s, &large_cfg());
+        assert_eq!((info[3].as_str(), info[4].as_str()), ("alpha beta gamma delta", "epsilon zeta eta theta"));
+        // a summary that fits takes one line
+        s.summary = Some("가".repeat(13));
+        let info = large_info(&s, &large_cfg());
+        assert_eq!((info[3].as_str(), info[4].as_str()), ("가".repeat(13).as_str(), ""));
+        assert_eq!(summary_lines("", 10, 2), Vec::<String>::new());
+        assert_eq!(summary_lines("abc", 0, 2), Vec::<String>::new());
+        assert_eq!(summary_lines("가나다라", 3, 2), vec!["가", "나…"], "wide chars never overflow");
+    }
+
+    #[test]
+    fn large_card_keeps_selection_unread_blink_and_done_dim() {
+        let (on, off) = blink_ticks();
+        let cfg = large_cfg();
+        let s = session("proj-a", Status::Running);
+        let at = |s: &Session, sel: bool, t: u64| draw(LARGE_W, LARGE_H, |f| render_card(f, f.area(), s, &cfg, sel, t));
+        let buf = at(&s, true, 0);
+        assert_eq!((buf[(0, 0)].symbol(), buf[(0, 0)].fg), ("╭", style::SELECTED));
+        assert_eq!(buf[(LARGE_W - 1, 6)].fg, style::SELECTED);
+        let unread = Session { unread_notification: true, ..s.clone() };
+        assert_eq!((at(&unread, false, on)[(0, 0)].symbol(), at(&unread, false, on)[(0, 0)].fg), ("┏", style::NOTIFY_BLUE));
+        assert_eq!(at(&unread, false, off)[(0, 0)].symbol(), "╭");
+        let done = session("proj-a", Status::Done);
+        let buf = at(&done, false, 0);
+        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM) && buf[(2, 1 + LARGE_SCENE_ROWS)].modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn large_wide_card_fills_the_side_list_and_never_panics() {
+        let s = opus("proj-abcdefghijklmnopqrstuvwxyz", Status::Idle);
+        let cfg = large_cfg();
+        for w in [LARGE_W, 30, 34] {
+            let rows = rows(&draw(w, LARGE_H + 2, |f| render_wide_card(f, f.area(), &s, &cfg, false, 0)));
+            assert_eq!(rows[0].width(), usize::from(w), "{rows:?}");
+            assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮') && rows[usize::from(LARGE_H) - 1].starts_with('╰'), "{rows:?}");
+            assert!(rows[usize::from(LARGE_H)..].iter().all(|r| r.trim().is_empty()), "exactly LARGE_H tall");
+        }
+        let u = Session { unread_notification: true, ..s.clone() };
+        for (w, h) in [(0, 0), (1, 1), (5, 2), (27, 13), (28, 12), (28, 13), (400, 13), (0, 30)] {
+            for selected in [false, true] {
+                draw(w, h, |f| render_wide_card(f, f.area(), &u, &cfg, selected, 0));
+                draw(w, h, |f| render_card(f, f.area(), &u, &cfg, selected, u64::MAX));
+                draw(w, h, |f| render_card(f, Rect::new(u16::MAX - 5, u16::MAX - 5, LARGE_W, LARGE_H), &u, &cfg, selected, 0));
             }
         }
     }

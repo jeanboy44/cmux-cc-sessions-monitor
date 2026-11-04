@@ -1,10 +1,44 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{model_family, ModelFamily};
 use crate::spirit::theme::Theme;
+
+/// How session cards are drawn (`v` switches; saved as `card_layout`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardLayout {
+    /// A: 20 x 10 cards, the 11 x 4 spirit over name, badge, branch/PR and
+    /// a one-line summary.
+    #[default]
+    Standard,
+    /// B: 28 x 13 cards, a quarter-area spirit over more text (model word,
+    /// branch and PR rows, a two-line summary).
+    Large,
+}
+
+impl CardLayout {
+    /// The other layout (there are two).
+    pub fn next(self) -> Self {
+        match self {
+            CardLayout::Standard => CardLayout::Large,
+            CardLayout::Large => CardLayout::Standard,
+        }
+    }
+}
+
+/// Reads `card_layout` leniently: `"large"` is the large layout, anything
+/// else (an unknown name, another type) falls back to the default instead of
+/// failing the whole file.
+fn lenient_layout<'de, D: Deserializer<'de>>(d: D) -> Result<CardLayout, D::Error> {
+    let v = toml::Value::deserialize(d)?;
+    Ok(match v.as_str() {
+        Some("large") => CardLayout::Large,
+        _ => CardLayout::Standard,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -37,6 +71,10 @@ pub struct Config {
     pub context_limit_tokens: u64,
     /// The statusline context file is trusted for this long after it was written.
     pub ctx_fresh_seconds: u64,
+    /// Card layout; an unknown value loads as the default. (Not the removed
+    /// `view` key, which older files may still hold and is ignored.)
+    #[serde(deserialize_with = "lenient_layout")]
+    pub card_layout: CardLayout,
 }
 
 impl Default for Extras {
@@ -62,6 +100,7 @@ impl Default for Config {
             model_themes: default_model_themes(),
             context_limit_tokens: 0,
             ctx_fresh_seconds: 300,
+            card_layout: CardLayout::default(),
         }
     }
 }
@@ -527,6 +566,45 @@ mod tests {
         assert!(text.contains("theme = \"poison\""), "{text}");
         assert!(text.contains("[model_themes]") && text.contains("opus = \"lightning\""), "{text}");
         assert_eq!(Config::load(&path), c);
+    }
+
+    #[test]
+    fn card_layout_defaults_to_standard_and_round_trips() {
+        assert_eq!(Config::default().card_layout, CardLayout::Standard);
+        assert_eq!(CardLayout::Standard.next(), CardLayout::Large);
+        assert_eq!(CardLayout::Large.next(), CardLayout::Standard);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut c = Config::default();
+        c.card_layout = CardLayout::Large;
+        c.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("card_layout = \"large\""), "{text}");
+        assert_eq!(Config::load_checked(&path), (c, None));
+        Config::default().save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("card_layout = \"standard\""));
+    }
+
+    #[test]
+    fn card_layout_unknown_or_old_values_load_as_standard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for text in [
+            "card_layout = \"huge\"\npr_poll_seconds = 30\n",
+            "card_layout = \"Large\"\npr_poll_seconds = 30\n",
+            "card_layout = 3\npr_poll_seconds = 30\n",
+            "card_layout = [\"large\"]\npr_poll_seconds = 30\n",
+            "pr_poll_seconds = 30\n",
+            // the removed `view` key is not the layout
+            "view = \"b\"\npr_poll_seconds = 30\n",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let (c, err) = Config::load_checked(&path);
+            assert_eq!(err, None, "{text}: the rest of the file still loads");
+            assert_eq!((c.card_layout, c.pr_poll_seconds), (CardLayout::Standard, 30), "{text}");
+        }
+        std::fs::write(&path, "card_layout = \"large\"\n").unwrap();
+        assert_eq!(Config::load(&path).card_layout, CardLayout::Large);
     }
 
     #[test]

@@ -21,6 +21,7 @@ use crate::preview::{spawn_preview, PreviewCache, PreviewSlot, PreviewTarget, PR
 use crate::refresh::{spawn_refresh, Snapshot};
 use crate::source::cmux::{Cmux, CmuxCli, SCREEN_LINES};
 use crate::ui::groups::{layout_groups, move_selection, sort_by_window, Row};
+use crate::ui::settings::SettingsItem;
 use crate::ui::preview::{PreviewBody, PREVIEW_DONE, PREVIEW_FAILED, PREVIEW_LOADING, PREVIEW_NO_SESSION};
 use crate::ui::style::FPS;
 use crate::ui::screen;
@@ -57,6 +58,7 @@ pub enum Action {
     Move(Dir),
     Focus,
     TogglePreview,
+    ToggleLayout,
     OpenSettings,
     Quit,
     None,
@@ -69,7 +71,8 @@ pub enum Mode {
     Settings,
 }
 
-/// Maps a key press to an action: `h j k l` / arrows, Enter / Space, `p`/`P`, `i`, `q`/`Q`, Ctrl-C.
+/// Maps a key press to an action: `h j k l` / arrows, Enter / Space, `p`/`P`,
+/// `v`/`V`, `i`, `q`/`Q`, Ctrl-C.
 /// Release and repeat events map to [`Action::None`].
 pub fn key_to_action(key: KeyEvent) -> Action {
     if key.kind != KeyEventKind::Press {
@@ -89,6 +92,7 @@ pub fn key_to_action(key: KeyEvent) -> Action {
         // Space is a second focus key: the same action, the same code path.
         KeyCode::Enter | KeyCode::Char(' ') => Action::Focus,
         KeyCode::Char('p' | 'P') => Action::TogglePreview,
+        KeyCode::Char('v' | 'V') => Action::ToggleLayout,
         KeyCode::Char('i') => Action::OpenSettings,
         KeyCode::Char('q' | 'Q') => Action::Quit,
         _ => Action::None,
@@ -400,6 +404,8 @@ impl App {
                 self.sync_preview_target();
             }
             Action::TogglePreview => self.toggle_preview(),
+            // The same change as the settings row: saved and shared at once.
+            Action::ToggleLayout => self.apply_setting(SettingsItem::CardLayout, now),
             // While a focus is in flight further Enter/Space presses are ignored.
             Action::Focus if self.focus_pending => {}
             Action::Focus => match self.focus_selected(cmux) {
@@ -739,6 +745,41 @@ mod tests {
         }
         assert_eq!(key_to_action(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), Action::Quit);
         assert_eq!(key_to_action(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL)), Action::None);
+    }
+
+    #[test]
+    fn key_v_toggles_the_card_layout_and_saves_it() {
+        use crate::config::CardLayout;
+        assert_eq!(key_to_action(key(KeyCode::Char('v'))), Action::ToggleLayout);
+        assert_eq!(key_to_action(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT)), Action::ToggleLayout);
+        assert_eq!(key_to_action(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)), Action::None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cfg").join("config.toml");
+        for preview in [false, true] {
+            let mut app = app_with(5, 3);
+            app.config_path = Some(path.clone());
+            app.preview = preview;
+            let shared = Arc::new(Mutex::new(app.config.clone()));
+            app.shared_config = Some(shared.clone());
+            app.selected = 3;
+            let (cmux, fake) = bg(FakeCmux::new(vec![]));
+            app.handle_key(key(KeyCode::Char('v')), &cmux, Instant::now());
+            assert_eq!(app.config.card_layout, CardLayout::Large, "preview={preview}");
+            assert_eq!(Config::load(&path).card_layout, CardLayout::Large, "saved");
+            assert_eq!(shared.lock().unwrap().card_layout, CardLayout::Large);
+            assert_eq!((app.selected, app.preview, app.mode), (3, preview, Mode::Tiles), "nothing else changes");
+            app.handle_key(key(KeyCode::Char('v')), &cmux, Instant::now());
+            assert_eq!(app.config.card_layout, CardLayout::Standard);
+            assert_eq!(Config::load(&path).card_layout, CardLayout::Standard);
+            std::thread::sleep(Duration::from_millis(20));
+            assert!(fake.calls().is_empty());
+        }
+        // in the settings window v does nothing
+        let mut app = app_with(2, 2);
+        let (cmux, _) = bg(FakeCmux::new(vec![]));
+        app.handle_key(key(KeyCode::Char('i')), &cmux, Instant::now());
+        app.handle_key(key(KeyCode::Char('v')), &cmux, Instant::now());
+        assert_eq!(app.config.card_layout, CardLayout::Standard);
     }
 
     #[test]

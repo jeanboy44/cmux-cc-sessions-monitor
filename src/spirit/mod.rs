@@ -66,6 +66,9 @@ const WARNING_ABOVE: f32 = 90.0;
 /// Canvas width (sub-pixels) of a spirit casting big magic: 17 cells, the
 /// card's inner width minus a one-column left pad.
 const BIG_MAGIC_W: usize = 34;
+/// The same for the quarter-area [`Size::XS`] spirit: 9 cells, about half
+/// the extra room S gets.
+const XS_BIG_MAGIC_W: usize = 18;
 
 /// How strong the cast magic (RUNNING, see `magic`) is; driven by context usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -127,12 +130,18 @@ pub fn warning(ctx_percent: Option<f32>) -> bool {
 /// Spirit size step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Size {
+    /// The large card's quarter-area spirit: 6 x 2 cells (12 x 8
+    /// sub-pixels), body radius 3.5 sub-pixels. Same eyes (one whole cell
+    /// each, on the top row), cues, element looks, pose and stages; the cast
+    /// magic is drawn at about half size (see [`magic_scale`]).
+    XS,
     S,
     M,
     L,
 }
 
 impl Size {
+    /// The 4-row card band variants (XS is a 2-row size of its own).
     pub const ALL: [Size; 3] = [Size::S, Size::M, Size::L];
 
     /// Card variants: every size is 4 rows tall (16 sub-pixels) so a 20x10
@@ -148,7 +157,20 @@ impl Size {
             Size::M => Geom { ppu: 6.0 / BASE_R, w: 28, h: 16, rcx: 9.0, rcy: 8.0, small: true },
             // 17 x 4 cells, body radius 6.5 sub-pixels
             Size::L => Geom { ppu: 6.5 / BASE_R, w: 34, h: 16, rcx: 11.0, rcy: 8.0, small: true },
+            // 6 x 2 cells, body radius 3.5 sub-pixels: the body fills cells
+            // 0..4, the magic starts right of it
+            Size::XS => Geom { ppu: 3.5 / BASE_R, w: 12, h: 8, rcx: 4.0, rcy: 4.0, small: true },
         }
+    }
+}
+
+/// How big the cast magic is drawn for a size: particle size, reach and
+/// spread are scaled by this (the level order Small < Normal < Big holds at
+/// every scale). 1 for the card band sizes, about half for [`Size::XS`].
+pub const fn magic_scale(size: Size) -> f32 {
+    match size {
+        Size::XS => 0.5,
+        Size::S | Size::M | Size::L => 1.0,
     }
 }
 
@@ -174,8 +196,9 @@ pub const fn grid_size_for(size: Size, magic: Magic) -> (u16, u16) {
 
 const fn geom_for(size: Size, magic: Magic) -> Geom {
     let mut g = size.geom();
-    if matches!(magic, Magic::Big) && g.w < BIG_MAGIC_W {
-        g.w = BIG_MAGIC_W;
+    let big = if matches!(size, Size::XS) { XS_BIG_MAGIC_W } else { BIG_MAGIC_W };
+    if matches!(magic, Magic::Big) && g.w < big {
+        g.w = big;
     }
     g
 }
@@ -271,6 +294,8 @@ struct Ctx {
     /// water ripple line in design units, inside this size's canvas
     floor: f32,
     magic: Magic,
+    /// size of the cast magic (see [`magic_scale`])
+    ms: f32,
     /// right edge of the canvas in design units (particles die past it)
     right: f32,
 }
@@ -298,6 +323,7 @@ impl Ctx {
             small: g.small,
             floor: floor_y(&g),
             magic: p.magic,
+            ms: magic_scale(p.size),
             // the reference design width (unchanged look), or the wider big-magic canvas
             right: if matches!(p.magic, Magic::Big) { DW.max(CX + (g.w as f32 - g.rcx) / g.ppu) } else { DW },
         }
@@ -309,9 +335,15 @@ pub fn render(p: &SpiritParams) -> SpiritGrid {
     render_with(p, true)
 }
 
+/// Sub-pixels per design unit of bob on a two-row canvas: its real scale
+/// would round every bob to 0, so it moves like an S body (one sub-pixel at
+/// the peaks of a lively bob, more often when struggling).
+const SHORT_BOB_PPU: f32 = 0.65;
+
 /// Body bob plus the casting pose's vertical shift, in real sub-pixels.
 fn bob_px(ctx: &Ctx, g: &Geom, pose: &state::Pose) -> f32 {
-    (state::bob_at(ctx.stage, ctx.state, ctx.seed, ctx.tf) * g.ppu).round() + pose.dy
+    let k = if g.h < 16 { SHORT_BOB_PPU } else { g.ppu };
+    (state::bob_at(ctx.stage, ctx.state, ctx.seed, ctx.tf) * k).round() + pose.dy
 }
 
 /// Casting pose plus the struggling tremble (added to the horizontal shift).
@@ -1972,6 +2004,328 @@ mod tests {
                     let q = |status| chars(&render(&SpiritParams { stage, ..params(theme, status, size, t, 2) }));
                     assert_eq!(q(Status::NeedsInput).iter().filter(|c| c.2 == '?').count(), 1, "{stage:?} {theme:?} {size:?} {t}: ?");
                     assert!(q(Status::Idle).iter().any(|c| c.2 == 'z' || c.2 == 'Z'), "{stage:?} {theme:?} {size:?} {t}: z");
+                }
+            }
+        }
+    }
+
+    // ---- Size::XS: the quarter-area spirit of the large card ----
+
+    /// Columns the large card gives its spirit (inner width 26 minus the pad).
+    const LARGE_COLS: u16 = 25;
+    const STAGES: [Stage; 3] = [Stage::Relaxed, Stage::Lively, Stage::Struggling];
+
+    fn xs(theme: Theme, status: Status, tick: u64, seed: u32) -> SpiritParams {
+        params(theme, status, Size::XS, tick, seed)
+    }
+
+    #[test]
+    fn xs_is_a_quarter_area_two_row_spirit() {
+        assert_eq!(grid_size(Size::XS), (6, 2), "about a quarter of the 11x4 card spirit");
+        assert!(!Size::ALL.contains(&Size::XS), "the 4-row card band variants stay S/M/L");
+        assert_eq!(max_grid_size(), (17, 4), "the standard card band is unchanged");
+        assert_eq!(grid_size_for(Size::XS, Magic::Small), (6, 2));
+        assert_eq!(grid_size_for(Size::XS, Magic::Normal), (6, 2));
+        assert_eq!(grid_size_for(Size::XS, Magic::Big), (9, 2), "big magic gets room, half the S widening");
+        for theme in Theme::ALL {
+            for status in STATUSES {
+                for magic in Magic::ALL {
+                    let g = render(&SpiritParams { magic, ..xs(theme, status, 30, 1) });
+                    assert_eq!((g.cols, g.rows), grid_size_for(Size::XS, magic), "{theme:?} {status:?} {magic:?}");
+                    assert_eq!(g.cells.len(), usize::from(g.cols) * usize::from(g.rows));
+                }
+                // a running centred magic widens to the card room, like S
+                let g = render(&SpiritParams { cols: LARGE_COLS, ..xs(theme, status, 30, 1) });
+                let wide = status == Status::Running && theme != Theme::Fire;
+                assert_eq!(g.cols, if wide { LARGE_COLS } else { 6 }, "{theme:?} {status:?}");
+            }
+        }
+        // the body is smaller than S's
+        let body = |size| -> u32 { render(&params(Theme::Water, Status::Idle, size, 0, 3)).cells.iter().filter(|c| is_braille(c.ch)).map(|c| (c.ch as u32 - 0x2800).count_ones()).sum() };
+        assert!(body(Size::XS) * 2 < body(Size::S), "XS {} vs S {}", body(Size::XS), body(Size::S));
+    }
+
+    #[test]
+    fn xs_every_state_theme_and_stage_renders() {
+        for theme in Theme::ALL {
+            for status in STATUSES {
+                for stage in STAGES {
+                    let g = render(&SpiritParams { stage, ..xs(theme, status, 40, 3) });
+                    let n = g.cells.iter().filter(|c| is_braille(c.ch)).count();
+                    assert!(n >= 5, "{theme:?} {status:?} {stage:?}: {n} braille cells");
+                    assert!(g.cells.iter().all(|c| c.fg.is_some() || c.ch == ' '), "drawn cells have a colour");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn xs_eyes_are_whole_cells_with_one_white_dot_in_every_state() {
+        for seed in [1, 9, 706_312_658] {
+            for stage in STAGES {
+                for (theme, status) in Theme::ALL.into_iter().flat_map(|t| STATUSES.map(|s| (t, s))) {
+                    for t in (0..160).filter(|&t| !eyes::blinking(seed, t)) {
+                        let p = SpiritParams { stage, ..xs(theme, status, t, seed) };
+                        let g = render(&p);
+                        let white = white_cells(&g);
+                        assert_eq!(white.len(), 2, "{p:?}: {white:?}");
+                        assert_eq!(white[0].1, white[1].1, "eyes on one row");
+                        let facing = state::pose_at(stage, theme, status, seed, t).facing;
+                        let dot = if facing { '\u{2810}' } else { '\u{2802}' };
+                        assert!(white.iter().all(|w| w.2 == dot), "{p:?}: one white dot ({dot}) per eye: {white:?}");
+                        let base = white_cells(&render(&xs(theme, Status::Idle, t, seed)));
+                        let cells = |w: &[(u16, u16, char)]| w.iter().map(|&(c, r, _)| (c, r)).collect::<Vec<_>>();
+                        assert_eq!(cells(&white), cells(&base), "{p:?}: same eye cells in every state");
+                    }
+                }
+            }
+        }
+        // the eye cells sit in the body: body below each, and body on the row beside them
+        let t = first_tick(9, false);
+        for theme in Theme::ALL {
+            let g = render(&xs(theme, Status::Idle, t, 9));
+            for (col, row, _) in white_cells(&g) {
+                assert_eq!(row, 0, "{theme:?}: eyes on the top row of a 2-row spirit");
+                assert!(is_braille(cell(&g, col, row + 1).ch), "{theme:?}: body under the eye");
+            }
+            let (l, r) = (white_cells(&g)[0].0, white_cells(&g)[1].0);
+            assert!(l >= 1 && is_braille(cell(&g, l - 1, 0).ch) && is_braille(cell(&g, r + 1, 0).ch), "{theme:?}: body left and right of the eyes");
+        }
+    }
+
+    #[test]
+    fn xs_blink_hides_the_dot_and_shows_a_dash() {
+        let seed = 5;
+        let t = (1..1000).find(|&t| eyes::blinking(seed, t)).unwrap();
+        for theme in Theme::ALL {
+            for status in [Status::NeedsInput, Status::Idle, Status::Done, Status::Unknown] {
+                let g = render(&xs(theme, status, t, seed));
+                assert!(white_cells(&g).is_empty(), "{theme:?} {status:?}: no white while blinking");
+                let open = white_cells(&render(&xs(theme, status, t - 1, seed)));
+                assert_eq!(open.len(), 2);
+                for (col, row, _) in open {
+                    let c = cell(&g, col, row);
+                    assert!(c.ch == '\u{2824}' && c.fg.is_some() && c.fg != WHITE, "{theme:?} {status:?}: ⠤ dash in the eye cell, got {c:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn xs_keeps_the_state_cues() {
+        let seed = 706_312_658;
+        for stage in STAGES {
+            for theme in Theme::ALL {
+                for t in 0..60 {
+                    let q = |status| chars(&render(&SpiritParams { stage, ..xs(theme, status, t, 2) }));
+                    assert_eq!(q(Status::NeedsInput).iter().filter(|c| c.2 == '?').count(), 1, "{stage:?} {theme:?} {t}: ?");
+                    assert!(q(Status::Idle).iter().any(|c| c.2 == 'z' || c.2 == 'Z'), "{stage:?} {theme:?} {t}: z");
+                    assert!(!q(Status::Running).iter().any(|c| matches!(c.2, '?' | 'z' | 'Z')));
+                }
+            }
+        }
+        for theme in Theme::ALL {
+            let sparkle = |t| render(&xs(theme, Status::Done, t, seed)).cells.iter().any(|c| matches!(c.fg, Some((250, 236, 150)) | Some((204, 188, 120))));
+            assert!((0..60).any(sparkle), "{theme:?}: DONE sparkles");
+            for t in [0, 20, 45] {
+                let idle = luminance(&render(&xs(theme, Status::Idle, t, seed)), &['z', 'Z']);
+                let run = luminance(&render(&xs(theme, Status::Running, t, seed)), &[]);
+                assert!(idle < run * 0.8, "{theme:?} {t}: idle {idle} vs running {run}");
+            }
+            // UNKNOWN is grey: much less colour than the same spirit idle
+            let sat = |status| {
+                let g = render(&xs(theme, status, 10, seed));
+                let s: Vec<f32> = g.cells.iter().filter(|c| is_braille(c.ch) && c.fg != WHITE).filter_map(|c| c.fg).map(|(r, gg, b)| f32::from(r.max(gg).max(b)) - f32::from(r.min(gg).min(b))).collect();
+                s.iter().sum::<f32>() / s.len().max(1) as f32
+            };
+            assert!(sat(Status::Unknown) < 0.6 * sat(Status::Idle), "{theme:?}: unknown {} vs idle {}", sat(Status::Unknown), sat(Status::Idle));
+        }
+    }
+
+    #[test]
+    fn xs_element_looks_survive_the_small_size() {
+        // poison bubbles form and pop on the body, and stay off the eye row
+        let mut bubbles = 0;
+        for t in 0..300 {
+            let p = xs(Theme::Poison, Status::Done, t, 4);
+            for (_, py, _) in bubble_spots(&p) {
+                assert!(py >= 4, "{t}: bubble at {py} on the eye row");
+                bubbles += 1;
+            }
+            let (g, bare) = (render_with(&p, true), render_with(&p, false));
+            assert_eq!(white_cells(&g), white_cells(&bare), "{t}: bubbles leave the eyes alone");
+        }
+        assert!(bubbles > 20, "{bubbles} bubbles");
+        // only eyes and poison bubbles are pure white
+        for (theme, status) in Theme::ALL.into_iter().flat_map(|t| STATUSES.map(|s| (t, s))) {
+            for t in 0..120 {
+                let p = SpiritParams { cols: LARGE_COLS, ..xs(theme, status, t, 41) };
+                let (g, bare) = (render_with(&p, true), render_with(&p, false));
+                for (i, c) in g.cells.iter().enumerate().filter(|(_, c)| c.fg == WHITE) {
+                    if bits(c).count_ones() == 1 && bare.cells[i] == *c {
+                        continue;
+                    }
+                    assert!(theme == Theme::Poison && bare.cells[i] != *c && bits(c).count_ones() >= 2 && i as u16 / g.cols >= 1, "{p:?} cell {i}: {c:?}");
+                }
+            }
+        }
+        // fire breath leaves the mouth with one empty dot column
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        let (mut ok, mut n) = (0, 0);
+        for seed in [4, 11, 23] {
+            let start = first_cast(seed) + 3;
+            for t in start..start + 60 {
+                let p = xs(Theme::Fire, Status::Running, t, seed);
+                let m = magic_dots(&p);
+                let Some(first) = m.iter().map(|d| d.0).min() else { continue };
+                magic::NO_MAGIC.with(|c| c.set(true));
+                let body = dots(&render_with(&p, false));
+                magic::NO_MAGIC.with(|c| c.set(false));
+                let edge = body.iter().filter(|d| d.0 < 9).map(|d| d.0).max().unwrap();
+                n += 1;
+                if first >= edge + 2 {
+                    ok += 1;
+                }
+            }
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
+        assert!(n > 30 && ok * 10 >= n * 9, "a gap before the flame on {ok} of {n} frames");
+        // the casting pose leans toward the magic, then recoils: the body sits
+        // further right on the last wind-up frame than on the release
+        for theme in Theme::ALL {
+            let mean_x = |t: u64, seed: u32| {
+                magic::NO_MAGIC.with(|c| c.set(true));
+                let g = render_with(&xs(theme, Status::Running, t, seed), false);
+                magic::NO_MAGIC.with(|c| c.set(false));
+                let d: Vec<f32> = dots(&g).iter().filter(|d| d.0 < 9).map(|d| d.0 as f32).collect();
+                d.iter().sum::<f32>() / d.len().max(1) as f32
+            };
+            let (mut lean, mut n) = (0.0f32, 0);
+            for seed in [4, 11, 23, 41] {
+                for c in (10..400).filter(|&t| state::casts_at(seed, t)) {
+                    lean += mean_x(c - 1, seed) - mean_x(c, seed);
+                    n += 1;
+                }
+            }
+            assert!(lean / n as f32 > 0.3, "{theme:?}: wind-up vs release {}", lean / n as f32);
+        }
+    }
+
+    /// Magic dots and painted width (sub-pixels) of an XS spirit in the large
+    /// card over a few casts.
+    fn xs_magic_stats(theme: Theme, magic: Magic, size: Size) -> (usize, i32) {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        let (mut n, mut all) = (0usize, std::collections::BTreeSet::new());
+        for seed in [4, 11] {
+            for t in 0..160 {
+                let cols = if size == Size::XS { LARGE_COLS } else { CARD_COLS };
+                let d = magic_dots(&SpiritParams { magic, cols, ..params(theme, Status::Running, size, t, seed) });
+                n += d.len();
+                all.extend(d.into_iter().map(|p| p.0));
+            }
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
+        let w = all.first().zip(all.last()).map_or(0, |(lo, hi)| hi - lo + 1);
+        (n, w)
+    }
+
+    #[test]
+    fn xs_magic_is_smaller_but_still_scales_and_centres() {
+        for theme in Theme::ALL {
+            let [(s_n, s_w), (n_n, n_w), (b_n, b_w)] = Magic::ALL.map(|m| xs_magic_stats(theme, m, Size::XS));
+            println!("{theme:?} XS: dots {s_n} {n_n} {b_n}, width {s_w} {n_w} {b_w}");
+            assert!(s_n < n_n && n_n < b_n, "{theme:?}: dots {s_n} < {n_n} < {b_n}");
+            assert!(s_w < n_w && n_w < b_w, "{theme:?}: width {s_w} < {n_w} < {b_w}");
+            // about half the standard spirit's magic
+            let (sn, _) = xs_magic_stats(theme, Magic::Normal, Size::S);
+            assert!(n_n * 10 <= sn * 7, "{theme:?}: XS normal {n_n} dots vs S {sn}");
+        }
+        // water, poison and lightning sit in the middle of the magic area
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        for theme in [Theme::Water, Theme::Poison, Theme::Lightning] {
+            for magic in Magic::ALL {
+                let (mut sum, mut n) = (0.0f32, 0usize);
+                for seed in [4, 11, 23] {
+                    for t in 1..300 {
+                        let p = SpiritParams { magic, cols: LARGE_COLS, ..xs(theme, Status::Running, t, seed) };
+                        for d in magic_dots(&p) {
+                            sum += d.0 as f32 + 0.5;
+                            n += 1;
+                        }
+                    }
+                }
+                let g = geom_of(&SpiritParams { magic, cols: LARGE_COLS, ..xs(theme, Status::Running, 1, 4) });
+                let mid = magic::area_mid(&g);
+                let cx = sum / n.max(1) as f32;
+                assert!(n > 20 && (cx - mid).abs() <= 2.0, "{theme:?} {magic:?}: centroid {cx} vs area centre {mid} ({n} dots)");
+            }
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
+    }
+
+    #[test]
+    fn xs_stages_order_the_motion() {
+        for theme in Theme::ALL {
+            let centroid = |stage, t| {
+                let d: Vec<f32> = dots(&render(&SpiritParams { stage, ..xs(theme, Status::Running, t, 4) })).iter().filter(|p| p.0 < 9).map(|p| p.1 as f32).collect();
+                d.iter().sum::<f32>() / d.len().max(1) as f32
+            };
+            let sd = |stage| {
+                let v: Vec<f32> = (100..400).map(|t| centroid(stage, t)).collect();
+                let m = v.iter().sum::<f32>() / v.len() as f32;
+                (v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / v.len() as f32).sqrt()
+            };
+            let (r1, r2, r3) = (sd(Stage::Relaxed), sd(Stage::Lively), sd(Stage::Struggling));
+            println!("{theme:?} XS: centroid sd {r1:.3} {r2:.3} {r3:.3}");
+            assert!(r1 < r2 && r2 < r3, "{theme:?}: relaxed {r1} < lively {r2} < struggling {r3}");
+        }
+        // stage 3 sweats a drop now and then
+        let sweat = (0..400u64).filter(|&t| !state::sweat_drops(&Ctx::new(&SpiritParams { stage: Stage::Struggling, ..xs(Theme::Water, Status::Running, t, 4) }), &geom_for(Size::XS, Magic::Normal), CY).is_empty()).count();
+        assert!(sweat > 20, "{sweat} sweat frames");
+    }
+
+    #[test]
+    fn xs_is_deterministic_and_never_panics() {
+        let ticks = [0, 1, 2, 3, 37, 4_000_000_000, u64::MAX - 3, u64::MAX - 1, u64::MAX];
+        for stage in STAGES {
+            for (theme, status) in Theme::ALL.into_iter().flat_map(|t| STATUSES.map(|s| (t, s))) {
+                for magic in Magic::ALL {
+                    for cols in [0, 3, LARGE_COLS, 60] {
+                        for (tick, seed) in ticks.iter().flat_map(|&t| [0, 1, u32::MAX].map(|s| (t, s))) {
+                            let p = SpiritParams { stage, magic, cols, warning: tick % 2 == 0, ..xs(theme, status, tick, seed) };
+                            let g = render(&p);
+                            assert_eq!(g, render(&p), "deterministic");
+                            assert_eq!(g.rows, 2);
+                            assert_eq!(g.cells.len(), usize::from(g.cols) * usize::from(g.rows));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One XS frame per element at stage 2, running (`cargo test dump_xs -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn dump_xs() {
+        let tick = std::env::var("SPIRIT_TICK").ok().and_then(|v| v.parse().ok()).unwrap_or(44);
+        let cols = std::env::var("SPIRIT_COLS").ok().and_then(|v| v.parse().ok()).unwrap_or(LARGE_COLS);
+        for status in STATUSES {
+            for theme in Theme::ALL {
+                let magic = match std::env::var("SPIRIT_MAGIC").as_deref() {
+                    Ok("small") => Magic::Small,
+                    Ok("big") => Magic::Big,
+                    _ => Magic::Normal,
+                };
+                let stage = match magic {
+                    Magic::Small => Stage::Relaxed,
+                    Magic::Normal => Stage::Lively,
+                    Magic::Big => Stage::Struggling,
+                };
+                let g = render(&SpiritParams { cols, magic, stage, ..xs(theme, status, tick, 4) });
+                println!("{theme:?} {status:?}");
+                for row in 0..g.rows {
+                    println!("|{}|", (0..g.cols).map(|c| cell(&g, c, row).ch).collect::<String>());
                 }
             }
         }
