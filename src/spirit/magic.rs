@@ -14,7 +14,7 @@
 //! Water, poison and lightning are centred in the magic area: the columns
 //! from just right of the body to the right edge of the canvas (which the
 //! card widens to its inner width, see `SpiritParams::cols`). Fire keeps
-//! breathing from the mouth.
+//! breathing from the mouth, its length set by the level.
 
 use std::f32::consts::TAU;
 
@@ -76,6 +76,7 @@ thread_local! {
 /// Where the magic goes, in real sub-pixels: the mouth (`ox`, `oy`) at the
 /// body's right edge, the centre of the magic area (`mid`) and the right end
 /// of the reach (exclusive).
+#[derive(Clone, Copy)]
 struct Area {
     ox: f32,
     oy: f32,
@@ -84,16 +85,8 @@ struct Area {
 }
 
 impl Area {
-    fn new(g: &Geom, m: Magic, ms: f32, elem: Theme, cy: f32) -> Self {
-        let ox = mouth_x(g);
-        let end = match m {
-            // the small breath stays short (a smaller spirit's a little
-            // shorter still, but past the one-dot gap); centred magic is
-            // sized by its level
-            Magic::Small if elem == Theme::Fire => ox + 3.5 * ms.max(0.8),
-            _ => g.w as f32,
-        };
-        Area { ox, oy: g.rcy + (cy - CY) * g.ppu, mid: area_mid(g), end: end.min(g.w as f32) }
+    fn new(g: &Geom, cy: f32) -> Self {
+        Area { ox: mouth_x(g), oy: g.rcy + (cy - CY) * g.ppu, mid: area_mid(g), end: g.w as f32 }
     }
 
     /// Paints one magic dot, never on the body and never past the reach.
@@ -114,7 +107,7 @@ pub(super) fn draw(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
         return;
     }
     let Some((since_cast, since_start)) = stream(ctx.seed, ctx.t) else { return };
-    let a = Area::new(&cv.g, ctx.magic, ctx.ms, ctx.elem, cy);
+    let a = Area::new(&cv.g, cy);
     match ctx.elem {
         Theme::Fire => breath(cv, ctx, &a, since_cast, since_start),
         Theme::Water => vortex(cv, ctx, &a, since_cast),
@@ -123,23 +116,47 @@ pub(super) fn draw(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
     }
 }
 
+/// Sub-pixels from the mouth to the first flame column (the one-dot gap),
+/// unscaled: the gap is one dot at every size.
+const BREATH_GAP: f32 = 1.8;
+/// How far embers and smoke of a short flame may drift past its tip
+/// (sub-pixels); the big flame's tip is the card area's edge.
+const EMBER_DRIFT: f32 = 2.0;
+
+/// Fire breath per magic level at magic scale 1: (flame reach past the gap
+/// in sub-pixels, half height of the cone's end in sub-pixels, wave
+/// amplitude in sub-pixels, embers, smoke puffs). Small is a short steady jet about three columns long, one
+/// or two rows tall and without smoke; Normal about five to six columns,
+/// two (at most three) rows at its end; Big roars to the right edge of
+/// the big-magic canvas (the 17-column card area), however wide the room.
+fn breath_style(m: Magic) -> (f32, f32, f32, u32, u32) {
+    match m {
+        Magic::Small => (6.2, 0.8, 0.35, 0, 0),
+        Magic::Normal => (9.3, 1.0, 0.55, 2, 1),
+        Magic::Big => (20.1, 4.6, 0.9, 7, 4),
+    }
+}
+
 /// Fire: a breath of flame from the mouth. One empty dot column separates
 /// it from the body; it starts as a single dot and widens with distance into
 /// a cone, densest along its middle, flickering and breaking up at the end
 /// with embers flying off and a little smoke.
 fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u64) {
-    let (w_end, embers, smokes): (f32, u32, u32) = match ctx.magic {
-        Magic::Small => (1.0, 0, 0),
-        Magic::Normal => (3.0, 3, 2),
-        Magic::Big => (4.6, 7, 4),
-    };
-    // a smaller spirit breathes a thinner cone with fewer embers and smoke puffs
+    let (reach, w_end, wave, embers, smokes) = breath_style(ctx.magic);
+    // a smaller spirit breathes a shorter, thinner cone with fewer embers
+    // and smoke puffs
     let scaled = |n: u32| (n as f32 * ctx.ms).round() as u32;
     let (w_end, embers, smokes) = (w_end * ctx.ms, scaled(embers), scaled(smokes));
     // the first flame column: one empty dot column right of the body
     let edge = cv.body_right().unwrap_or(a.ox.floor() as i32);
     let xs = (edge + 2) as f32;
-    let full = a.end - xs;
+    // the tip of the level's flame, measured from the mouth past the gap
+    // (so the casting pose does not stretch it); embers of the shorter
+    // flames drift a little past it
+    let tip = (a.ox + BREATH_GAP + reach * ctx.ms).min(a.end).round();
+    let drift = if ctx.magic == Magic::Big { 0.0 } else { EMBER_DRIFT };
+    let a = &Area { end: (tip + drift).min(a.end), ..*a };
+    let full = tip - xs;
     if full < 1.0 {
         return;
     }
@@ -153,7 +170,7 @@ fn breath(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64, since_start: u6
     // straight out of the mouth, waving more and rising toward the end
     let yc = |x: f32| {
         let u = u_at(x);
-        a.oy - 0.5 + u * 0.9 * (x * 0.55 - ctx.tf * 0.8 + ph).sin() - u * u
+        a.oy - 0.5 + u * wave * (x * 0.55 - ctx.tf * 0.8 + ph).sin() - u * u
     };
     // half height of the cone at distance `d` (dots) from its first column
     let hw = |d: f32| (0.1 + 0.42 * d).min(w_end);
@@ -237,8 +254,8 @@ const DISC_SQUASH: f32 = 0.76;
 /// It opens after each cast and closes again, centred in the magic area.
 fn vortex(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
     let (dur, major, arms): (u64, f32, u32) = match ctx.magic {
-        Magic::Small => (14, 1.9, 1),
-        Magic::Normal => (22, 5.0, 2),
+        Magic::Small => (20, 1.9, 1),
+        Magic::Normal => (18, 3.6, 2),
         Magic::Big => (30, 7.6, 3),
     };
     let major = major * ctx.ms;
@@ -325,8 +342,8 @@ const MIN_FOG_R: f32 = 1.6;
 /// Ticks one cast's toxic puffs live.
 pub(super) fn fog_life(m: Magic) -> u64 {
     match m {
-        Magic::Small => 16,
-        Magic::Normal => 26,
+        Magic::Small => 20,
+        Magic::Normal => 20,
         Magic::Big => 34,
     }
 }
@@ -338,8 +355,8 @@ pub(super) fn fog_life(m: Magic) -> u64 {
 /// instead of flickering.
 fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
     let (rmax, puffs, spread, thick): (f32, u32, f32, f32) = match ctx.magic {
-        Magic::Small => (2.2, 1, 0.0, 0.95),
-        Magic::Normal => (6.5, 2, 1.6, 1.15),
+        Magic::Small => (2.5, 1, 0.0, 1.0),
+        Magic::Normal => (5.0, 2, 3.4, 1.0),
         Magic::Big => (9.5, 3, 2.6, 1.2),
     };
     // a scaled-down puff keeps enough radius to cover a dot centre
@@ -416,7 +433,7 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area) {
 fn bolt_style(m: Magic, ms: f32) -> (u64, f32, i32, i32) {
     let (dur, amp, burst, width) = match m {
         Magic::Small => (3, 0.8, 1, 1),
-        Magic::Normal => (5, 2.2, 2, 2),
+        Magic::Normal => (3, 1.3, 1, 2),
         Magic::Big => (7, 3.4, 4, 3),
     };
     let scaled = |n: i32| (n as f32 * ms).ceil() as i32;
@@ -455,9 +472,9 @@ fn bolts(ctx: &Ctx, mid: f32, bottom: f32, cast: u64) -> Vec<Bolt> {
         }
         pts
     };
-    // Normal casts a second, thinner-swinging bolt on about half the casts:
-    // the pair straddles the centre
-    let dual = matches!(ctx.magic, Magic::Normal) && hf(key ^ 5, ck) < 0.5;
+    // Normal casts a second, thinner-swinging bolt on about a quarter of
+    // the casts: the pair straddles the centre
+    let dual = matches!(ctx.magic, Magic::Normal) && hf(key ^ 5, ck) < 0.25;
     let main = if dual { mid + 2.25 * ms } else { mid };
     let mut out = vec![Bolt { pts: path(key, main, amp, None), sparks: true }];
     match ctx.magic {
@@ -492,7 +509,7 @@ pub(super) fn strikes(g: &Geom, ctx: &Ctx) -> Vec<f32> {
     if since_cast >= dur {
         return Vec::new();
     }
-    let a = Area::new(g, ctx.magic, ctx.ms, Theme::Lightning, CY);
+    let a = Area::new(g, CY);
     bolts(ctx, a.mid, g.h as f32 - 1.0, ctx.t - since_cast)
         .iter()
         .filter(|b| b.sparks)
@@ -542,7 +559,8 @@ fn bolt(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
         let (xb, yb) = *b.pts.last().unwrap_or(&(a.ox, bottom));
         let (bx, by) = (xb.round() as i32, yb.round() as i32);
         let half = (width - 1) / 2;
-        for (rx, ry) in rays {
+        // a small bolt's burst keeps to its own column and the next
+        for (rx, ry) in rays.into_iter().filter(|r| ctx.magic != Magic::Small || r.0.abs() < 2) {
             for k in 1..=reach {
                 let c = lerp(lerp([255., 250., 200.], [255., 170., 30.], k as f32 / (burst as f32 + 1.0)), CARD_BG, fade * 0.7);
                 // rays start at the bolt's edge, not its centre

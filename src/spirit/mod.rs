@@ -204,11 +204,12 @@ const fn geom_for(size: Size, magic: Magic) -> Geom {
 }
 
 /// Canvas of a frame: [`geom_for`], widened to [`SpiritParams::cols`] while
-/// a centred magic (water, poison, lightning) is being cast.
+/// the magic is being cast (centred magic fills the area; the fire breath
+/// gets room for its level's length).
 fn geom_of(p: &SpiritParams) -> Geom {
     let mut g = geom_for(p.size, p.magic);
     let room = usize::from(p.cols) * 2;
-    if p.status == Status::Running && p.theme != Theme::Fire && room > g.w {
+    if p.status == Status::Running && room > g.w {
         g.w = room;
     }
     g
@@ -711,42 +712,120 @@ mod tests {
         }
     }
 
-    /// Painted magic cells summed over a replay window of several casts in a
-    /// card, and the width (columns) of the area the magic painted.
-    fn magic_spread(theme: Theme, magic: Magic) -> (u32, i32) {
-        // the cast magic only: ambient sparks/embers are not part of it
+    /// Size of one magic level in the standard card, cell units.
+    #[derive(Debug, Clone, Copy)]
+    struct LevelMetrics {
+        /// mean painted cells per frame over every frame
+        cells: f32,
+        /// mean painted cells per painted frame
+        lit_cells: f32,
+        /// mean width (first to last painted column) of painted frames
+        width: f32,
+        /// mean painted rows of painted frames, and the most
+        height: f32,
+        max_height: usize,
+        /// mean farthest painted column of painted frames, and the farthest
+        far: f32,
+        max_far: u16,
+        /// columns between the first and last column ever painted
+        union: i32,
+        /// mean painted dots per frame over every frame
+        dots: f32,
+    }
+
+    /// [`LevelMetrics`] over seeds 4/11/23 x 240 running ticks at stage 2
+    /// in the 17-column card, ambient particles off.
+    fn level_metrics(theme: Theme, magic: Magic) -> LevelMetrics {
         particles::NO_AMBIENT.with(|c| c.set(true));
-        let (mut cells, mut cols) = (0u32, std::collections::BTreeSet::new());
+        let (mut cells, mut frames, mut lit, mut dots) = (0usize, 0usize, 0usize, 0usize);
+        let (mut width, mut height, mut far) = (0usize, 0usize, 0usize);
+        let (mut max_height, mut max_far) = (0usize, 0u16);
+        let mut cols = std::collections::BTreeSet::new();
         for seed in [4, 11, 23] {
             for t in 0..240 {
                 let d = magic_dots(&SpiritParams { magic, cols: CARD_COLS, ..params(theme, Status::Running, Size::S, t, seed) });
-                let c: std::collections::BTreeSet<(i32, i32)> = d.iter().map(|&(x, y)| (x / 2, y / 4)).collect();
-                cells += c.len() as u32;
+                let c: std::collections::BTreeSet<(u16, u16)> = d.iter().map(|&(x, y)| ((x / 2) as u16, (y / 4) as u16)).collect();
+                frames += 1;
+                dots += d.len();
+                if c.is_empty() {
+                    continue;
+                }
+                lit += 1;
+                cells += c.len();
+                let (lo, hi) = (c.iter().map(|p| p.0).min().unwrap_or(0), c.iter().map(|p| p.0).max().unwrap_or(0));
+                let rows: std::collections::BTreeSet<u16> = c.iter().map(|p| p.1).collect();
+                width += usize::from(hi - lo + 1);
+                height += rows.len();
+                far += usize::from(hi);
+                max_height = max_height.max(rows.len());
+                max_far = max_far.max(hi);
                 cols.extend(c.iter().map(|p| p.0));
             }
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
-        let width = cols.first().zip(cols.last()).map_or(0, |(lo, hi)| hi - lo + 1);
-        (cells, width)
+        let per = |v: usize| v as f32 / lit.max(1) as f32;
+        LevelMetrics {
+            cells: cells as f32 / frames as f32,
+            lit_cells: per(cells),
+            width: per(width),
+            height: per(height),
+            max_height,
+            far: per(far),
+            max_far,
+            union: cols.first().zip(cols.last()).map_or(0, |(lo, hi)| i32::from(*hi) - i32::from(*lo) + 1),
+            dots: dots as f32 / frames as f32,
+        }
     }
+
+    /// Mean painted cells per frame of the Normal magic before the level
+    /// rebalance (fire, water, poison, lightning; measured with
+    /// [`level_metrics`]): Normal now paints about half of that.
+    const OLD_NORMAL_CELLS: [f32; 4] = [6.7, 9.1, 7.2, 2.4];
 
     #[test]
     fn magic_levels_are_clearly_visible() {
-        let spreads: Vec<_> = Theme::ALL.iter().map(|&t| (t, Magic::ALL.map(|m| magic_spread(t, m)))).collect();
-        for (theme, [(s_cells, s_w), (n_cells, n_w), (b_cells, b_w)]) in &spreads {
-            println!("{theme:?}: width S {s_w} N {n_w} B {b_w}; cells S {s_cells} N {n_cells} B {b_cells}");
+        let all: Vec<_> = Theme::ALL.iter().map(|&t| (t, Magic::ALL.map(|m| level_metrics(t, m)))).collect();
+        for (theme, [s, n, b]) in &all {
+            println!("{theme:?}: cells S {:.1} N {:.1} B {:.1}; width S {:.1} N {:.1} B {:.1}; height S {:.2} N {:.2} B {:.2}", s.cells, n.cells, b.cells, s.width, n.width, b.width, s.height, n.height, b.height);
         }
-        for &(theme, [(s_cells, s_w), (n_cells, n_w), (b_cells, b_w)]) in &spreads {
-            // centred magic grows both ways, so its painted width (not its
-            // reach, as before centring) shows the level; fire grows one way
-            // from the mouth, where width and reach are the same steps. Big
-            // poison fills the whole 10-column card area, one step less.
-            let big_gap = if theme == Theme::Poison { 3 } else { 4 };
-            assert!(s_w + 3 <= n_w, "{theme:?}: small width {s_w} vs normal {n_w}");
-            assert!(b_w >= n_w + big_gap, "{theme:?}: big width {b_w} vs normal {n_w}");
-            assert!(s_cells * 10 <= n_cells * 6, "{theme:?}: small cells {s_cells} vs normal {n_cells}");
-            assert!(b_cells * 10 >= n_cells * 15, "{theme:?}: big cells {b_cells} vs normal {n_cells}");
+        for (i, (theme, [s, n, b])) in all.iter().enumerate() {
+            // three clear steps: each level paints well under the next one
+            assert!(s.cells < 0.55 * n.cells, "{theme:?}: small cells {} vs normal {}", s.cells, n.cells);
+            assert!(n.cells < 0.65 * b.cells, "{theme:?}: normal cells {} vs big {}", n.cells, b.cells);
+            assert!(s.width + 1.5 <= n.width && n.width + 1.5 <= b.width, "{theme:?}: width {} < {} < {}", s.width, n.width, b.width);
+            // lightning bolts always strike top to bottom
+            assert!(s.height <= n.height && n.height <= b.height + 0.05, "{theme:?}: height {} {} {}", s.height, n.height, b.height);
+            if *theme != Theme::Lightning {
+                assert!(s.height < n.height && n.height < b.height, "{theme:?}: height {} < {} < {}", s.height, n.height, b.height);
+            }
+            // small is a clear little shape, never a stray dot
+            assert!(s.lit_cells >= 2.0, "{theme:?}: small paints {} cells", s.lit_cells);
+            // normal is no longer the old crowd of cells (fire breathes
+            // farther now: its normal is thinner but about as many cells)
+            let cap = if *theme == Theme::Fire { 1.0 } else { 0.6 };
+            assert!(n.cells <= cap * OLD_NORMAL_CELLS[i], "{theme:?}: normal cells {} vs old {}", n.cells, OLD_NORMAL_CELLS[i]);
+            // big fits the card area: nothing past the last column
+            assert!(b.max_far < CARD_COLS, "{theme:?}: big reaches col {}", b.max_far);
         }
+    }
+
+    #[test]
+    fn fire_breathes_three_lengths() {
+        // the first flame column (one dot right of the body) is column 7, so
+        // the flame is `far - 6` columns long
+        let [s, n, b] = Magic::ALL.map(|m| level_metrics(Theme::Fire, m));
+        let len = |m: &LevelMetrics| m.far - 6.0;
+        let (ls, ln, lb) = (len(&s), len(&n), len(&b));
+        println!("fire length S {ls:.2} N {ln:.2} B {lb:.2}; rows S {} N {} B {}; dots S {:.1} N {:.1} B {:.1}", s.max_height, n.max_height, b.max_height, s.dots, n.dots, b.dots);
+        assert!((2.5..=4.0).contains(&ls), "small flame {ls} columns");
+        assert!((4.5..=7.0).contains(&ln), "normal flame {ln} columns");
+        assert!(lb >= 8.0, "big flame {lb} columns");
+        assert!(ls < ln - 1.5 && ln - 1.5 < lb - 2.0, "length steps {ls} {ln} {lb}");
+        assert!(s.max_height <= 2 && n.max_height <= 3 && b.max_height <= 4, "rows {} {} {}", s.max_height, n.max_height, b.max_height);
+        assert!(s.height < n.height && n.height < b.height, "rows {} < {} < {}", s.height, n.height, b.height);
+        // the old normal cone painted 15.7 dots a frame and 2.47 rows
+        assert!(n.dots <= 0.8 * 15.7 && n.height <= 2.47 - 0.4, "normal is smaller: {} dots, {} rows", n.dots, n.height);
+        assert!(s.dots * 1.6 < n.dots && n.dots * 4.0 < b.dots, "dots {} {} {}", s.dots, n.dots, b.dots);
     }
 
     /// Centre (sub-pixels) of the magic area of a size-S spirit with a
@@ -791,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn centred_magic_grows_with_the_level_and_fire_is_unchanged() {
+    fn centred_magic_grows_with_the_level_and_fire_keeps_its_length() {
         particles::NO_AMBIENT.with(|c| c.set(true));
         for theme in [Theme::Water, Theme::Poison, Theme::Lightning] {
             for cols in [0u16, CARD_COLS, 40] {
@@ -811,23 +890,29 @@ mod tests {
             }
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
-        // fire ignores the card room: same grid, same frames
+        // the breath's length is set by its level, not by the card room: a
+        // wider room adds only empty columns
         for magic in Magic::ALL {
             for t in 0..200 {
                 for status in STATUSES {
-                    let p = SpiritParams { magic, ..params(Theme::Fire, status, Size::S, t, 4) };
-                    assert_eq!(render(&SpiritParams { cols: CARD_COLS, ..p }), render(&p), "{magic:?} {status:?} {t}");
-                    assert_eq!(render(&SpiritParams { cols: 60, ..p }), render(&p), "{magic:?} {status:?} {t}");
+                    let p = SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Fire, status, Size::S, t, 4) };
+                    let (card, wide) = (render(&p), render(&SpiritParams { cols: 60, ..p }));
+                    for row in 0..wide.rows {
+                        for col in 0..wide.cols {
+                            let want = if col < card.cols { *cell(&card, col, row) } else { Cell { ch: ' ', fg: None } };
+                            assert_eq!(*cell(&wide, col, row), want, "{magic:?} {status:?} {t} ({col},{row})");
+                        }
+                    }
                 }
             }
         }
-        // only a running centred magic widens the grid; it never paints past it
+        // only a running magic widens the grid; it never paints past it
         for theme in Theme::ALL {
             for status in STATUSES {
                 for cols in [0u16, 5, CARD_COLS, 40] {
                     let p = SpiritParams { cols, ..params(theme, status, Size::S, 50, 4) };
                     let g = render(&p);
-                    let wide = status == Status::Running && theme != Theme::Fire && cols > grid_size(Size::S).0;
+                    let wide = status == Status::Running && cols > grid_size(Size::S).0;
                     assert_eq!(g.cols, if wide { cols } else { grid_size(Size::S).0 }, "{theme:?} {status:?} {cols}");
                     assert_eq!(g.cells.len(), usize::from(g.cols) * usize::from(g.rows));
                 }
@@ -1330,8 +1415,13 @@ mod tests {
         for seed in [4, 11, 23, 706_312_658] {
             let start = first_cast(seed) + 3;
             let ticks: Vec<u64> = (start..start + 240).collect();
-            let at = |t, magic| render(&SpiritParams { magic, ..params(Theme::Fire, Status::Running, Size::S, t, seed) });
-            let normal = ticks.iter().filter(|&&t| jet_run(&at(t, Magic::Normal), 7, 4)).count();
+            let at = |t, magic| render(&SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Fire, Status::Running, Size::S, t, seed) });
+            // the small and normal flames are thin: every column from the
+            // gap on is lit, in one row or the next
+            let lit = |g: &SpiritGrid, n: u16| (7..7 + n).all(|c| (0..g.rows).any(|r| is_braille(cell(g, c, r).ch)));
+            let small = ticks.iter().filter(|&&t| lit(&at(t, Magic::Small), 3)).count();
+            assert!(small * 10 >= ticks.len() * 9, "{seed}: small jet on {small} of {} ticks", ticks.len());
+            let normal = ticks.iter().filter(|&&t| lit(&at(t, Magic::Normal), 4)).count();
             assert!(normal * 10 >= ticks.len() * 9, "{seed}: normal jet on {normal} of {} ticks", ticks.len());
             let big = ticks.iter().filter(|&&t| jet_run(&at(t, Magic::Big), 7, 8)).count();
             assert!(big * 10 >= ticks.len() * 9, "{seed}: big jet on {big} of {} ticks", ticks.len());
@@ -1351,7 +1441,7 @@ mod tests {
         particles::NO_AMBIENT.with(|c| c.set(true));
         for seed in [4, 11, 23] {
             let c = first_cast(seed);
-            for (magic, rows) in [(Magic::Normal, 3), (Magic::Big, 4)] {
+            for (magic, rows) in [(Magic::Small, 2), (Magic::Normal, 2), (Magic::Big, 4)] {
                 let at = |t| magic_cells(&render(&SpiritParams { magic, ..params(Theme::Water, Status::Running, Size::S, t, seed) }));
                 let spread: std::collections::BTreeSet<u16> = at(c + 6).iter().map(|p| p.1).collect();
                 assert!(spread.len() >= rows, "{seed} {magic:?}: vortex spans {spread:?}");
@@ -1525,14 +1615,18 @@ mod tests {
     #[test]
     fn fire_breath_starts_tiny_after_a_gap() {
         particles::NO_AMBIENT.with(|c| c.set(true));
-        for magic in [Magic::Normal, Magic::Big] {
-            let run_len = if magic == Magic::Big { 14 } else { 6 };
+        for magic in Magic::ALL {
+            let run_len = match magic {
+                Magic::Small => 4,
+                Magic::Normal => 6,
+                Magic::Big => 14,
+            };
             let (mut ok_gap, mut ok_run, mut n) = (0, 0, 0);
             let mut heights = [0f32; 5];
             for seed in [4, 11, 23, 706_312_658] {
                 let start = first_cast(seed) + 3;
                 for t in start..start + 120 {
-                    let g = render(&SpiritParams { magic, ..params(Theme::Fire, Status::Running, Size::S, t, seed) });
+                    let g = render(&SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Fire, Status::Running, Size::S, t, seed) });
                     let d = dots(&g);
                     let h = i32::from(g.rows) * 4;
                     let occupied = |x: i32| (0..h).any(|y| d.contains(&(x, y)));
@@ -1558,7 +1652,19 @@ mod tests {
             assert!(ok_gap * 10 >= n * 9, "{magic:?}: an empty dot column between body and flame on {ok_gap} of {n} ticks");
             assert!(ok_run * 10 >= n * 8, "{magic:?}: contiguous flame on {ok_run} of {n} ticks");
             assert!(hs[0] <= 1.6, "{magic:?}: the breath starts tiny: {hs:?}");
-            assert!(hs.windows(2).all(|w| w[1] >= w[0] - 0.05) && hs[4] >= hs[0] + 1.5, "{magic:?}: the flame widens: {hs:?}");
+            // it widens with distance: the big cone a lot, the thin normal
+            // flame a little; the small jet stays one or two dots tall
+            let widen = match magic {
+                Magic::Small => 0.0,
+                Magic::Normal => 0.4,
+                Magic::Big => 1.5,
+            };
+            // (the small jet's fifth dot column is already its tapering tip)
+            let body = if magic == Magic::Small { &hs[..4] } else { &hs[..] };
+            assert!(body.windows(2).all(|w| w[1] >= w[0] - 0.05) && hs[4] >= hs[0] + widen, "{magic:?}: the flame widens: {hs:?}");
+            if magic == Magic::Small {
+                assert!(hs.iter().all(|&h| h <= 2.6), "small: a thin jet {hs:?}");
+            }
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
     }
@@ -1601,6 +1707,7 @@ mod tests {
     fn poison_fog_spreads_radially_from_an_anchor() {
         let mut checked = 0;
         for magic in [Magic::Normal, Magic::Big] {
+            let (mut denser, mut isolated) = (0, 0);
             // in a card: the fog is centred in the room right of the body
             let g0 = geom_of(&SpiritParams { magic, cols: CARD_COLS, ..params(Theme::Poison, Status::Running, Size::S, 0, 1) });
             let (ax, ay) = magic::fog_anchor(&g0);
@@ -1619,7 +1726,8 @@ mod tests {
                         dots(&g).into_iter().filter(|&(x, _)| x >= x_min).map(|(x, y)| (x as f32 + 0.5 - ax, y as f32 + 0.5 - ay)).collect()
                     };
                     let radius = |d: &[(f32, f32)]| d.iter().map(|p| p.0.hypot(p.1)).fold(0.0f32, f32::max);
-                    let (early, late) = (at(2), at(12));
+                    // the late frame sits at the same point of the puffs' life at every level
+                    let (early, late) = (at(2), at(life * 12 / 26));
                     assert!(!early.is_empty() && !late.is_empty(), "{magic:?} {seed} {c}: fog shows");
                     assert!(radius(&late) >= radius(&early) + 1.5, "{magic:?} {seed} {c}: grows {} -> {}", radius(&early), radius(&late));
                     if magic == Magic::Big {
@@ -1644,10 +1752,19 @@ mod tests {
                     };
                     let inner = late.iter().filter(|p| p.0.hypot(p.1) < 0.5 * r).count() as f32 / in_canvas(true);
                     let outer = late.iter().filter(|p| p.0.hypot(p.1) >= 0.5 * r).count() as f32 / in_canvas(false);
-                    assert!(inner > outer, "{magic:?} {seed} {c}: density inner {inner} vs edge {outer}");
+                    if inner > outer {
+                        denser += 1;
+                    } else {
+                        println!("{magic:?} {seed} {c}: density inner {inner} vs edge {outer}");
+                    }
+                    isolated += 1;
                     checked += 1;
                 }
             }
+            // a puff of a few dots is noisy: the big fog on every cast, the
+            // smaller normal fog on nearly all
+            let need = if magic == Magic::Big { isolated } else { isolated * 8 / 10 };
+            assert!(denser >= need, "{magic:?}: denser inside on {denser} of {isolated} casts");
         }
         assert!(checked >= 6, "{checked} isolated casts checked");
     }
@@ -1749,21 +1866,24 @@ mod tests {
     /// Hashes of the golden frames, captured from the renderer before the
     /// context stages existed (theme-major, then state, then `GOLDEN_CASES`).
     /// Centring the magic (water, poison, lightning) re-captured the 12
-    /// running water/poison frames that show their magic; every other frame
-    /// is still the pre-stage render.
+    /// running water/poison frames that show their magic, and the level
+    /// rebalance (smaller Normal, clearer Small) the 15 running fire, water
+    /// and poison frames casting Small or Normal magic (entries 1-3, 5, 7,
+    /// 41-43, 45, 47, 81-83, 85, 87); every other frame is still the
+    /// pre-stage render.
     #[rustfmt::skip]
     const GOLDEN: [u64; 160] = [
-        0x3512407e8b3be050, 0x6f05d72037a67389, 0x593d1f6d2cb79959, 0xcbf0e1383ba0fa0f, 0xac4e96eb863a74c1, 0xe4e2d8155b511f11, 0xfc108cd1c4fb901d, 0xb290fc9e4fcf20ff,
+        0x3512407e8b3be050, 0x47bbd98251e8fd5a, 0xeb233e7a17abe412, 0xcdf749eca37373e8, 0xac4e96eb863a74c1, 0x11dad5b57fe9a68b, 0xfc108cd1c4fb901d, 0xfb9527393cb63a77,
         0xe63151fe9a9034cc, 0x7a8ac6628408efd6, 0xe7c8d4a08b21e8dd, 0xa78308e8344bfc33, 0x593823a0b217a421, 0x3d7198f183a6f699, 0x6b7fdff6fb1ca679, 0x360e578976d6b475,
         0xef4f5337fe84e25d, 0x9491d9830f79a16d, 0xfade110e02982b10, 0xb3cae76b73ec5f64, 0x1bbf5c77d2e7c756, 0xb35def89ef4ff9c9, 0xe1361db73402ebb5, 0xae106a39f3427582,
         0xb07554c2511c01b3, 0x7c2ccbca01365697, 0x7324e7ce2c9bce28, 0xa4280c3f454ca467, 0x91eac22fa83d1bcf, 0xddb08feddde44f72, 0x7201e9d0b17de902, 0x0f45b90a4d2df7c3,
         0x9f8f36f54ef0c55f, 0x3bc34a7c5a30173a, 0x795315231571603c, 0xac841e8c4f701af2, 0x2bd983eaf378328d, 0x4684d7e93e1ecf26, 0x263984a74cd48d43, 0x9033c7cabef7dcce,
-        0xe0f1d9d204dbb53b, 0x13af2fe937f93367, 0x6fe04786c63d2217, 0x59e2e1c4f419272c, 0xcff087d2152ea409, 0x73ace2a07c91d87f, 0x724c882ced531194, 0x9893901c8227daba,
+        0xe0f1d9d204dbb53b, 0x3a41efc41974487d, 0xc91094288e06c585, 0x26c65b168f265c92, 0xcff087d2152ea409, 0x80fa72fb50148235, 0x724c882ced531194, 0x284402919eee487c,
         0x623cb10f33e21bd2, 0xb81b2bfc61e53c3b, 0xeba92b71721f1094, 0x856abff4dcb80e08, 0x37d6e13fa7a6f6d8, 0xcee480f5bb3ba604, 0xf74fc0ab09547254, 0x67fdef386bcdef4a,
         0xd82350e5a41e871f, 0x6eda02e347dd31c1, 0x03f9c0c849cfb49c, 0xc0e10b81431aa916, 0xd021c09188dbd3c3, 0x6b4b5378291cb075, 0x5eab5e9a96b16fcf, 0x3e5bad230a45cfd7,
         0xa98ffb855054ad80, 0x5e2ff43d23c35201, 0x12d998a33761e63a, 0x47de1dd41ee777b0, 0xdc6417a2c1fe9a9e, 0x97a0921451361b80, 0x4e4fcdacb9d69a47, 0xd63cde832ab3eb0e,
         0x48397efc5c8c3b41, 0x21da5b3f472a49f0, 0xec21ee809d8c883b, 0x7cc2ad766f426d99, 0xf2c3f4f1bafe3b20, 0x4f3d4438efbd360d, 0x900a07b09bae5fb7, 0xf15983afbd5a66d6,
-        0x17ba577ce79f9d69, 0x337deadc90fd2463, 0xe3c06c0aeb48ca1d, 0x1a7ad17990b202b8, 0x00e6fb96b9d8dbe3, 0x03d6036ebc155502, 0x66b8b6aca898ae18, 0x59f60de4a5a83170,
+        0x17ba577ce79f9d69, 0xb04e9224431280a2, 0xa3463cda315301aa, 0x4a8dd78570dd3bce, 0x00e6fb96b9d8dbe3, 0x90b03f33f68f12ed, 0x66b8b6aca898ae18, 0x31f64658867de74e,
         0x6e6f83e990bad121, 0xe8c937a5b5565162, 0x06b998dbd08c3922, 0x1de1bdf0cc3207fa, 0xdd9a20840cdd6d4f, 0xbf9b1e45c6f184c3, 0xfea08ed50dc958b6, 0xbdfa8d0c6164ec15,
         0xaf99522f19ebd5d3, 0x7ed6f69b81fdce30, 0x59431f82976b233e, 0x153e240a19ecca34, 0xcdddb889d9b805a9, 0x91a61bcdb1643167, 0xb1e025b92ee2cecd, 0x3f47116c7a438ad6,
         0x7850eb98fd19d4ac, 0x1505f53f641c81d0, 0x8bb55120b1e5e349, 0xebd099f4dc831e14, 0xba8e77ce1e06556f, 0x8244f1770964617e, 0xf70329b6cbe5386c, 0x8649e9e257ac4035,
@@ -2034,9 +2154,9 @@ mod tests {
                     assert_eq!((g.cols, g.rows), grid_size_for(Size::XS, magic), "{theme:?} {status:?} {magic:?}");
                     assert_eq!(g.cells.len(), usize::from(g.cols) * usize::from(g.rows));
                 }
-                // a running centred magic widens to the card room, like S
+                // a running spirit widens to the card room for its magic, like S
                 let g = render(&SpiritParams { cols: LARGE_COLS, ..xs(theme, status, 30, 1) });
-                let wide = status == Status::Running && theme != Theme::Fire;
+                let wide = status == Status::Running;
                 assert_eq!(g.cols, if wide { LARGE_COLS } else { 6 }, "{theme:?} {status:?}");
             }
         }
@@ -2429,6 +2549,25 @@ mod tests {
                     }
                     println!("{line}");
                 }
+            }
+        }
+    }
+
+    /// Per-level magic measurements in the standard card (stage 2, seeds
+    /// 4/11/23 x 240 running ticks, ambient off): mean painted cells per
+    /// frame, mean width and height (cells) of the painted frames, mean and
+    /// max farthest painted column, union width
+    /// (`cargo test measure_magic -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn measure_magic() {
+        for theme in Theme::ALL {
+            for magic in Magic::ALL {
+                let m = level_metrics(theme, magic);
+                println!(
+                    "{theme:?} {magic:?}: cells/frame {:.1} (lit {:.1}) width {:.1} height {:.2} (max {}) far col {:.1} (max {}) union {} dots/frame {:.1}",
+                    m.cells, m.lit_cells, m.width, m.height, m.max_height, m.far, m.max_far, m.union, m.dots
+                );
             }
         }
     }
