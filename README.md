@@ -15,7 +15,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 - The card border blinks blue while the session has unread cmux notifications, for example when it finished.
 - `Enter` (or `Space`) jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
 - Cards are grouped by cmux window. An optional PR chip shows the open pull request for the branch.
-- Running Claude Code subagents show on the card: a `◇×N` marker on the standard card's badge row, one `◇ kind · description` row each on the large card, and one small dot each at the spirit's lower right in the colour of the subagent model's element (see [Subagents](#subagents)).
+- Running Claude Code subagents show on the card: a `◇×N` marker on the standard card's badge row, one `◇ kind · description` row each on the large card, and one round bead each in a row along the bottom of the spirit's animation area, growing right from the body, in the colour of the subagent model's element (see [Subagents](#subagents)).
 
 ## Install
 
@@ -85,14 +85,14 @@ The card size picks the spirit size: the standard card (and the standard cards o
 
 ## Subagents
 
-Claude Code keeps each session's subagents next to its transcript, in `~/.claude/projects/<project>/<session id>/subagents/`: per subagent an `agent-<id>.meta.json` (type, task description, model) and an `agent-<id>.jsonl` transcript that grows while it works. cmux-magigent lists that folder (only for the sessions on screen, and only again when the folder changes), parses each meta file once, and never reads the subagent transcripts, only their modification times. At most the eight newest subagents of a session are kept.
+Claude Code keeps each session's subagents next to its transcript, in `~/.claude/projects/<project>/<session id>/subagents/`: per subagent an `agent-<id>.meta.json` (type, task description, model) and an `agent-<id>.jsonl` transcript that grows while it works. On every refresh (once a second) cmux-magigent lists that folder again for the sessions on screen and checks each subagent transcript's modification time, so a subagent that writes, starts or finishes shows on the next refresh; each meta file is parsed only again when it changes, and the subagent transcripts themselves are never read. At most the eight newest subagents of a session are kept.
 
-A subagent counts as running when its transcript was written within `subagent_active_seconds` (default 30) and its meta does not say `finished`; a finished (Done) session has none running. Only running subagents are shown. Older Claude Code versions write no finished flag, so there a subagent that just finished may still show as running for up to the window (about 30 s).
+A subagent counts as running when its meta does not say `finished: true` (honoured as soon as Claude Code writes it) and its transcript was written within `subagent_active_seconds` (default 30, the recent-activity window); a finished (Done) session has none running. Only running subagents are shown. Older Claude Code versions write no finished flag, so there a subagent that just finished may still show as running for up to the window (about 30 s).
 
 - Standard card: `◇×N` at the end of the badge row (last activity makes room for it first). Nothing when none is running.
 - Large card: below the summary, one row per running subagent, newest first, `◇ kind · description` with the model family on the right; at most three rows, the last ending in `+N` when more are running. The name, badge, branch, PR and summary rows always come first.
 - One-line cards: `◇N` after the elapsed time.
-- Spirit: one small dot per running subagent (at most four) on the bottom row right of the body, in the base colour of the element its model maps to (the same `model_themes` mapping as the spirit; an unknown model takes the spirit's own element). The dots bob a little behind the spirit and move with its stage, pulse while it runs, are dim while it is idle and are gone once it is done.
+- Spirit: one round bead per running subagent (at most five, as many as fit; the text counts the rest) in one row along the bottom of the animation area, starting one empty cell right of the body and growing to the right. Each bead is exactly one braille cell (`⠿`) with one empty cell between two beads, so N beads always read as N. Its colour is the element of the model the subagent actually runs on (`pickedEffortModel` from the meta, else the requested `model`, through the same `model_themes` mapping as the spirit; an unknown model takes the spirit's own element). The beads bob one sub-pixel behind the spirit, pulse while it runs, are dim while it is idle and are gone once it is done.
 
 ## How status is detected
 

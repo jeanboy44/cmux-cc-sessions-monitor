@@ -328,8 +328,8 @@ pub fn render(p: &SpiritParams) -> SpiritGrid {
     render_with(p, true)
 }
 
-/// Renders one frame with a small dot per running subagent at the body's
-/// lower right (see `subdots`); no dots renders exactly like [`render`].
+/// Renders one frame with a one-cell bead per running subagent in a row
+/// from the body's lower right (see `subdots`); no dots renders exactly like [`render`].
 pub fn render_dots(p: &SpiritParams, dots: &[SubagentDot]) -> SpiritGrid {
     render_frame(p, true, dots)
 }
@@ -362,13 +362,9 @@ fn render_with(p: &SpiritParams, bubbles: bool) -> SpiritGrid {
 }
 
 fn render_frame(p: &SpiritParams, bubbles: bool, dots: &[SubagentDot]) -> SpiritGrid {
-    // a finished spirit shows no subagents; at most MAX_DOTS dots
-    let dots = if p.status == Status::Done { &[][..] } else { &dots[..dots.len().min(MAX_DOTS)] };
-    let mut g = geom_of(p);
-    let base_cols = (g.w / 2) as u16;
-    if !dots.is_empty() {
-        g.w = g.w.max(subdots::width_for(&g, dots.len()));
-    }
+    // a finished spirit shows no subagents; at most as many beads as fit
+    let g = geom_of(p);
+    let n = if p.status == Status::Done { 0 } else { subdots::fit(&g, p.cols, dots.len()) };
     let ctx = Ctx::new(p);
     let parts = particles::simulate(&ctx);
     let pulse = state::pulse(ctx.state, ctx.tf);
@@ -395,11 +391,12 @@ fn render_frame(p: &SpiritParams, bubbles: bool, dots: &[SubagentDot]) -> Spirit
     if bubbles {
         element::draw_bubbles(&mut cv, &ctx, CX + pose.dx / g.ppu, look.cy);
     }
-    subdots::draw(&mut cv, &ctx, dots);
     eyes::draw(&mut cv, pose.facing, eyes::blinking(ctx.seed, ctx.t), element::ramp(ctx.elem)[1], look.bright);
     let mut grid = cv.cells();
     state::marks(&mut grid, &cv, &ctx, pulse);
-    subdots::keep_only_dots_past(&mut grid, &cv.g, base_cols, dots.len());
+    if n > 0 {
+        subdots::paint(&mut grid, &cv.g, &ctx, dots, n);
+    }
     grid
 }
 

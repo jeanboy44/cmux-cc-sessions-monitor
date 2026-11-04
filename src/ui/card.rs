@@ -29,8 +29,10 @@
 //! Running Claude Code subagents (see [`crate::source::subagents`]): a
 //! [`SUBAGENT_GLYPH`]`×N` marker at the end of the standard card's badge row,
 //! `◇N` on compact cards, one `◇ kind · description` row each (at most three,
-//! then `+N`) in the large card's leftover rows, and one small dot each in
-//! the spirit band in the subagent model's element (see `spirit::subdots`).
+//! then `+N`) in the large card's leftover rows, and one round bead (one
+//! braille cell, an empty cell between two) each in a row along the bottom
+//! of the spirit band, from the body's lower right, in the element of the
+//! subagent's model (see `spirit::subdots`).
 //!
 //! When a card of the configured layout does not fit a compact one-line card
 //! is drawn instead ([`render_compact`]). Empty areas draw nothing; no size
@@ -1649,9 +1651,9 @@ mod tests {
                     let busy = with_subs(plain.clone(), 5, 2);
                     let (a, b) = (draw(w, h, |f| render_card(f, f.area(), &plain, &cfg, false, t)), draw(w, h, |f| render_card(f, f.area(), &busy, &cfg, false, t)));
                     let diff: Vec<(u16, u16)> = (1..=band_rows).flat_map(|y| (1..w - 1).map(move |x| (x, y))).filter(|&p| a[p] != b[p]).collect();
-                    if status != Status::Running {
-                        assert_eq!(diff.len(), MAX_DOTS, "{layout:?} {status:?} t={t}: four dots for five running: {diff:?}");
-                    }
+                    let beads: Vec<u16> = diff.iter().filter(|&&p| matches!(b[p].symbol(), "⠿" | "⣶")).map(|p| p.0).collect();
+                    assert_eq!(beads.len(), MAX_DOTS, "{layout:?} {status:?} t={t}: five beads for five running: {diff:?}");
+                    assert!(beads.windows(2).all(|w| w[1] == w[0] + 2 && b[(w[0] + 1, band_rows)].symbol() == " "), "{layout:?}: {beads:?}");
                     assert!(!diff.is_empty() && diff.iter().all(|&(_, y)| y == band_rows), "{layout:?} {status:?}: bottom band row: {diff:?}");
                     // the border is untouched
                     for x in 0..w {
@@ -1688,27 +1690,107 @@ mod tests {
         assert!(r > g && r > b, "parent's fire: {:?}", buf[cell].fg);
     }
 
-    /// Plain-text look of the standard and large cards with two running subagents.
+    /// The user's config: sonnet = fire, opus = water, fable/haiku = poison.
+    fn user_cfg(layout: CardLayout) -> Config {
+        let mut cfg = Config { card_layout: layout, ..Config::default() };
+        cfg.model_themes = [("sonnet", Theme::Fire), ("opus", Theme::Water), ("fable", Theme::Poison), ("haiku", Theme::Poison)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        cfg
+    }
+
+    /// Cells of the bottom band row that differ from the card without subagents.
+    fn dot_cells(s: &Session, cfg: &Config, t: u64) -> Vec<(u16, Color)> {
+        let (w, h) = card_size(cfg.card_layout);
+        let band_rows = if cfg.card_layout == CardLayout::Large { LARGE_SCENE_ROWS } else { SCENE_ROWS };
+        let with = draw(w, h, |f| render_card(f, f.area(), s, cfg, false, t));
+        let plain = draw(w, h, |f| render_card(f, f.area(), &Session { subagents: Vec::new(), ..s.clone() }, cfg, false, t));
+        (1..w - 1).filter(|&x| with[(x, band_rows)] != plain[(x, band_rows)] && with[(x, band_rows)].symbol() != " ").map(|x| (x, with[(x, band_rows)].fg)).collect()
+    }
+
+    #[test]
+    fn subagent_dots_take_the_users_model_theme_not_the_parents_water() {
+        for layout in [CardLayout::Standard, CardLayout::Large] {
+            let cfg = user_cfg(layout);
+            for parent_model in ["claude-opus-4-5", "claude-sonnet-5-5"] {
+                for status in [Status::Running, Status::NeedsInput, Status::Idle] {
+                    for t in [0, 7, 21, 40, 63] {
+                        let mut s = Session { model: Some(parent_model.into()), ..session("ui refactoring", status) };
+                        s.subagents = vec![sub("a", "general-purpose", "x", Some("sonnet"), true), sub("b", "Explore", "y", Some("sonnet"), true)];
+                        let cells = dot_cells(&s, &cfg, t);
+                        assert_eq!(cells.len(), 2, "{layout:?} {parent_model} {status:?} t={t}: two beads: {cells:?}");
+                        for (x, fg) in &cells {
+                            let Color::Rgb(r, g, b) = *fg else { panic!("rgb") };
+                            assert!(r > g && g > b, "{layout:?} {parent_model} {status:?} t={t}: sonnet = fire at x={x}: {fg:?}");
+                        }
+                        // a subagent on opus is water here: blue
+                        s.subagents = vec![sub("c", "Plan", "z", Some("opus"), true)];
+                        for (x, fg) in dot_cells(&s, &cfg, t) {
+                            let Color::Rgb(r, g, b) = fg else { panic!("rgb") };
+                            assert!(b > r && b > g, "{layout:?} {parent_model} t={t}: opus = water at x={x}: {fg:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn two_running_subagents_draw_two_separate_beads_unlike_the_body() {
+        for layout in [CardLayout::Standard, CardLayout::Large] {
+            let cfg = user_cfg(layout);
+            let band_rows = if layout == CardLayout::Large { LARGE_SCENE_ROWS } else { SCENE_ROWS };
+            let (w, h) = card_size(layout);
+            for t in [0, 9, 33] {
+                // parent on opus (water body), subagents on sonnet (fire) and haiku (poison)
+                let mut s = Session { model: Some("claude-opus-4-5".into()), ..session("proj-a", Status::Idle) };
+                s.subagents = vec![sub("a", "Explore", "x", Some("sonnet"), true), sub("b", "Explore", "y", Some("haiku"), true)];
+                let buf = draw(w, h, |f| render_card(f, f.area(), &s, &cfg, false, t));
+                let cells = dot_cells(&s, &cfg, t);
+                let xs: Vec<u16> = cells.iter().map(|c| c.0).collect();
+                assert_eq!(xs.len(), 2, "{layout:?} t={t}: two beads, one cell each: {xs:?}");
+                assert_eq!(xs[1], xs[0] + 2, "{layout:?}: {xs:?}");
+                assert_eq!(buf[(xs[0] + 1, band_rows)].symbol(), " ", "{layout:?}: an empty column between the beads");
+                // body colours: every lit band cell left of the first bead
+                let body: Vec<Color> = (1..=band_rows).flat_map(|y| (1..xs[0]).map(move |x| (x, y))).filter(|&p| buf[p].symbol() != " ").map(|p| buf[p].fg).collect();
+                assert!(!body.is_empty());
+                for (x, fg) in &cells {
+                    assert!(!body.contains(fg), "{layout:?}: bead at {x} differs from the body: {fg:?}");
+                }
+            }
+        }
+    }
+
+    /// Look of the standard and large cards with 1, 2, 4 and 5 running
+    /// subagents (sonnet = fire, opus = water, haiku/fable = poison), as
+    /// plain text and with ANSI colours, plus the colour of each bead.
     /// Run with `cargo test dump_subagent_cards -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn dump_subagent_cards() {
-        let mut s = opus("proj-a", Status::Running);
-        s.ctx_percent = Some(35.0);
-        s.subagents = vec![
-            sub("a1", "Explore", "파서 위치 찾기", Some("sonnet"), true),
-            sub("a2", "general-purpose", "write the tests for the scanner", Some("haiku"), true),
-            sub("a3", "Plan", "old plan", Some("opus"), false),
-        ];
-        for (layout, (w, h)) in [(CardLayout::Standard, (CARD_W, CARD_H)), (CardLayout::Large, (LARGE_W, LARGE_H))] {
-            let cfg = Config { card_layout: layout, ..Config::default() };
-            println!("{layout:?}:");
-            for r in rows(&draw(w, h, |f| render_card(f, f.area(), &s, &cfg, false, 30))) {
-                println!("{r}");
+        let fams = ["sonnet", "opus", "haiku", "sonnet", "fable"];
+        for layout in [CardLayout::Standard, CardLayout::Large] {
+            let cfg = user_cfg(layout);
+            let (w, h) = card_size(layout);
+            let band = if layout == CardLayout::Large { LARGE_SCENE_ROWS } else { SCENE_ROWS };
+            for n in [1, 2, 4, 5] {
+                let mut s = Session { model: Some("claude-opus-4-5".into()), ctx_percent: Some(35.0), ..session("ui refactoring", Status::Running) };
+                s.subagents = (0..n).map(|i| sub(&format!("a{i}"), "Explore", &format!("task {i}"), Some(fams[i]), true)).collect();
+                let buf = draw(w, h, |f| render_card(f, f.area(), &s, &cfg, false, 30));
+                println!("{layout:?}, {n} running:");
+                for r in rows(&buf) {
+                    println!("{r}");
+                }
+                for y in 0..h {
+                    let line: String = (0..w)
+                        .map(|x| match buf[(x, y)].fg {
+                            Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m{}\x1b[0m", buf[(x, y)].symbol()),
+                            _ => buf[(x, y)].symbol().to_string(),
+                        })
+                        .collect();
+                    println!("{line}");
+                }
+                let beads: Vec<String> = (1..w - 1).filter(|&x| matches!(buf[(x, band)].symbol(), "⠿" | "⣶")).map(|x| format!("x={x} {:?}", buf[(x, band)].fg)).collect();
+                println!("beads: {beads:?}\n");
             }
-        }
-        for r in rows(&draw(30, 1, |f| render_compact(f, f.area(), &s, &Config::default(), false, 0))) {
-            println!("{r}");
         }
     }
 

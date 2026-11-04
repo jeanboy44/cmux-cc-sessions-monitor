@@ -849,6 +849,49 @@ mod tests {
     }
 
     #[test]
+    fn subagent_appends_show_on_the_next_round_in_both_card_layouts() {
+        use crate::config::CardLayout;
+        use ratatui::{backend::TestBackend, Terminal};
+        let dir = setup();
+        write_claude(&dir.path().join("sessions"), 11, "a", "busy");
+        let cmux = FakeCmux::new(vec![cref("a", true)]);
+        let d = deps(dir.path(), &cmux);
+        let now = d.now;
+        write_subagent(&d, "a", "x1", now, 600);
+        let sub_dir = d.projects_dir.join("-home-user-a").join("a").join("subagents");
+        let pinned = now - Duration::from_secs(900);
+        let pin = || std::fs::File::open(&sub_dir).unwrap().set_modified(pinned).unwrap();
+        pin();
+        // the card with its subagents vs the same card without them (cells that differ)
+        let draw = |s: &Session, layout: CardLayout| {
+            let cfg = crate::config::Config { card_layout: layout, ..crate::config::Config::default() };
+            let (w, h) = crate::ui::card::card_size(layout);
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| crate::ui::card::render_card(f, f.area(), s, &cfg, false, 5)).unwrap();
+            t.backend().buffer().clone()
+        };
+        let differs = |s: &Session, layout| draw(s, layout) != draw(&Session { subagents: Vec::new(), ..s.clone() }, layout);
+        let first = build_snapshot(&d, &Snapshot::default());
+        let a = first.sessions.iter().find(|s| s.id == "a").unwrap();
+        assert_eq!(crate::source::subagents::running_count(&a.subagents), 0, "stale");
+        assert!(!differs(a, CardLayout::Standard) && !differs(a, CardLayout::Large));
+        // the subagent writes again: only its transcript changes
+        std::fs::File::options().write(true).open(sub_dir.join("agent-x1.jsonl")).unwrap().set_modified(now).unwrap();
+        pin();
+        let second = build_snapshot(&d, &first);
+        let a = second.sessions.iter().find(|s| s.id == "a").unwrap();
+        assert_eq!(crate::source::subagents::running_count(&a.subagents), 1, "running on the next round");
+        assert!(differs(a, CardLayout::Standard) && differs(a, CardLayout::Large), "dots and text update in both layouts");
+        // it ends: the meta says finished, gone on the next round
+        std::fs::write(sub_dir.join("agent-x1.meta.json"), r#"{"agentType":"Explore","model":"sonnet","finished":true}"#).unwrap();
+        pin();
+        let third = build_snapshot(&d, &second);
+        let a = third.sessions.iter().find(|s| s.id == "a").unwrap();
+        assert_eq!(crate::source::subagents::running_count(&a.subagents), 0);
+        assert!(!differs(a, CardLayout::Standard) && !differs(a, CardLayout::Large));
+    }
+
+    #[test]
     fn transcript_path_falls_back_to_encoded_cwd() {
         let projects = Path::new("/home/user/.claude/projects");
         let mut s = crate::app::fake_session("sess-1", Status::Running);

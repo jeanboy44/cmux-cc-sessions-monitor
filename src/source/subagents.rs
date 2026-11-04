@@ -9,10 +9,15 @@
 //! versions never write `finished`, so a just-finished subagent may still
 //! count for up to the window.
 //!
-//! Cost per round and session: one `stat` of the folder (a `read_dir` only
-//! when the folder changed), one `stat` per subagent transcript, and a `stat`
-//! of the meta files of the shown subagents; a meta file is parsed once per
-//! (mtime, length). Transcript bodies are never read.
+//! Every refresh round lists the folder again and `stat`s every subagent
+//! transcript, so an append (which does not change the folder's mtime), a
+//! new subagent and a meta rewritten with `finished: true` all show on the
+//! next round. Only the parsed metas are cached, keyed by (mtime, length).
+//! Cost per round and session: one `read_dir`, one `stat` per subagent
+//! transcript and one per shown meta. Transcript bodies are never read.
+//!
+//! The model is `pickedEffortModel` (the model actually used, a full id)
+//! when it names a known family, else `model` (the requested family word).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -68,6 +73,8 @@ struct RawMeta {
     description: Option<String>,
     #[serde(deserialize_with = "super::lenient")]
     model: Option<String>,
+    #[serde(rename = "pickedEffortModel", deserialize_with = "super::lenient")]
+    picked_model: Option<String>,
     #[serde(deserialize_with = "super::lenient")]
     finished: Option<bool>,
 }
@@ -103,22 +110,18 @@ fn read_meta(path: &Path, len: u64) -> Meta {
     Meta {
         kind,
         description: raw.description.as_deref().map(one_line).unwrap_or_default(),
-        family: raw.model.as_deref().and_then(model_family).map(|f| f.as_key().to_string()),
+        family: raw.picked_model.as_deref().and_then(model_family).or_else(|| raw.model.as_deref().and_then(model_family)).map(|f| f.as_key().to_string()),
         finished: raw.finished == Some(true),
     }
 }
 
-/// Cached state of one subagents folder.
-#[derive(Debug, Clone)]
+/// Parsed metas of one subagents folder by id, with the (mtime, length) they were read at.
+#[derive(Debug, Clone, Default)]
 struct DirCache {
-    /// Folder mtime of the listing (`None`: unknown, list every time).
-    mtime: Option<SystemTime>,
-    ids: Vec<String>,
-    /// Parsed metas by id, with the (mtime, length) they were read at.
     metas: HashMap<String, (SystemTime, u64, Meta)>,
 }
 
-/// Folder listings and parsed metas, carried from one refresh round to the next.
+/// Parsed metas per folder, carried from one refresh round to the next.
 #[derive(Debug, Clone, Default)]
 pub struct SubagentCache {
     dirs: HashMap<PathBuf, DirCache>,
@@ -169,7 +172,7 @@ impl SubagentCache {
         self.meta_reads
     }
 
-    /// Folder listings done (cache misses), for tests.
+    /// Folder listings done (one per round), for tests.
     #[cfg(test)]
     pub fn list_reads(&self) -> usize {
         self.list_reads
@@ -180,33 +183,23 @@ impl SubagentCache {
 /// written within `active_secs` of `now` and not marked finished. A missing
 /// or unreadable folder yields nothing.
 pub fn scan(dir: &Path, now: SystemTime, active_secs: u64, cache: &mut SubagentCache) -> Vec<SubagentInfo> {
-    let md = match std::fs::metadata(dir) {
-        Ok(md) if md.is_dir() => md,
-        _ => {
-            cache.dirs.remove(dir);
-            return Vec::new();
-        }
-    };
-    let mtime = md.modified().ok();
-    let fresh = cache.dirs.get(dir).is_some_and(|d| d.mtime.is_some() && d.mtime == mtime);
-    if !fresh {
-        #[cfg(test)]
-        {
-            cache.list_reads += 1;
-        }
-        let Some(ids) = list_ids(dir) else {
-            cache.dirs.remove(dir);
-            return Vec::new();
-        };
-        let mut metas = cache.dirs.remove(dir).map(|d| d.metas).unwrap_or_default();
-        metas.retain(|id, _| ids.contains(id));
-        cache.dirs.insert(dir.to_path_buf(), DirCache { mtime, ids, metas });
+    if !std::fs::metadata(dir).is_ok_and(|md| md.is_dir()) {
+        cache.dirs.remove(dir);
+        return Vec::new();
     }
-    let Some(entry) = cache.dirs.get_mut(dir) else { return Vec::new() };
+    #[cfg(test)]
+    {
+        cache.list_reads += 1;
+    }
+    let Some(ids) = list_ids(dir) else {
+        cache.dirs.remove(dir);
+        return Vec::new();
+    };
+    let entry = cache.dirs.entry(dir.to_path_buf()).or_default();
+    entry.metas.retain(|id, _| ids.contains(id));
     let mut reads = 0usize;
 
-    let mut seen: Vec<(SystemTime, &str)> = entry
-        .ids
+    let mut seen: Vec<(SystemTime, &str)> = ids
         .iter()
         .filter_map(|id| {
             let t = file_mtime(&dir.join(format!("agent-{id}.jsonl")))
@@ -381,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_parses_each_meta_once_and_lists_the_dir_once_while_unchanged() {
+    fn cache_parses_each_meta_once_and_lists_the_dir_every_round() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("subagents");
         let now = SystemTime::now();
@@ -390,11 +383,11 @@ mod tests {
         let mut cache = SubagentCache::default();
         let first = scan(&dir, now, 30, &mut cache);
         assert_eq!((cache.meta_reads(), cache.list_reads()), (2, 1));
-        // later rounds: transcripts keep growing, metas and the listing are reused
+        // later rounds: transcripts keep growing, metas are reused, the folder is listed again
         let later = now + Duration::from_secs(10);
         touch(&dir.join("agent-aaa.jsonl"), later);
         let second = scan(&dir, later, 30, &mut cache);
-        assert_eq!((cache.meta_reads(), cache.list_reads()), (2, 1), "cache hits");
+        assert_eq!((cache.meta_reads(), cache.list_reads()), (2, 2), "meta cache hits");
         assert_eq!(second[0].id, "aaa");
         assert_eq!(second[0].last_activity_secs, 0);
         assert_eq!(first[0].description, second[0].description);
@@ -403,11 +396,62 @@ mod tests {
         let third = scan(&dir, later, 30, &mut cache);
         assert_eq!(cache.meta_reads(), 3);
         assert!(!third.iter().find(|a| a.id == "bbb").unwrap().running);
-        // a new agent changes the folder: listed again
+        // a new agent shows on the next round
         agent(&dir, "ccc", None, later, 0);
         let fourth = scan(&dir, later, 30, &mut cache);
-        assert_eq!(cache.list_reads(), 2);
+        assert_eq!(cache.list_reads(), 4);
         assert_eq!(fourth.len(), 3);
+    }
+
+    /// Sets the folder's mtime back to `at` (as if nothing in it had changed).
+    fn pin_dir_mtime(dir: &Path, at: SystemTime) {
+        std::fs::File::open(dir).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn appends_and_meta_rewrites_flip_running_without_a_folder_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("subagents");
+        let now = SystemTime::now();
+        agent(&dir, "aaa", Some(&meta("Explore", "x", "opus")), now, 120);
+        let pinned = now - Duration::from_secs(500);
+        pin_dir_mtime(&dir, pinned);
+        let mut cache = SubagentCache::default();
+        assert!(!scan(&dir, now, 30, &mut cache)[0].running, "stale at first");
+        // the subagent appends to its transcript later: the folder mtime stays
+        let later = now + Duration::from_secs(60);
+        touch(&dir.join("agent-aaa.jsonl"), later - Duration::from_secs(1));
+        pin_dir_mtime(&dir, pinned);
+        let out = scan(&dir, later, 30, &mut cache);
+        assert!(out[0].running, "running again on the next round: {out:?}");
+        // a new subagent whose file lands without a folder mtime change still shows up
+        agent(&dir, "bbb", Some(&meta("Plan", "y", "haiku")), later, 0);
+        pin_dir_mtime(&dir, pinned);
+        let out = scan(&dir, later, 30, &mut cache);
+        assert_eq!(out.iter().map(|a| (a.id.as_str(), a.running)).collect::<Vec<_>>(), [("bbb", true), ("aaa", true)]);
+        // the meta is rewritten with finished: true: not running at once
+        std::fs::write(dir.join("agent-bbb.meta.json"), br#"{"agentType":"Plan","description":"y","model":"haiku","finished":true}"#).unwrap();
+        pin_dir_mtime(&dir, pinned);
+        let out = scan(&dir, later, 30, &mut cache);
+        assert_eq!(out.iter().map(|a| (a.id.as_str(), a.running)).collect::<Vec<_>>(), [("bbb", false), ("aaa", true)]);
+        // no finished flag and a transcript older than the window: not running
+        let much_later = later + Duration::from_secs(31);
+        assert!(scan(&dir, much_later, 30, &mut cache).iter().all(|a| !a.running));
+    }
+
+    #[test]
+    fn picked_effort_model_wins_over_the_requested_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("subagents");
+        let now = SystemTime::now();
+        agent(&dir, "both", Some(br#"{"agentType":"general-purpose","model":"opus","pickedEffortModel":"claude-sonnet-5-5"}"#), now, 1);
+        agent(&dir, "only", Some(br#"{"agentType":"Explore","model":"haiku"}"#), now, 2);
+        agent(&dir, "junk", Some(br#"{"agentType":"Explore","model":"opus","pickedEffortModel":"mystery-9"}"#), now, 3);
+        agent(&dir, "typed", Some(br#"{"agentType":"Explore","model":"fable","pickedEffortModel":7}"#), now, 4);
+        agent(&dir, "none", Some(br#"{"agentType":"Explore"}"#), now, 5);
+        let out = scan(&dir, now, 30, &mut SubagentCache::default());
+        let fam: Vec<(&str, Option<&str>)> = out.iter().map(|a| (a.id.as_str(), a.model_family.as_deref())).collect();
+        assert_eq!(fam, [("both", Some("sonnet")), ("only", Some("haiku")), ("junk", Some("opus")), ("typed", Some("fable")), ("none", None)]);
     }
 
     #[test]

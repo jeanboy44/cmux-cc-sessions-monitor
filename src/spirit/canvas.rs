@@ -19,7 +19,7 @@ pub(super) const EYE_PRIO: u8 = 3;
 /// the eye rows and never show as a lone dot, so the eyes stay unique).
 const MAX_NON_EYE: f32 = 250.0;
 
-const BRAILLE_BITS: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+pub(super) const BRAILLE_BITS: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
 
 pub(super) fn lerp(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
