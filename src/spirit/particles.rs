@@ -45,7 +45,7 @@ pub(super) struct Sim {
 
 /// Particles alive at `ctx.t` (ticks start at 1; tick 0 has none).
 pub(super) fn simulate(ctx: &Ctx) -> Sim {
-    let window = element::max_life(ctx.elem).max(LOOK_TICKS) + 1;
+    let window = element::max_life_for(ctx.elem, ctx.magic).max(LOOK_TICKS) + 1;
     let start = ctx.t.saturating_sub(window);
     let act = state::activity(ctx.state);
     let running = ctx.state == Status::Running;
@@ -59,12 +59,12 @@ pub(super) fn simulate(ctx: &Ctx) -> Sim {
             p.vy += p.ay;
             p.life = p.life.saturating_sub(1);
         }
-        parts.retain(element::keep);
+        parts.retain(|p| element::keep(p, ctx.right));
         let mut r = Rng::for_tick(ctx.seed, u);
         let cy = CY + state::bob(ctx.state, ctx.seed, super::phase_tick(u));
         element::ambient(ctx.elem, act, cy, ctx.floor, &mut r, &mut parts);
         if running && state::casts_at(ctx.seed, u) {
-            element::cast(ctx.elem, cy, &mut r, &mut parts);
+            element::cast(ctx.elem, ctx.magic, ctx.right, cy, &mut r, &mut parts);
             last_cast = Some(u);
         }
     }

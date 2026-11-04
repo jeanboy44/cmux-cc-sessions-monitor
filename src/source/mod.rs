@@ -1,5 +1,6 @@
 pub mod cmux;
 pub mod claude_sessions;
+pub mod context;
 pub mod hook_sessions;
 
 use serde::de::DeserializeOwned;

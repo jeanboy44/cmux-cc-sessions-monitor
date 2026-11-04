@@ -3,8 +3,8 @@
 //!
 //! Full card: always [`CARD_W`] x [`CARD_H`] = 20 x 9 cells (borders
 //! included; inner 18 x 7; user decision: narrowed from 24 because it looked wide), whatever the spirit size: a spirit band of
-//! [`SCENE_ROWS`] rows (every spirit size is that tall; the spirit is centered
-//! across) and [`INFO_ROWS`] text rows: name, status badge (+ elapsed / last
+//! [`SCENE_ROWS`] rows (every spirit size is that tall; the body sits on the
+//! left and the magic it casts, scaled by context usage, fills the right) and [`INFO_ROWS`] text rows: name, status badge (+ elapsed / last
 //! activity), then one extra: the PR chip, else the branch, else the summary
 //! (rows of disabled or unknown extras collapse). A larger area gets the card
 //! centered across, at its top.
@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::Config;
 use crate::model::{PrState, Session, Status};
 use crate::spirit::theme::Theme;
-use crate::spirit::{self, max_grid_size, Size, SpiritParams};
+use crate::spirit::{self, max_grid_size, Magic, Size, SpiritParams};
 use crate::ui::scene::draw_grid;
 use crate::ui::style::{self, fmt_duration, truncate_to_width};
 
@@ -76,16 +76,24 @@ pub fn reset_spirit_renders() {
     SPIRIT_RENDERS.with(|c| c.set(0));
 }
 
-/// Renders the spirit for `params` centered across the top of `band` and
-/// returns the rect it was drawn into (clipped to the band).
+/// Free columns between the card border and the spirit grid.
+const SPIRIT_LEFT_PAD: u16 = 1;
+const _: () = assert!(
+    spirit::grid_size_for(Size::S, Magic::Big).0 + SPIRIT_LEFT_PAD <= INNER_W,
+    "big magic fits right of the padded body"
+);
+
+/// Renders the spirit for `params` at the top left of `band` (after
+/// [`SPIRIT_LEFT_PAD`]) and returns the rect it was drawn into (clipped to
+/// the band). User decision: the body sits on the left so the cast magic,
+/// which shows the context usage, has the rest of the card to the right
+/// (this replaced the centred body of the first spirit cards).
 fn draw_spirit(buf: &mut Buffer, band: Rect, params: &SpiritParams) -> Rect {
     #[cfg(test)]
     SPIRIT_RENDERS.with(|c| c.set(c.get() + 1));
     let grid = spirit::render(params);
-    // Centre the BODY (not the grid) in the band; the particle side of the
-    // grid is clipped at the band's right edge.
-    let want = band.x as f32 + band.width as f32 / 2.0 - spirit::body_center_x(params.size);
-    let x = (want.round().max(band.x as f32) as u16).min(band.right().saturating_sub(1)).max(band.x);
+    let pad = if band.width > SPIRIT_LEFT_PAD { SPIRIT_LEFT_PAD } else { 0 };
+    let x = band.x + pad;
     let (cols, rows) = (grid.cols.min(band.right().saturating_sub(x)), grid.rows.min(band.height));
     let at = Rect::new(x, band.y, cols, rows);
     draw_grid(buf, at, &grid);
@@ -115,7 +123,15 @@ pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selecte
     f.render_widget(block, rect);
 
     let band = Rect { height: SCENE_ROWS.min(inner.height), ..inner };
-    let params = SpiritParams { theme: theme_for(s, cfg), status: s.status, size: Size::S, tick, seed: seed_for(s), warning: false };
+    let params = SpiritParams {
+        theme: theme_for(s, cfg),
+        status: s.status,
+        size: Size::S,
+        tick,
+        seed: seed_for(s),
+        warning: spirit::warning(s.ctx_percent),
+        magic: spirit::magic_for(s.ctx_percent),
+    };
     draw_spirit(f.buffer_mut(), band, &params);
 
     let text_area = Rect::new(inner.x, inner.y + band.height, inner.width, inner.height - band.height);
@@ -287,6 +303,7 @@ mod tests {
             pr_unavailable: false,
             transcript: None,
             window_id: None,
+            ctx_percent: None,
         }
     }
 
@@ -376,7 +393,7 @@ mod tests {
         assert!(!lit.is_empty());
         let (lo, hi) = (*lit.iter().min().unwrap(), *lit.iter().max().unwrap());
         assert!(lo > 1 && hi < w - 2, "spirit inside the band: {lo}..{hi}");
-        assert!(((lo + hi) / 2).abs_diff(w / 2) <= 3, "roughly centered: {lo}..{hi}");
+        assert!(lo <= 3, "body on the left (user decision): {lo}..{hi}");
         for y in 1..=SCENE_ROWS {
             for x in 1..w - 1 {
                 assert_eq!(buf[(x, y)].bg, ratatui::style::Color::Reset, "({x},{y})");
@@ -385,47 +402,114 @@ mod tests {
     }
 
     #[test]
-    fn every_spirit_size_is_centered_in_the_band() {
+    fn every_spirit_grid_sits_left_inside_the_band() {
+        // user decision: the body sits on the left so the magic has room on the right
         let band = Rect::new(1, 1, CARD_W - 2, SCENE_ROWS);
         for size in Size::ALL {
-            let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick: 0, seed: 1, warning: false };
-            let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
-            let at = draw_spirit(&mut buf, band, &params);
-            let (w, h) = spirit::grid_size(size);
-            assert!(at.width <= w && at.height == h, "{size:?}");
-            assert!(at.x >= band.x && at.right() <= band.right(), "{size:?}: grid inside the band");
-            for y in 0..CARD_H {
-                for x in 0..CARD_W {
-                    if !at.contains((x, y).into()) {
-                        assert_eq!(buf[(x, y)].symbol(), " ", "{size:?}: ({x},{y}) outside the spirit rect");
+            for magic in Magic::ALL {
+                for tick in [0, 30, 61] {
+                    let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick, seed: 1, warning: false, magic };
+                    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
+                    let at = draw_spirit(&mut buf, band, &params);
+                    let (w, h) = spirit::grid_size_for(size, magic);
+                    assert!(at.width <= w && at.height == h, "{size:?} {magic:?}");
+                    assert!(at.x >= band.x && at.right() <= band.right(), "{size:?} {magic:?}: grid inside the band (clipped)");
+                    assert!(at.x <= band.x + SPIRIT_LEFT_PAD, "{size:?} {magic:?}: grid at the left");
+                    for y in 0..CARD_H {
+                        for x in 0..CARD_W {
+                            if !at.contains((x, y).into()) {
+                                assert_eq!(buf[(x, y)].symbol(), " ", "{size:?} {magic:?}: ({x},{y}) outside the spirit rect");
+                            }
+                        }
                     }
                 }
             }
         }
+        // a band too narrow for the pad still draws inside it
+        let narrow = Rect::new(1, 1, 5, SCENE_ROWS);
+        let params = SpiritParams { theme: Theme::Fire, status: Status::Running, size: Size::S, tick: 30, seed: 1, warning: false, magic: Magic::Big };
+        let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
+        let at = draw_spirit(&mut buf, narrow, &params);
+        assert!(at.x >= narrow.x && at.right() <= narrow.right());
     }
 
     #[test]
-    fn spirit_body_is_centered_in_the_inner_area() {
+    fn spirit_body_sits_left_in_the_inner_area() {
         let band = Rect::new(1, 1, CARD_W - 2, SCENE_ROWS);
-        let center = band.x as f32 + band.width as f32 / 2.0;
         for theme in [Theme::Fire, Theme::Water, Theme::Ice, Theme::Lightning] {
             for status in [Status::Idle, Status::Running] {
-                for size in Size::ALL {
-                    let params = SpiritParams { theme, status, size, tick: 3, seed: 1, warning: false };
+                for magic in Magic::ALL {
+                    let params = SpiritParams { theme, status, size: Size::S, tick: 3, seed: 1, warning: false, magic };
                     let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
                     draw_spirit(&mut buf, band, &params);
                     let lo = (0..CARD_W)
                         .find(|&x| (0..CARD_H).any(|y| buf[(x, y)].symbol().chars().any(is_braille)))
                         .expect("painted");
-                    // body radius in sub-pixels: 5.5 / 6 / 6.5; the left edge cell holds the body's left edge
-                    let r = match size {
-                        Size::S => 5.5,
-                        Size::M => 6.0,
-                        Size::L => 6.5,
-                    };
-                    let body_c = lo as f32 + 0.5 + r / 2.0;
-                    assert!((body_c - center).abs() <= 1.0, "{theme:?} {status:?} {size:?}: body centre {body_c} vs {center}");
+                    // about one free column between the border and the body
+                    assert!((band.x + 1..=band.x + 2).contains(&lo), "{theme:?} {status:?} {magic:?}: body left edge at {lo}");
+                    let body_c = band.x as f32 + SPIRIT_LEFT_PAD as f32 + spirit::body_center_x(Size::S);
+                    assert!(body_c < band.x as f32 + band.width as f32 / 2.0 - 3.0, "body left of centre: {body_c}");
                 }
+            }
+        }
+    }
+
+    /// Columns of the spirit band that hold a braille glyph at `tick`.
+    fn lit_cols(s: &Session, tick: u64) -> std::collections::BTreeSet<u16> {
+        let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, &Config::default(), false, tick));
+        (1..=SCENE_ROWS)
+            .flat_map(|y| (1..CARD_W - 1).map(move |x| (x, y)))
+            .filter(|&p| buf[p].symbol().chars().any(is_braille))
+            .map(|(x, _)| x)
+            .collect()
+    }
+
+    #[test]
+    fn context_usage_scales_the_magic_not_the_body() {
+        let with = |st: Status, pct: Option<f32>| -> Session {
+            let mut s = session("proj-a", st);
+            s.ctx_percent = pct;
+            s
+        };
+        // Idle casts nothing: the spirit is the same at every ctx level
+        let idle: Vec<_> = [None, Some(10.0), Some(50.0), Some(80.0)].into_iter().map(|p| lit_cols(&with(Status::Idle, p), 0)).collect();
+        assert!(idle.windows(2).all(|w| w[0] == w[1]), "body unchanged: {idle:?}");
+        // Running: the magic reaches farther as ctx grows; unknown ctx = normal magic
+        let reach = |pct: Option<f32>| -> u16 { (0..120).filter_map(|t| lit_cols(&with(Status::Running, pct), t).last().copied()).max().unwrap() };
+        let (none, low, mid, high) = (reach(None), reach(Some(10.0)), reach(Some(50.0)), reach(Some(80.0)));
+        assert_eq!(none, mid, "unknown ctx casts normal magic");
+        assert!(low < mid && mid < high, "magic grows with ctx: {low} {mid} {high}");
+        // every level stays inside the inner area
+        for pct in [10.0, 50.0, 80.0, 95.0] {
+            for t in 0..120 {
+                let cols = lit_cols(&with(Status::Running, Some(pct)), t);
+                assert!(cols.iter().all(|&x| (1..CARD_W - 1).contains(&x)), "{pct} {t}: {cols:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn context_over_90_flickers_red_between_ticks() {
+        let fgs = |pct: f32, tick: u64| -> Vec<Color> {
+            let mut s = session("proj-a", Status::Idle);
+            s.ctx_percent = Some(pct);
+            let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, tick));
+            (1..=SCENE_ROWS).flat_map(|y| (1..CARD_W - 1).map(move |x| (x, y))).map(|p| buf[p].fg).collect()
+        };
+        let half = spirit::WARN_HALF_PERIOD;
+        // same size step (L), ticks in the on and off phases of the flicker
+        assert_ne!(fgs(95.0, 0), fgs(80.0, 0), "warning tints the on phase");
+        assert_eq!(fgs(95.0, half), fgs(80.0, half), "off phase looks normal");
+        assert_ne!(fgs(95.0, 0), fgs(95.0, half), "flicker differs between ticks");
+    }
+
+    #[test]
+    fn odd_context_values_never_panic() {
+        for pct in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.0, 1e30, f32::MIN_POSITIVE] {
+            let mut s = session("proj-a", Status::Running);
+            s.ctx_percent = Some(pct);
+            for (w, h) in [(CARD_W, CARD_H), (60, 20), (5, 3), (0, 0)] {
+                let _ = draw(w.max(1), h.max(1), |f| render_card(f, Rect::new(0, 0, w, h), &s, &Config::default(), true, 3));
             }
         }
     }

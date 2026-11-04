@@ -27,6 +27,10 @@ pub struct Config {
     pub done_retention_minutes: u64,
     /// Per-card theme overrides, keyed by the session's cwd (its id when the cwd is empty).
     pub card_themes: BTreeMap<String, Theme>,
+    /// Context window size used when usage comes from the transcript.
+    pub context_limit_tokens: u64,
+    /// The statusline context file is trusted for this long after it was written.
+    pub ctx_fresh_seconds: u64,
 }
 
 impl Default for Extras {
@@ -50,6 +54,8 @@ impl Default for Config {
             guess_worktree: true,
             done_retention_minutes: 10,
             card_themes: BTreeMap::new(),
+            context_limit_tokens: 200_000,
+            ctx_fresh_seconds: 300,
         }
     }
 }
@@ -151,6 +157,21 @@ mod tests {
         assert_eq!(c.pr_poll_seconds, 45);
         assert_eq!(c.done_retention_minutes, 10);
         assert!(c.guess_worktree);
+        assert_eq!(c.context_limit_tokens, 200_000);
+        assert_eq!(c.ctx_fresh_seconds, 300);
+    }
+
+    #[test]
+    fn old_config_without_context_keys_loads_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"water\"\npr_poll_seconds = 30\nsome_future_key = 1\n").unwrap();
+        let (c, err) = Config::load_checked(&path);
+        assert_eq!(err, None);
+        assert_eq!((c.context_limit_tokens, c.ctx_fresh_seconds), (200_000, 300));
+        std::fs::write(&path, "context_limit_tokens = 1000000\nctx_fresh_seconds = 60\n").unwrap();
+        let c = Config::load(&path);
+        assert_eq!((c.context_limit_tokens, c.ctx_fresh_seconds), (1_000_000, 60));
     }
 
     #[test]

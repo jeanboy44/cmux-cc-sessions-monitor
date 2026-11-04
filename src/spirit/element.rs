@@ -9,7 +9,7 @@ use super::noise::{hf, seed_phase, slot, Rng};
 use super::particles::Particle;
 use super::state::twinkle;
 use super::theme::Theme;
-use super::{Ctx, BASE_R, CX, DH, DW};
+use super::{Ctx, Magic, BASE_R, CX, DH, DW};
 
 /// Colour ramp: rim -> dark -> mid -> light.
 pub(super) fn ramp(e: Theme) -> [Rgb; 4] {
@@ -160,6 +160,51 @@ pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
     }
 }
 
+/// How a magic level scales a cast. `Normal` is exactly 1 everywhere, so the
+/// approved look (and its random stream) is unchanged.
+#[derive(Clone, Copy)]
+pub(super) struct Scale {
+    /// particles per burst
+    pub count: f32,
+    /// particle life (so: range)
+    pub life: f32,
+    /// launch speed (so: range)
+    pub speed: f32,
+    /// particle size: -1 = always 1 dot block, 0 = as designed, 1 = always big
+    pub grow: i8,
+}
+
+pub(super) fn scale(m: Magic) -> Scale {
+    match m {
+        Magic::Small => Scale { count: 0.5, life: 0.5, speed: 0.8, grow: -1 },
+        Magic::Normal => Scale { count: 1.0, life: 1.0, speed: 1.0, grow: 0 },
+        Magic::Big => Scale { count: 1.6, life: 1.4, speed: 1.3, grow: 1 },
+    }
+}
+
+impl Scale {
+    fn n(self, n: u32) -> u32 {
+        ((n as f32 * self.count).round() as u32).max(1)
+    }
+
+    fn life(self, l: u32) -> u32 {
+        ((l as f32 * self.life).round() as u32).max(1)
+    }
+
+    fn size(self, s: u32) -> u32 {
+        match self.grow {
+            -1 => 1,
+            1 => 2,
+            _ => s,
+        }
+    }
+}
+
+/// Longest particle life of an element at a magic level, in ticks.
+pub(super) fn max_life_for(e: Theme, m: Magic) -> u64 {
+    (max_life(e) as f32 * scale(m).life.max(1.0)).ceil() as u64
+}
+
 /// Longest particle life of an element, in ticks.
 pub(super) fn max_life(e: Theme) -> u64 {
     match e {
@@ -226,58 +271,69 @@ pub(super) fn ambient(e: Theme, act: f32, cy: f32, floor: f32, r: &mut Rng, part
     }
 }
 
-/// RUNNING: a burst of element particles shot to the right.
-pub(super) fn cast(e: Theme, cy: f32, r: &mut Rng, parts: &mut Vec<Particle>) {
+/// RUNNING: a burst of element particles shot to the right, scaled by the
+/// magic level (`right` is the canvas edge in design units).
+pub(super) fn cast(e: Theme, m: Magic, right: f32, cy: f32, r: &mut Rng, parts: &mut Vec<Particle>) {
+    let k = scale(m);
     match e {
         Theme::Fire => {
-            for _ in 0..r.int(3, 5) {
+            for _ in 0..k.n(r.int(3, 5)) {
                 let y = cy + r.range(-2.5, 1.5);
-                let (vx, vy) = (r.range(0.5, 0.9), r.range(-0.15, 0.03));
-                let life = r.int(12, 20);
+                let (vx, vy) = (r.range(0.5, 0.9) * k.speed, r.range(-0.15, 0.03));
+                let life = k.life(r.int(12, 20));
                 let mut p = Particle::new(CX + BASE_R - 1.0, y, vx, vy, life, [255., 235., 120.], [185., 30., 10.]);
-                p.size = 2;
+                p.size = k.size(2);
                 parts.push(p);
             }
         }
         Theme::Water => {
-            for _ in 0..r.int(4, 6) {
+            for _ in 0..k.n(r.int(4, 6)) {
                 let y = cy + r.range(-2.0, 1.0);
-                let (vx, vy) = (r.range(0.6, 1.0), r.range(-0.35, -0.1));
-                let mut p = Particle::new(CX + BASE_R - 0.5, y, vx, vy, 20, [175., 228., 255.], [40., 110., 220.]);
-                p.ay = 0.035;
-                p.size = if r.chance(0.3) { 2 } else { 1 };
+                let (vx, vy) = (r.range(0.6, 1.0) * k.speed, r.range(-0.35, -0.1));
+                let mut p = Particle::new(CX + BASE_R - 0.5, y, vx, vy, k.life(20), [175., 228., 255.], [40., 110., 220.]);
+                // keep the arc's height: gravity scales with the life change
+                p.ay = 0.035 / (k.life * k.life);
+                p.vy /= k.life;
+                p.size = k.size(if r.chance(0.3) { 2 } else { 1 });
                 parts.push(p);
             }
         }
         Theme::Ice => {
-            for _ in 0..r.int(3, 5) {
+            for _ in 0..k.n(r.int(3, 5)) {
                 let y = cy + r.range(-3.0, 2.0);
-                let (vx, vy) = (r.range(0.9, 1.3), r.range(-0.05, 0.05));
-                let mut p = Particle::new(CX + BASE_R, y, vx, vy, 18, [245., 255., 255.], [110., 190., 230.]);
+                let (vx, vy) = (r.range(0.9, 1.3) * k.speed, r.range(-0.05, 0.05));
+                let mut p = Particle::new(CX + BASE_R, y, vx, vy, k.life(18), [245., 255., 255.], [110., 190., 230.]);
                 p.ax = -0.01;
-                p.wide = true;
+                p.wide = k.grow >= 0;
+                p.size = k.size(1);
                 parts.push(p);
             }
         }
         Theme::Lightning => {
             let mut y = cy;
             let mut x = CX + BASE_R - 0.5;
-            while x < DW - 1.0 {
+            // the bolt's length is the magic's range
+            let end = match m {
+                Magic::Small => CX + BASE_R + 6.0,
+                _ => right - 1.0,
+            };
+            while x < end {
                 y = (y + r.int(0, 2) as f32 - 1.0).clamp(cy - 6.0, cy + 6.0);
-                let mut p = Particle::new(x, y, 0.0, 0.0, 3, [255., 255., 240.], [255., 215., 60.]);
+                let mut p = Particle::new(x, y, 0.0, 0.0, k.life(3), [255., 255., 240.], [255., 215., 60.]);
                 p.prio = 2;
+                p.wide = k.grow > 0;
                 parts.push(p);
                 x += 1.0;
             }
-            for _ in 0..3 {
-                let (vx, vy) = (r.range(-0.4, 0.2), r.range(-0.4, 0.4));
-                parts.push(Particle::new(x - 1.0, y, vx, vy, 4, [255., 255., 220.], [255., 190., 30.]));
+            for _ in 0..k.n(3) {
+                let (vx, vy) = (r.range(-0.4, 0.2) * k.speed, r.range(-0.4, 0.4) * k.speed);
+                parts.push(Particle::new(x - 1.0, y, vx, vy, k.life(4), [255., 255., 220.], [255., 190., 30.]));
             }
         }
     }
 }
 
 /// Whether a particle is still alive and on the design canvas.
-pub(super) fn keep(p: &Particle) -> bool {
-    p.life > 0 && p.x > -2.0 && p.x < DW + 1.0 && p.y > -3.0 && p.y < DH + 1.0 && p.y < p.floor
+pub(super) fn keep(p: &Particle, right: f32) -> bool {
+    p.life > 0 && p.x > -2.0 && p.x < right + 1.0 && p.y > -3.0 && p.y < DH + 1.0 && p.y < p.floor
 }

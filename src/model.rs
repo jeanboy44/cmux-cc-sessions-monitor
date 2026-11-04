@@ -49,4 +49,6 @@ pub struct Session {
     /// cmux window (uppercase id) the session's tab is in, from `cmux tree`;
     /// `None` when unknown.
     pub window_id: Option<String>,
+    /// Context-window usage in percent (0..=100), `None` when unknown.
+    pub ctx_percent: Option<f32>,
 }

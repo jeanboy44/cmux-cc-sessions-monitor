@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,7 @@ use crate::merge::{merge_sessions, select_refs};
 use crate::model::{Session, Status};
 use crate::pr::{pr_note, PrCache, PrLookup};
 use crate::source::claude_sessions::read_claude_sessions;
+use crate::source::context::{context_percent, default_ctx_dir, safe_id, TranscriptCache};
 use crate::source::cmux::{Cmux, CmuxCli, CmuxSessionRef, SCREEN_LINES};
 use crate::source::hook_sessions::read_hook_sessions;
 use crate::status::resolve_status;
@@ -36,7 +37,7 @@ const STOP_SLICE: Duration = Duration::from_millis(50);
 pub type PrTargets = Arc<Mutex<Vec<(PathBuf, String)>>>;
 
 /// One refresh result. Besides the sessions it carries what the next refresh
-/// needs: the last good cmux list.
+/// needs: the last good cmux list and the transcript usage cache.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub sessions: Vec<Session>,
@@ -51,6 +52,8 @@ pub struct Snapshot {
     pub current_window: Option<String>,
     pub(crate) cmux_refs: Vec<CmuxSessionRef>,
     pub(crate) seq: u64,
+    /// Context usage read from transcripts, reused while a file is unchanged.
+    pub(crate) transcripts: TranscriptCache,
 }
 
 impl Snapshot {
@@ -88,6 +91,10 @@ impl Snapshot {
 pub struct RefreshDeps<'a> {
     pub claude_dir: PathBuf,
     pub hook_path: PathBuf,
+    /// Statusline context files (`<session_id>.json`).
+    pub ctx_dir: PathBuf,
+    /// Claude transcripts (`<encoded cwd>/<session_id>.jsonl`).
+    pub projects_dir: PathBuf,
     pub cmux: &'a dyn Cmux,
     pub config: Config,
     pub pr_cache: Option<&'a PrCache>,
@@ -100,6 +107,25 @@ pub struct RefreshDeps<'a> {
 
 pub fn default_claude_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".claude").join("sessions")
+}
+
+pub fn default_projects_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_default().join(".claude").join("projects")
+}
+
+/// The session's transcript: the hook's `transcriptPath`, else
+/// `<projects_dir>/<cwd with every non-alphanumeric char as '-'>/<id>.jsonl`
+/// (Claude Code's layout; no directory scan, so it is cheap every round).
+pub(crate) fn transcript_for(s: &Session, projects_dir: &Path) -> Option<PathBuf> {
+    if let Some(t) = &s.transcript {
+        return Some(t.clone());
+    }
+    let cwd = s.cwd.to_string_lossy();
+    if cwd.is_empty() || !safe_id(&s.id) {
+        return None;
+    }
+    let encoded: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    Some(projects_dir.join(encoded).join(format!("{}.jsonl", s.id)))
 }
 
 pub fn default_hook_path() -> PathBuf {
@@ -183,7 +209,25 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
             note = pr_note(&reasons, pending);
         }
     }
-    Snapshot { sessions, message, pr_note: note, window_order, current_window, cmux_refs, seq }
+    // Context usage: a small file per session, else a cached transcript tail.
+    let mut transcripts = prev.transcripts.clone();
+    let max_age = Duration::from_secs(deps.config.ctx_fresh_seconds);
+    let mut used = Vec::new();
+    for s in sessions.iter_mut() {
+        let t = transcript_for(s, &deps.projects_dir);
+        s.ctx_percent = context_percent(
+            &deps.ctx_dir,
+            &s.id,
+            t.as_deref(),
+            deps.config.context_limit_tokens,
+            max_age,
+            deps.now,
+            &mut transcripts,
+        );
+        used.extend(t);
+    }
+    transcripts.retain(&used);
+    Snapshot { sessions, message, pr_note: note, window_order, current_window, cmux_refs, seq, transcripts }
 }
 
 /// Starts the refresh thread: a snapshot every [`REFRESH_INTERVAL`] (first one
@@ -208,6 +252,8 @@ pub fn spawn_refresh(
                 let deps = RefreshDeps {
                     claude_dir: default_claude_dir(),
                     hook_path: default_hook_path(),
+                    ctx_dir: default_ctx_dir(),
+                    projects_dir: default_projects_dir(),
                     cmux: &cmux,
                     config: cfg,
                     pr_cache: pr.as_ref().map(|(c, _)| c.as_ref()),
@@ -310,6 +356,8 @@ mod tests {
         RefreshDeps {
             claude_dir: dir.join("sessions"),
             hook_path: dir.join("hooks.json"),
+            ctx_dir: dir.join("ctx"),
+            projects_dir: dir.join("projects"),
             cmux,
             config: Config::default(),
             pr_cache: None,
@@ -540,6 +588,54 @@ mod tests {
         let snap = build_snapshot(&d, &Snapshot::default());
         assert!(snap.sessions.iter().all(|s| s.branch.is_none()));
         assert!(snap.pr_targets().is_empty());
+    }
+
+    #[test]
+    fn build_snapshot_fills_context_usage() {
+        let dir = setup();
+        for (pid, id) in [(11, "a"), (12, "b"), (13, "c")] {
+            write_claude(&dir.path().join("sessions"), pid, id, "busy");
+        }
+        let cmux = FakeCmux::new(vec![cref("a", true), cref("b", true), cref("c", true)]);
+        let d = deps(dir.path(), &cmux);
+        // a: fresh statusline file; b: transcript under the projects dir (encoded cwd); c: nothing
+        std::fs::create_dir_all(&d.ctx_dir).unwrap();
+        std::fs::write(d.ctx_dir.join("a.json"), r#"{"session_id":"a","used_percentage":72}"#).unwrap();
+        let proj = d.projects_dir.join("-home-user-b");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("b.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":99990,\"cache_creation_input_tokens\":0}}}\n",
+        )
+        .unwrap();
+        let snap = build_snapshot(&d, &Snapshot::default());
+        let pct = |id: &str| snap.sessions.iter().find(|s| s.id == id).unwrap().ctx_percent;
+        assert_eq!(pct("a"), Some(72.0));
+        assert_eq!(pct("b"), Some(50.0));
+        assert_eq!(pct("c"), None);
+        // the transcript cache is carried to the next round and pruned to live sessions
+        assert_eq!(snap.transcripts.len(), 1);
+        let again = build_snapshot(&d, &snap);
+        assert_eq!(again.sessions.iter().find(|s| s.id == "b").unwrap().ctx_percent, Some(50.0));
+    }
+
+    #[test]
+    fn transcript_path_falls_back_to_encoded_cwd() {
+        let projects = Path::new("/home/user/.claude/projects");
+        let mut s = crate::app::fake_session("sess-1", Status::Running);
+        s.cwd = PathBuf::from("/home/user/my.proj_x");
+        assert_eq!(
+            transcript_for(&s, projects),
+            Some(projects.join("-home-user-my-proj-x").join("sess-1.jsonl"))
+        );
+        s.cwd = PathBuf::new();
+        assert_eq!(transcript_for(&s, projects), None, "no cwd, no hook path");
+        s.transcript = Some(PathBuf::from("/home/user/t.jsonl"));
+        assert_eq!(transcript_for(&s, projects), Some(PathBuf::from("/home/user/t.jsonl")), "hook path wins");
+        s.transcript = None;
+        s.cwd = PathBuf::from("/home/user/p");
+        s.id = "../evil".into();
+        assert_eq!(transcript_for(&s, projects), None, "unsafe id");
     }
 
     #[test]

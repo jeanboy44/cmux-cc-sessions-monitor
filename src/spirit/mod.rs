@@ -48,7 +48,51 @@ fn phase_tick(t: u64) -> f32 {
 }
 
 /// Ticks per half period of the red warning flicker (about 0.5 s at 15 fps).
-const WARN_HALF_PERIOD: u64 = 8;
+pub const WARN_HALF_PERIOD: u64 = 8;
+
+/// Context usage (percent) at which the magic grows from small to normal,
+/// and from normal to big.
+const MAGIC_NORMAL_AT: f32 = 30.0;
+const MAGIC_BIG_AT: f32 = 70.0;
+/// Context usage above which the body flickers red.
+const WARNING_ABOVE: f32 = 90.0;
+/// Canvas width (sub-pixels) of a spirit casting big magic: 17 cells, the
+/// card's inner width minus a one-column left pad.
+const BIG_MAGIC_W: usize = 34;
+
+/// How strong the cast magic (RUNNING particles) is; driven by context usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Magic {
+    /// few, tiny, short-range particles
+    Small,
+    /// the approved reference look
+    #[default]
+    Normal,
+    /// more, larger particles that fly farther (on a wider canvas)
+    Big,
+}
+
+impl Magic {
+    #[cfg(test)]
+    pub const ALL: [Magic; 3] = [Magic::Small, Magic::Normal, Magic::Big];
+}
+
+/// Magic level for a context usage: < 30 % small, 30..70 % normal,
+/// >= 70 % big. Unknown or invalid (NaN, negative) usage casts normal magic.
+pub fn magic_for(ctx_percent: Option<f32>) -> Magic {
+    match ctx_percent {
+        Some(p) if p.is_nan() || p < 0.0 => Magic::Normal,
+        Some(p) if p >= MAGIC_BIG_AT => Magic::Big,
+        Some(p) if p >= MAGIC_NORMAL_AT => Magic::Normal,
+        Some(_) => Magic::Small,
+        None => Magic::Normal,
+    }
+}
+
+/// Whether the context is nearly full (> 90 %): the body flickers red.
+pub fn warning(ctx_percent: Option<f32>) -> bool {
+    ctx_percent.is_some_and(|p| p > WARNING_ABOVE)
+}
 
 /// Spirit size step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +124,7 @@ impl Size {
 
 /// Horizontal centre of the body in grid columns (the right side of the grid
 /// is reserved for cast particles, so this sits left of the grid centre).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn body_center_x(size: Size) -> f32 {
     size.geom().rcx / 2.0
 }
@@ -88,6 +133,21 @@ pub fn body_center_x(size: Size) -> f32 {
 pub const fn grid_size(size: Size) -> (u16, u16) {
     let g = size.geom();
     ((g.w / 2) as u16, (g.h / 4) as u16)
+}
+
+/// Grid size of a spirit of `size` casting `magic`: big magic widens the grid
+/// to the right (the body stays where it is).
+pub const fn grid_size_for(size: Size, magic: Magic) -> (u16, u16) {
+    let g = geom_for(size, magic);
+    ((g.w / 2) as u16, (g.h / 4) as u16)
+}
+
+const fn geom_for(size: Size, magic: Magic) -> Geom {
+    let mut g = size.geom();
+    if matches!(magic, Magic::Big) && g.w < BIG_MAGIC_W {
+        g.w = BIG_MAGIC_W;
+    }
+    g
 }
 
 /// Grid size of the largest spirit (cards reserve this much room).
@@ -117,6 +177,8 @@ pub struct SpiritParams {
     pub seed: u32,
     /// context nearly full: the body flickers red
     pub warning: bool,
+    /// strength of the cast magic (context usage)
+    pub magic: Magic,
 }
 
 /// One terminal cell: a braille (or mark) glyph and its foreground colour.
@@ -157,6 +219,9 @@ struct Ctx {
     small: bool,
     /// water ripple line in design units, inside this size's canvas
     floor: f32,
+    magic: Magic,
+    /// right edge of the canvas in design units (particles die past it)
+    right: f32,
 }
 
 /// The ripple line for a canvas: [`FLOOR_Y`], or the last sub-pixel row when
@@ -167,6 +232,7 @@ fn floor_y(g: &Geom) -> f32 {
 
 impl Ctx {
     fn new(p: &SpiritParams) -> Self {
+        let g = geom_for(p.size, p.magic);
         Ctx {
             elem: p.theme,
             state: p.status,
@@ -174,15 +240,18 @@ impl Ctx {
             t: p.tick,
             tf: phase_tick(p.tick),
             sp: state::speed(p.status),
-            small: p.size.geom().small,
-            floor: floor_y(&p.size.geom()),
+            small: g.small,
+            floor: floor_y(&g),
+            magic: p.magic,
+            // the reference design width (unchanged look), or the wider big-magic canvas
+            right: if matches!(p.magic, Magic::Big) { DW.max(CX + (g.w as f32 - g.rcx) / g.ppu) } else { DW },
         }
     }
 }
 
 /// Renders one frame of a spirit.
 pub fn render(p: &SpiritParams) -> SpiritGrid {
-    let g = p.size.geom();
+    let g = geom_for(p.size, p.magic);
     let ctx = Ctx::new(p);
     let sim = particles::simulate(&ctx);
     let pulse = state::pulse(ctx.state, ctx.tf);
@@ -215,7 +284,7 @@ mod tests {
     const WHITE: Option<(u8, u8, u8)> = Some((255, 255, 255));
 
     fn params(theme: Theme, status: Status, size: Size, tick: u64, seed: u32) -> SpiritParams {
-        SpiritParams { theme, status, size, tick, seed, warning: false }
+        SpiritParams { theme, status, size, tick, seed, warning: false, magic: Magic::Normal }
     }
 
     fn cell(g: &SpiritGrid, col: u16, row: u16) -> &Cell {
@@ -444,6 +513,108 @@ mod tests {
     }
 
     #[test]
+    fn magic_for_thresholds() {
+        let cases: [(Option<f32>, Magic); 13] = [
+            (None, Magic::Normal),
+            (Some(f32::NAN), Magic::Normal),
+            (Some(-5.0), Magic::Normal),
+            (Some(f32::NEG_INFINITY), Magic::Normal),
+            (Some(0.0), Magic::Small),
+            (Some(29.9), Magic::Small),
+            (Some(30.0), Magic::Normal),
+            (Some(69.9), Magic::Normal),
+            (Some(70.0), Magic::Big),
+            (Some(90.1), Magic::Big),
+            (Some(100.0), Magic::Big),
+            (Some(250.0), Magic::Big),
+            (Some(f32::INFINITY), Magic::Big),
+        ];
+        for (pct, want) in cases {
+            assert_eq!(magic_for(pct), want, "{pct:?}");
+        }
+        assert_eq!(Magic::default(), Magic::Normal);
+    }
+
+    /// Braille dots right of the body's right edge, summed over a cast cycle.
+    fn magic_stats(theme: Theme, magic: Magic) -> (u32, u16) {
+        let (mut dots, mut reach) = (0u32, 0u16);
+        let body_right = (body_center_x(Size::S) + 3.0).ceil() as u16;
+        for t in 0..120 {
+            let g = render(&SpiritParams { magic, ..params(theme, Status::Running, Size::S, t, 4) });
+            for row in 0..g.rows {
+                for col in body_right..g.cols {
+                    let c = cell(&g, col, row).ch;
+                    if ('\u{2801}'..='\u{28ff}').contains(&c) {
+                        dots += (c as u32 - 0x2800).count_ones();
+                        reach = reach.max(col);
+                    }
+                }
+            }
+        }
+        (dots, reach)
+    }
+
+    #[test]
+    fn magic_scales_the_cast_particles() {
+        for theme in Theme::ALL {
+            let (s_dots, s_reach) = magic_stats(theme, Magic::Small);
+            let (n_dots, n_reach) = magic_stats(theme, Magic::Normal);
+            let (b_dots, b_reach) = magic_stats(theme, Magic::Big);
+            assert!(s_dots < n_dots && n_dots < b_dots, "{theme:?}: dots {s_dots} < {n_dots} < {b_dots}");
+            assert!(s_reach < n_reach && n_reach < b_reach, "{theme:?}: reach {s_reach} < {n_reach} < {b_reach}");
+        }
+    }
+
+    #[test]
+    fn magic_grid_widths() {
+        assert_eq!(grid_size_for(Size::S, Magic::Small), (11, 4));
+        assert_eq!(grid_size_for(Size::S, Magic::Normal), (11, 4), "approved look");
+        assert_eq!(grid_size_for(Size::S, Magic::Big), (17, 4), "room to cast farther");
+        assert_eq!(grid_size_for(Size::L, Magic::Big), (17, 4));
+        for theme in Theme::ALL {
+            for magic in Magic::ALL {
+                let g = render(&SpiritParams { magic, ..params(theme, Status::Running, Size::S, 30, 1) });
+                assert_eq!((g.cols, g.rows), grid_size_for(Size::S, magic));
+            }
+        }
+    }
+
+    #[test]
+    fn magic_leaves_body_and_eyes_unchanged() {
+        let left = |g: &SpiritGrid| -> Vec<(u16, u16, char)> { chars(g).into_iter().filter(|c| c.0 < 11).collect() };
+        for theme in Theme::ALL {
+            for status in STATUSES {
+                for t in [0, 5, 61] {
+                    let base = render(&params(theme, status, Size::S, t, 6));
+                    for magic in Magic::ALL {
+                        let g = render(&SpiritParams { magic, ..params(theme, status, Size::S, t, 6) });
+                        assert_eq!(white_cells(&g), white_cells(&base), "{theme:?} {status:?} {magic:?} {t}: eyes");
+                        if status != Status::Running {
+                            assert_eq!(left(&g), left(&base), "{theme:?} {status:?} {magic:?} {t}: no cast, same spirit");
+                        }
+                    }
+                }
+            }
+            // a running spirit before its first cast is the same at every level
+            for magic in Magic::ALL {
+                let g = render(&SpiritParams { magic, ..params(theme, Status::Running, Size::S, 0, 6) });
+                assert_eq!(left(&g), left(&render(&params(theme, Status::Running, Size::S, 0, 6))), "{theme:?} {magic:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn warning_only_above_90() {
+        assert!(!warning(None));
+        assert!(!warning(Some(f32::NAN)));
+        assert!(!warning(Some(50.0)));
+        assert!(!warning(Some(90.0)));
+        assert!(warning(Some(90.1)));
+        assert!(warning(Some(100.0)));
+        assert!(!warning(Some(-95.0)));
+    }
+
+    #[test]
     fn warning_flickers_the_body_red() {
         for theme in Theme::ALL {
             let calm = render(&params(theme, Status::Running, Size::S, 0, 2));
@@ -573,6 +744,29 @@ mod tests {
                 println!("{line}");
             }
             println!();
+        }
+    }
+
+    /// Prints a running spirit of every element at each magic level
+    /// (`cargo test dump_magic -- --ignored --nocapture`, `SPIRIT_TICK=…`).
+    #[test]
+    #[ignore]
+    fn dump_magic() {
+        let tick = std::env::var("SPIRIT_TICK").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+        for magic in Magic::ALL {
+            println!("{magic:?}");
+            let grids: Vec<SpiritGrid> =
+                Theme::ALL.iter().map(|&theme| render(&SpiritParams { magic, ..params(theme, Status::Running, Size::S, tick, 4) })).collect();
+            for row in 0..grids[0].rows {
+                let mut line = String::new();
+                for g in &grids {
+                    for col in 0..g.cols {
+                        line.push(cell(g, col, row).ch);
+                    }
+                    line += &" ".repeat(19 - usize::from(g.cols));
+                }
+                println!("{line}");
+            }
         }
     }
 }
