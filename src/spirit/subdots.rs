@@ -2,23 +2,25 @@
 //! ONE row on the band's bottom row (never the eye row), starting at the
 //! body's lower right and growing to the right: bead 1 nearest the body.
 //!
-//! Each bead is EXACTLY ONE braille cell holding the same filled 2 x 3
-//! blob (`⠿`, or `⣶` one sub-pixel lower while it bobs), and two beads are
-//! separated by exactly one empty cell, so N beads span 2N-1 cells and a
-//! count is never ambiguous (two beads are two separate cells, never one
-//! wider shape). The cells between the body and the first bead and after
-//! the last bead are kept empty too.
+//! Each bead is a plus: a 3 x 3 sub-pixel block minus its four corners,
+//! spanning TWO braille cells (`⠐⠗`: the left arm in the left cell's right
+//! column, the rest in the right cell's left column plus the right arm).
+//! Both cells take the same colour. Two beads are separated by exactly one
+//! empty cell, so N beads span 3N-1 cells and a count is never ambiguous.
+//! The cells between the body and the first bead and after the last bead
+//! are kept empty too.
 //!
 //! Colour: the subagent's element (bright base tone with its lighter core
 //! blended in, as a braille cell has one colour), never white; all beads
 //! share the same brightness: in sync pulsing while the parent runs, dimmed
 //! like the body when it is idle or unknown, gone when it is done. The bob
-//! only moves a bead one sub-pixel down inside its own cell (never x).
+//! only moves the whole plus one sub-pixel down inside its cells (`⠠⡦`,
+//! rows 1..3; never x), so it stays a whole plus.
 //!
 //! The beads are painted on the finished cell grid, so they always win their
 //! cells (and the gap cells) over the body, the water ripple and the magic.
-//! At most [`MAX_DOTS`], and only as many as fit in the card's columns
-//! ([`fit`]); the text counts the rest.
+//! At most [`MAX_DOTS`], and only as many whole beads as fit in the card's
+//! columns ([`fit`]); the text counts the rest.
 
 use super::canvas::{lerp, mul, Geom, Rgb, BRAILLE_BITS};
 use super::theme::Theme;
@@ -26,13 +28,16 @@ use super::{element, state, Cell, Ctx, SpiritGrid, BASE_R};
 use crate::model::Status;
 
 /// At most this many dots; further running subagents are only counted in the text.
-pub const MAX_DOTS: usize = 5;
-/// Columns from one bead to the next: the bead cell and one empty cell.
-const PITCH: i32 = 2;
+pub const MAX_DOTS: usize = 4;
+/// Cells of one bead.
+const WIDTH: i32 = 2;
+/// Columns from one bead to the next: the two bead cells and one empty cell.
+const PITCH: i32 = WIDTH + 1;
 /// Ticks each dot lags behind the body's bob (times its index + 1).
 const LAG: f32 = 4.0;
-/// The bead's sub-pixels inside its cell (x 0..2, y 0..3): a filled 2 x 3 blob.
-const BEAD: [(i32, i32); 6] = [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)];
+/// The bead's sub-pixels over its two cells (x 0..4, the right cell from
+/// x 2; y 0..4): a plus, a 3 x 3 block minus its corners, centred on x 2.
+const BEAD: [(i32, i32); 5] = [(2, 0), (1, 1), (2, 1), (3, 1), (2, 2)];
 
 /// One running subagent, drawn in its element's colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,14 +54,15 @@ fn first_col(g: &Geom) -> i32 {
     ((g.rcx + dx) / 2.0).floor() as i32 + 1
 }
 
-/// Cell column of bead `i`: one empty cell after the body, then a bead
-/// every [`PITCH`] cells.
+/// Left cell column of bead `i`: one empty cell after the body, then a
+/// bead every [`PITCH`] cells.
 fn bead_col(g: &Geom, i: usize) -> i32 {
     first_col(g) + 1 + PITCH * i as i32
 }
 
 /// How many of `n` dots are drawn: at most [`MAX_DOTS`] and, when the card
-/// gives the spirit `cols` columns (0: no limit), as many as fit in them.
+/// gives the spirit `cols` columns (0: no limit), as many whole beads as fit
+/// in them (bead `i` ends at column `first_col + PITCH * (i + 1) - 1`).
 pub(super) fn fit(g: &Geom, cols: u16, n: usize) -> usize {
     let n = n.min(MAX_DOTS);
     if cols == 0 {
@@ -66,14 +72,14 @@ pub(super) fn fit(g: &Geom, cols: u16, n: usize) -> usize {
     n.min(room as usize)
 }
 
-/// Grid columns of the first `n` beads of a spirit of `size`.
+/// Left grid columns of the first `n` beads of a spirit of `size`.
 #[cfg(test)]
 pub(super) fn dot_cols(size: super::Size, n: usize) -> Vec<u16> {
     let g = size.geom();
     (0..n.min(MAX_DOTS)).map(|i| bead_col(&g, i) as u16).collect()
 }
 
-/// Sub-pixel row offset of bead `i` inside its cell (0 or 1): the body's
+/// Sub-pixel row offset of bead `i` inside its cells (0 or 1): the body's
 /// bob, `LAG` ticks later per index.
 fn bob_dy(ctx: &Ctx, i: usize) -> i32 {
     let bob = state::bob_at(ctx.stage, ctx.state, ctx.seed, ctx.tf - LAG * (i as f32 + 1.0));
@@ -96,10 +102,13 @@ fn colour(ctx: &Ctx, theme: Theme) -> Rgb {
     }
 }
 
-/// Braille glyph of a bead `dy` sub-pixels down its cell.
-fn glyph(dy: i32) -> char {
-    let bits = BEAD.iter().fold(0u32, |b, &(x, y)| b | BRAILLE_BITS[x as usize][(y + dy) as usize]);
-    char::from_u32(0x2800 + bits).unwrap_or(' ')
+/// Braille glyphs (left cell, right cell) of a bead `dy` sub-pixels down.
+fn glyphs(dy: i32) -> (char, char) {
+    let cell = |c: i32| {
+        let bits = BEAD.iter().filter(|&&(x, _)| x / 2 == c).fold(0u32, |b, &(x, y)| b | BRAILLE_BITS[(x % 2) as usize][(y + dy) as usize]);
+        char::from_u32(0x2800 + bits).unwrap_or(' ')
+    };
+    (cell(0), cell(1))
 }
 
 /// Paints the first `n` dots on the bottom row of the finished grid (none
@@ -109,13 +118,15 @@ pub(super) fn paint(grid: &mut SpiritGrid, g: &Geom, ctx: &Ctx, dots: &[Subagent
     if ctx.state == Status::Done || n == 0 {
         return;
     }
-    widen(grid, (bead_col(g, n - 1) + 1).max(0) as u16);
+    widen(grid, (bead_col(g, n - 1) + WIDTH).max(0) as u16);
     let row = i32::from(grid.rows) - 1;
     for (i, d) in dots.iter().take(n).enumerate() {
         let col = bead_col(g, i);
+        let ((l, r), fg) = (glyphs(bob_dy(ctx, i)), colour(ctx, d.theme));
         clear(grid, col - 1, row);
-        grid.put(col, row, glyph(bob_dy(ctx, i)), colour(ctx, d.theme));
-        clear(grid, col + 1, row);
+        grid.put(col, row, l, fg);
+        grid.put(col + 1, row, r, fg);
+        clear(grid, col + WIDTH, row);
     }
 }
 
@@ -152,6 +163,9 @@ mod tests {
     /// Columns the standard (XS) and large (S) cards give the spirit.
     const STD_COLS: u16 = 17;
     const LARGE_COLS: u16 = 29;
+    /// The two cells of a bead: at rest and one sub-pixel lower (bobbing).
+    const UP: (char, char) = ('⠐', '⠗');
+    const DOWN: (char, char) = ('⠠', '⡦');
 
     fn p(theme: Theme, status: Status, size: Size, tick: u64) -> SpiritParams {
         let cols = if size == Size::XS { STD_COLS } else { LARGE_COLS };
@@ -164,6 +178,15 @@ mod tests {
 
     fn cell_at(g: &SpiritGrid, c: u16, r: u16) -> Cell {
         g.cells[usize::from(r) * usize::from(g.cols) + usize::from(c)]
+    }
+
+    /// Bottom-row cell `c`, blank outside the grid (the card draws nothing there).
+    fn bottom(g: &SpiritGrid, c: u16) -> Cell {
+        if c < g.cols {
+            cell_at(g, c, g.rows - 1)
+        } else {
+            BLANK
+        }
     }
 
     /// Lit sub-pixels (x 0..2, y 0..4) of a braille cell (empty for a non-braille glyph).
@@ -182,18 +205,16 @@ mod tests {
         px
     }
 
-    /// Whether `ch` is the bead (either bob offset).
-    fn is_bead(ch: char) -> bool {
-        let px = cell_px(ch);
-        (0..2).any(|dy| px == BEAD.iter().map(|&(x, y)| (x, y + dy)).collect())
+    /// Whether bottom-row cells `c` and `c + 1` hold one bead (either bob
+    /// offset) in one colour.
+    fn is_bead(g: &SpiritGrid, c: u16) -> bool {
+        let (l, r) = (bottom(g, c), bottom(g, c + 1));
+        ((l.ch, r.ch) == UP || (l.ch, r.ch) == DOWN) && l.fg.is_some() && l.fg == r.fg
     }
 
-    /// Columns of the bead cells found on the bottom row in the span `n`
-    /// beads reserve (2n-1 cells and the empty one after them; the body's
-    /// own edge left of it, and magic further right, may use the same glyph).
-    fn beads_in(g: &SpiritGrid, size: Size, n: usize) -> Vec<u16> {
-        let c0 = dot_cols(size, 1)[0];
-        (c0..(c0 + 2 * n as u16).min(g.cols)).filter(|&c| is_bead(cell_at(g, c, g.rows - 1).ch)).collect()
+    /// Left columns of every bead on the bottom row.
+    fn beads(g: &SpiritGrid) -> Vec<u16> {
+        (0..g.cols).filter(|&c| is_bead(g, c)).collect()
     }
 
     const BLANK: Cell = Cell { ch: ' ', fg: None };
@@ -215,90 +236,109 @@ mod tests {
     }
 
     #[test]
-    fn a_bead_is_one_filled_cell() {
-        for dy in 0..2 {
-            let px = cell_px(glyph(dy));
-            assert_eq!(px.len(), 6, "a filled 2 x 3 blob");
-            assert!(px.iter().all(|&(_, y)| (dy..dy + 3).contains(&y)));
-            let mirror: BTreeSet<(i32, i32)> = px.iter().map(|&(x, y)| (1 - x, y)).collect();
-            assert_eq!(mirror, px, "symmetric left-right");
+    fn a_bead_is_a_plus_across_two_cells() {
+        for (dy, (l, r)) in [(0, UP), (1, DOWN)] {
+            assert_eq!(glyphs(dy), (l, r));
+            // left cell x 0..2, right cell x 2..4: a 3 x 3 block minus its corners
+            let px: BTreeSet<(i32, i32)> = cell_px(l).into_iter().chain(cell_px(r).into_iter().map(|(x, y)| (x + 2, y))).collect();
+            let plus: BTreeSet<(i32, i32)> = [(2, 0), (1, 1), (2, 1), (3, 1), (2, 2)].iter().map(|&(x, y)| (x, y + dy)).collect();
+            assert_eq!(px, plus, "dy={dy}");
         }
-        assert_eq!((glyph(0), glyph(1)), ('⠿', '⣶'));
+    }
+
+    /// Bottom row from the empty cell right of the body, bob folded to the
+    /// rest glyphs, for `n` requested beads in `cols` columns (table below).
+    fn row_from_body(size: Size, cols: u16, n: usize, status: Status, magic: Magic, stage: Stage, tick: u64, len: usize) -> (String, SpiritGrid) {
+        let q = SpiritParams { cols, magic, stage, ..p(Theme::Fire, status, size, tick) };
+        let g = render_dots(&q, &dots(&vec![Theme::Water; n]));
+        let c0 = first_col(&size.geom()) as u16;
+        let mut s = String::new();
+        let mut c = c0;
+        while s.chars().count() < len {
+            if is_bead(&g, c) && bottom(&g, c).ch == DOWN.0 {
+                s.push(UP.0);
+                s.push(UP.1);
+                c += 2;
+            } else {
+                s.push(bottom(&g, c).ch);
+                c += 1;
+            }
+        }
+        (s, g)
     }
 
     #[test]
-    fn one_row_of_beads_one_cell_each_growing_right_from_the_body() {
-        for (size, cols, max_fit) in [(Size::S, LARGE_COLS, 5), (Size::XS, STD_COLS, 5), (Size::XS, 0, 5), (Size::S, 12, 3), (Size::XS, 9, 2), (Size::S, 60, 5)] {
+    fn exact_bottom_rows_for_one_to_four_beads_capped_and_fitted() {
+        // (size, card columns (0: no limit), running subagents, drawn, cells from the empty one right of the body)
+        let table: &[(Size, u16, usize, usize, &str)] = &[
+            (Size::XS, STD_COLS, 1, 1, " ⠐⠗ "),
+            (Size::XS, STD_COLS, 2, 2, " ⠐⠗ ⠐⠗ "),
+            (Size::XS, STD_COLS, 3, 3, " ⠐⠗ ⠐⠗ ⠐⠗ "),
+            (Size::XS, STD_COLS, 4, 4, " ⠐⠗ ⠐⠗ ⠐⠗ ⠐⠗"),
+            (Size::XS, STD_COLS, 5, 4, " ⠐⠗ ⠐⠗ ⠐⠗ ⠐⠗"),
+            (Size::XS, STD_COLS, 9, 4, " ⠐⠗ ⠐⠗ ⠐⠗ ⠐⠗"),
+            (Size::XS, 0, 7, 4, " ⠐⠗ ⠐⠗ ⠐⠗ ⠐⠗"),
+            (Size::S, LARGE_COLS, 1, 1, " ⠐⠗ "),
+            (Size::S, LARGE_COLS, 2, 2, " ⠐⠗ ⠐⠗ "),
+            (Size::S, LARGE_COLS, 3, 3, " ⠐⠗ ⠐⠗ ⠐⠗ "),
+            (Size::S, LARGE_COLS, 4, 4, " ⠐⠗ ⠐⠗ ⠐⠗ ⠐⠗ "),
+            (Size::S, LARGE_COLS, 6, 4, " ⠐⠗ ⠐⠗ ⠐⠗ ⠐⠗ "),
+            // narrower bands: only whole beads that fit
+            (Size::XS, 16, 4, 3, " ⠐⠗ ⠐⠗ ⠐⠗ "),
+            (Size::XS, 12, 4, 2, " ⠐⠗ ⠐⠗ "),
+            (Size::XS, 10, 4, 1, " ⠐⠗ "),
+            (Size::XS, 8, 3, 1, " ⠐⠗"),
+            (Size::XS, 7, 2, 0, ""),
+            (Size::S, 12, 4, 2, " ⠐⠗ ⠐⠗"),
+            (Size::S, 11, 4, 1, " ⠐⠗ "),
+            (Size::S, 8, 1, 0, ""),
+        ];
+        for &(size, cols, n, drawn, want) in table {
             for status in [Status::Running, Status::NeedsInput, Status::Idle, Status::Unknown] {
-                for tick in [0, 11, 29, 300] {
-                    let mut prev: Vec<u16> = Vec::new();
-                    for n in 1..=7 {
-                        let q = SpiritParams { cols, ..p(Theme::Fire, status, size, tick) };
-                        let g = render_dots(&q, &dots(&vec![Theme::Water; n]));
-                        let want = n.min(max_fit);
-                        let found = beads_in(&g, size, want);
-                        assert_eq!(found.len(), want, "{size:?} cols={cols} {status:?} n={n} t={tick}: {found:?}");
-                        assert_eq!(found, dot_cols(size, want), "{size:?} cols={cols}");
-                        assert!(found.windows(2).all(|w| w[1] == w[0] + 2), "exactly two columns apart: {found:?}");
-                        assert!(found.starts_with(&prev), "the row grows to the right: {prev:?} -> {found:?}");
-                        prev = found.clone();
-                        // N beads span 2N-1 cells: the cells between (and right after) are empty
-                        let (first, last) = (found[0], found[want - 1]);
-                        assert_eq!(cell_at(&g, first - 1, g.rows - 1), BLANK, "an empty cell between the body and the first bead");
-                        for c in first..=(last + 1).min(g.cols - 1) {
-                            let cell = cell_at(&g, c, g.rows - 1);
-                            if (c - first) % 2 == 1 {
-                                assert_eq!(cell, BLANK, "{size:?} n={n}: gap {c}");
-                            } else {
-                                assert!(is_bead(cell.ch));
-                            }
-                        }
-                        // the same pattern and colour in every bead (one theme here)
-                        let fgs: BTreeSet<_> = found.iter().map(|&c| cell_at(&g, c, g.rows - 1).fg).collect();
-                        assert_eq!(fgs.len(), 1, "same brightness: {fgs:?}");
-                        for &c in &found {
-                            assert!(f32::from(c) > body_center_x(size), "right of the body centre ({c})");
+                for magic in Magic::ALL {
+                    for stage in [Stage::Relaxed, Stage::Lively, Stage::Struggling] {
+                        for tick in [0, 11, 29, 300] {
+                            let at = format!("{size:?} cols={cols} n={n} {status:?} {magic:?} {stage:?} t={tick}");
+                            let (got, g) = row_from_body(size, cols, n, status, magic, stage, tick, want.chars().count());
+                            assert_eq!(got, want, "{at}");
+                            let found = beads(&g);
+                            assert_eq!(found.len(), drawn, "{at}: {found:?}");
+                            assert_eq!(found, dot_cols(size, drawn), "{at}");
+                            assert!(found.windows(2).all(|w| w[1] == w[0] + 3), "{at}: one empty cell between beads");
                             if cols > 0 {
-                                assert!(c < cols, "inside the card's columns");
+                                assert!(found.iter().all(|&c| c + 1 < cols), "{at}: whole beads inside the columns");
                             }
-                        }
-                        // nothing above the bottom row changes
-                        let plain = render(&q);
-                        for r in 0..g.rows - 1 {
-                            for c in 0..g.cols {
-                                let old = if c < plain.cols { cell_at(&plain, c, r) } else { BLANK };
-                                assert_eq!(cell_at(&g, c, r), old, "{size:?} n={n}: row {r} col {c}");
+                            if drawn == 0 {
+                                let q = SpiritParams { cols, magic, stage, ..p(Theme::Fire, status, size, tick) };
+                                assert_eq!(g, render(&q), "{at}: none fit, plain frame");
+                            } else {
+                                // nothing above the bottom row changes
+                                let q = SpiritParams { cols, magic, stage, ..p(Theme::Fire, status, size, tick) };
+                                let plain = render(&q);
+                                for r in 0..g.rows - 1 {
+                                    for c in 0..g.cols {
+                                        let old = if c < plain.cols { cell_at(&plain, c, r) } else { BLANK };
+                                        assert_eq!(cell_at(&g, c, r), old, "{at}: row {r} col {c}");
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        assert_eq!(MAX_DOTS, 5);
+        assert_eq!(MAX_DOTS, 4);
     }
 
     #[test]
-    fn two_beads_are_never_confused_with_one() {
-        for size in [Size::XS, Size::S] {
-            for tick in 0..80 {
-                for magic in Magic::ALL {
-                    let q = SpiritParams { magic, ..p(Theme::Water, Status::Running, size, tick) };
-                    let (one, two) = (render_dots(&q, &dots(&[Theme::Fire])), render_dots(&q, &dots(&[Theme::Fire; 2])));
-                    let row = |g: &SpiritGrid| -> Vec<Cell> { (0..g.cols).map(|c| cell_at(g, c, g.rows - 1)).collect() };
-                    let c0 = usize::from(dot_cols(size, 1)[0]);
-                    // one: a bead with an empty cell after it; two: bead, empty, bead, empty
-                    assert!(is_bead(row(&one)[c0].ch) && row(&one)[c0 + 1] == BLANK);
-                    let r2 = row(&two);
-                    assert!(is_bead(r2[c0].ch) && r2[c0 + 1] == BLANK && is_bead(r2[c0 + 2].ch), "{size:?} t={tick}");
-                    if c0 + 3 < r2.len() {
-                        assert_eq!(r2[c0 + 3], BLANK);
-                    }
-                    assert_ne!(row(&one)[c0 + 2], r2[c0 + 2], "{size:?} t={tick}: the second bead is its own cell");
-                    assert_eq!(beads_in(&one, size, 1).len(), 1);
-                    assert_eq!(beads_in(&two, size, 2).len(), 2);
-                }
-            }
-        }
+    fn four_beads_fit_the_standard_and_large_cards() {
+        assert_eq!(fit(&Size::XS.geom(), STD_COLS, 9), 4);
+        assert_eq!(fit(&Size::S.geom(), LARGE_COLS, 9), 4);
+        assert_eq!(fit(&Size::XS.geom(), 0, 9), 4);
+        // a bead's two cells end inside the band
+        assert_eq!(dot_cols(Size::XS, 4), vec![6, 9, 12, 15]);
+        assert!(dot_cols(Size::XS, 4)[3] + 1 < STD_COLS);
+        assert_eq!(dot_cols(Size::S, 4), vec![7, 10, 13, 16]);
     }
 
     #[test]
@@ -339,7 +379,9 @@ mod tests {
                     let themes: Vec<Theme> = WANT.iter().map(|w| w.0).collect();
                     let g = render_dots(&q, &dots(&themes));
                     for (i, (theme, colour)) in WANT.iter().enumerate() {
-                        let fg = cell_at(&g, dot_cols(size, 4)[i], g.rows - 1).fg.expect("painted");
+                        let c = dot_cols(size, 4)[i];
+                        let fg = cell_at(&g, c, g.rows - 1).fg.expect("painted");
+                        assert_eq!(cell_at(&g, c + 1, g.rows - 1).fg, Some(fg), "one colour across the bead");
                         assert!(fg.0.max(fg.1).max(fg.2) <= 250, "never white: {fg:?}");
                         assert_eq!(dominant(fg), *colour, "{size:?} {status:?} {theme:?} t={tick}: {fg:?}");
                     }
@@ -357,11 +399,13 @@ mod tests {
                         let q = SpiritParams { magic, stage: Stage::Struggling, ..p(parent, Status::Running, size, tick) };
                         let themes: Vec<Theme> = WANT.iter().map(|w| w.0).chain([Theme::Water]).collect();
                         let g = render_dots(&q, &dots(&themes));
-                        let n = 5;
-                        assert_eq!(beads_in(&g, size, n), dot_cols(size, n), "{parent:?} {magic:?} {size:?} t={tick}");
+                        let cols = dot_cols(size, 4);
+                        assert_eq!(beads(&g), cols, "{parent:?} {magic:?} {size:?} t={tick}");
                         for (i, (_, colour)) in WANT.iter().enumerate() {
-                            let fg = cell_at(&g, dot_cols(size, n)[i], g.rows - 1).fg.unwrap();
+                            let fg = cell_at(&g, cols[i], g.rows - 1).fg.unwrap();
                             assert_eq!(dominant(fg), *colour, "{parent:?} {magic:?} t={tick}");
+                            // the empty cell before each bead stays empty
+                            assert_eq!(cell_at(&g, cols[i] - 1, g.rows - 1), BLANK, "{parent:?} {magic:?} t={tick}: gap before bead {i}");
                         }
                     }
                 }
@@ -396,21 +440,22 @@ mod tests {
 
     #[test]
     fn dots_bob_offset_from_each_other_and_follow_the_stage() {
-        let glyphs = |stage: Stage, status: Status| -> Vec<Vec<char>> {
+        let glyphs = |stage: Stage, status: Status| -> Vec<Vec<(char, char)>> {
             (0..120)
                 .map(|t| {
                     let q = SpiritParams { stage, ..p(Theme::Fire, status, Size::S, t) };
                     let g = render_dots(&q, &dots(&[Theme::Water; 3]));
-                    dot_cols(Size::S, 3).iter().map(|&c| cell_at(&g, c, g.rows - 1).ch).collect()
+                    dot_cols(Size::S, 3).iter().map(|&c| (cell_at(&g, c, g.rows - 1).ch, cell_at(&g, c + 1, g.rows - 1).ch)).collect()
                 })
                 .collect()
         };
         let lively = glyphs(Stage::Lively, Status::NeedsInput);
-        let distinct: BTreeSet<char> = lively.iter().map(|f| f[0]).collect();
+        assert!(lively.iter().flatten().all(|&b| b == UP || b == DOWN), "always a whole plus");
+        let distinct: BTreeSet<(char, char)> = lively.iter().map(|f| f[0]).collect();
         assert!(distinct.len() >= 2, "the dot bobs: {distinct:?}");
         assert!(lively.iter().any(|f| f[0] != f[1] || f[1] != f[2]), "dots are offset from each other");
         // struggling moves more often than relaxed
-        let moves = |frames: &[Vec<char>]| frames.windows(2).filter(|w| w[0] != w[1]).count();
+        let moves = |frames: &[Vec<(char, char)>]| frames.windows(2).filter(|w| w[0] != w[1]).count();
         let (relaxed, struggling) = (glyphs(Stage::Relaxed, Status::NeedsInput), glyphs(Stage::Struggling, Status::NeedsInput));
         assert!(moves(&relaxed) < moves(&struggling), "{} < {}", moves(&relaxed), moves(&struggling));
     }
@@ -428,6 +473,9 @@ mod tests {
                                 let a = render_dots(&q, &d);
                                 assert_eq!(a, render_dots(&q, &d));
                                 assert_eq!(a.cells.len(), usize::from(a.cols) * usize::from(a.rows));
+                                if cols > 0 && status != Status::Done {
+                                    assert!(beads(&a).iter().all(|&c| c + 1 < cols), "{size:?} cols={cols}: whole beads only");
+                                }
                             }
                         }
                     }

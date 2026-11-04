@@ -328,7 +328,7 @@ pub fn render(p: &SpiritParams) -> SpiritGrid {
     render_with(p, true)
 }
 
-/// Renders one frame with a one-cell bead per running subagent in a row
+/// Renders one frame with a plus-shaped bead per running subagent in a row
 /// from the body's lower right (see `subdots`); no dots renders exactly like [`render`].
 pub fn render_dots(p: &SpiritParams, dots: &[SubagentDot]) -> SpiritGrid {
     render_frame(p, true, dots)

@@ -29,10 +29,10 @@
 //! Running Claude Code subagents (see [`crate::source::subagents`]): a
 //! [`SUBAGENT_GLYPH`]`×N` marker at the end of the standard card's badge row,
 //! `◇N` on compact cards, one `◇ kind · description` row each (at most three,
-//! then `+N`) in the large card's leftover rows, and one round bead (one
-//! braille cell, an empty cell between two) each in a row along the bottom
-//! of the spirit band, from the body's lower right, in the element of the
-//! subagent's model (see `spirit::subdots`).
+//! then `+N`) in the large card's leftover rows, and one plus-shaped bead
+//! (two braille cells, `⠐⠗`, an empty cell between two; at most four) each
+//! in a row along the bottom of the spirit band, from the body's lower
+//! right, in the element of the subagent's model (see `spirit::subdots`).
 //!
 //! Running tool calls (see [`crate::source::tools`]): a [`TOOL_GLYPH`]`N`
 //! marker after the subagent marker on standard and compact cards (N =
@@ -1843,9 +1843,9 @@ mod tests {
                     let busy = with_subs(plain.clone(), 5, 2);
                     let (a, b) = (draw(w, h, |f| render_card(f, f.area(), &plain, &cfg, false, t)), draw(w, h, |f| render_card(f, f.area(), &busy, &cfg, false, t)));
                     let diff: Vec<(u16, u16)> = (1..=band_rows).flat_map(|y| (1..w - 1).map(move |x| (x, y))).filter(|&p| a[p] != b[p]).collect();
-                    let beads: Vec<u16> = diff.iter().filter(|&&p| matches!(b[p].symbol(), "⠿" | "⣶")).map(|p| p.0).collect();
-                    assert_eq!(beads.len(), MAX_DOTS, "{layout:?} {status:?} t={t}: five beads for five running: {diff:?}");
-                    assert!(beads.windows(2).all(|w| w[1] == w[0] + 2 && b[(w[0] + 1, band_rows)].symbol() == " "), "{layout:?}: {beads:?}");
+                    let beads = bead_xs(&b, band_rows);
+                    assert_eq!(beads.len(), MAX_DOTS, "{layout:?} {status:?} t={t}: four beads (the cap) for five running: {diff:?}");
+                    assert!(beads.windows(2).all(|w| w[1] == w[0] + 3 && b[(w[0] + 2, band_rows)].symbol() == " "), "{layout:?}: {beads:?}");
                     assert!(!diff.is_empty() && diff.iter().all(|&(_, y)| y == band_rows), "{layout:?} {status:?}: bottom band row: {diff:?}");
                     // the border is untouched
                     for x in 0..w {
@@ -1889,6 +1889,13 @@ mod tests {
         cfg
     }
 
+    /// Left columns of the plus beads (`⠐⠗`, or `⠠⡦` while bobbing) on band row `y`.
+    fn bead_xs(buf: &Buffer, y: u16) -> Vec<u16> {
+        (0..buf.area.width.saturating_sub(1))
+            .filter(|&x| matches!((buf[(x, y)].symbol(), buf[(x + 1, y)].symbol()), ("⠐", "⠗") | ("⠠", "⡦")) && buf[(x, y)].fg == buf[(x + 1, y)].fg)
+            .collect()
+    }
+
     /// Cells of the bottom band row that differ from the card without subagents.
     fn dot_cells(s: &Session, cfg: &Config, t: u64) -> Vec<(u16, Color)> {
         let (w, h) = card_size(cfg.card_layout);
@@ -1908,7 +1915,7 @@ mod tests {
                         let mut s = Session { model: Some(parent_model.into()), ..session("ui refactoring", status) };
                         s.subagents = vec![sub("a", "general-purpose", "x", Some("sonnet"), true), sub("b", "Explore", "y", Some("sonnet"), true)];
                         let cells = dot_cells(&s, &cfg, t);
-                        assert_eq!(cells.len(), 2, "{layout:?} {parent_model} {status:?} t={t}: two beads: {cells:?}");
+                        assert_eq!(cells.len(), 4, "{layout:?} {parent_model} {status:?} t={t}: two beads, two cells each: {cells:?}");
                         for (x, fg) in &cells {
                             let Color::Rgb(r, g, b) = *fg else { panic!("rgb") };
                             assert!(r > g && g > b, "{layout:?} {parent_model} {status:?} t={t}: sonnet = fire at x={x}: {fg:?}");
@@ -1938,9 +1945,10 @@ mod tests {
                 let buf = draw(w, h, |f| render_card(f, f.area(), &s, &cfg, false, t));
                 let cells = dot_cells(&s, &cfg, t);
                 let xs: Vec<u16> = cells.iter().map(|c| c.0).collect();
-                assert_eq!(xs.len(), 2, "{layout:?} t={t}: two beads, one cell each: {xs:?}");
-                assert_eq!(xs[1], xs[0] + 2, "{layout:?}: {xs:?}");
-                assert_eq!(buf[(xs[0] + 1, band_rows)].symbol(), " ", "{layout:?}: an empty column between the beads");
+                assert_eq!(xs.len(), 4, "{layout:?} t={t}: two beads, two cells each: {xs:?}");
+                assert_eq!(bead_xs(&buf, band_rows), vec![xs[0], xs[2]], "{layout:?}: {xs:?}");
+                assert_eq!(xs, vec![xs[0], xs[0] + 1, xs[0] + 3, xs[0] + 4], "{layout:?}: {xs:?}");
+                assert_eq!(buf[(xs[0] + 2, band_rows)].symbol(), " ", "{layout:?}: an empty column between the beads");
                 // body colours: every lit band cell left of the first bead
                 let body: Vec<Color> = (1..=band_rows).flat_map(|y| (1..xs[0]).map(move |x| (x, y))).filter(|&p| buf[p].symbol() != " ").map(|p| buf[p].fg).collect();
                 assert!(!body.is_empty());
@@ -1951,7 +1959,7 @@ mod tests {
         }
     }
 
-    /// Look of the standard and large cards with 1, 2, 4 and 5 running
+    /// Look of the standard and large cards with 1, 2, 4 and 5 (capped at 4) running
     /// subagents (sonnet = fire, opus = water, haiku/fable = poison), as
     /// plain text and with ANSI colours, plus the colour of each bead.
     /// Run with `cargo test dump_subagent_cards -- --ignored --nocapture`.
@@ -1980,7 +1988,7 @@ mod tests {
                         .collect();
                     println!("{line}");
                 }
-                let beads: Vec<String> = (1..w - 1).filter(|&x| matches!(buf[(x, band)].symbol(), "⠿" | "⣶")).map(|x| format!("x={x} {:?}", buf[(x, band)].fg)).collect();
+                let beads: Vec<String> = bead_xs(&buf, band).into_iter().map(|x| format!("x={x} {:?}", buf[(x, band)].fg)).collect();
                 println!("beads: {beads:?}\n");
             }
         }
