@@ -26,14 +26,16 @@ use crate::model::Status;
 use canvas::Geom;
 use theme::Theme;
 
-/// Design space (scale x1 canvas in sub-pixels): 17 x 7 terminal cells.
+/// Design space (the reference x1 canvas in sub-pixels: 17 x 7 terminal
+/// cells); every size maps it onto its own smaller canvas.
 const DW: f32 = 34.0;
 const DH: f32 = 28.0;
 /// Body centre / radius in design units.
 const CX: f32 = 11.0;
 const CY: f32 = 15.0;
 const BASE_R: f32 = 8.5;
-/// Water ripple line.
+/// Water ripple line (design units); lifted onto the last sub-pixel row of
+/// canvases too short to reach it (see [`floor_y`]).
 const FLOOR_Y: f32 = 26.0;
 /// Float phases wrap every 2^16 ticks (about 73 min at 15 fps) so f32 math
 /// keeps sub-tick resolution on a monitor that runs for weeks; the wrap is a
@@ -59,14 +61,19 @@ pub enum Size {
 impl Size {
     pub const ALL: [Size; 3] = [Size::S, Size::M, Size::L];
 
+    /// Card variants: every size is 4 rows tall (16 sub-pixels) so a 24x9
+    /// card never changes size; bigger steps get a bigger body and more room
+    /// to the right for cast particles. The body centre sits at 1/3 of the
+    /// width (as in the reference design) and high enough that the eye row
+    /// (cell row 1) has body above and below it.
     const fn geom(self) -> Geom {
         match self {
-            // 11 x 5 cells, body radius 5.5 sub-pixels
-            Size::S => Geom { ppu: 5.5 / BASE_R, w: 22, h: 20, rcx: 7.0, rcy: 11.0, small: true },
-            // 14 x 6 cells, body radius 7 sub-pixels
-            Size::M => Geom { ppu: 7.0 / BASE_R, w: 28, h: 24, rcx: 9.0, rcy: 13.0, small: true },
-            // 17 x 7 cells: the design space at scale x1
-            Size::L => Geom { ppu: 1.0, w: 34, h: 28, rcx: CX, rcy: CY, small: false },
+            // 11 x 4 cells, body radius 5.5 sub-pixels
+            Size::S => Geom { ppu: 5.5 / BASE_R, w: 22, h: 16, rcx: 7.0, rcy: 8.0, small: true },
+            // 14 x 4 cells, body radius 6 sub-pixels
+            Size::M => Geom { ppu: 6.0 / BASE_R, w: 28, h: 16, rcx: 9.0, rcy: 8.0, small: true },
+            // 17 x 4 cells, body radius 6.5 sub-pixels
+            Size::L => Geom { ppu: 6.5 / BASE_R, w: 34, h: 16, rcx: 11.0, rcy: 8.0, small: true },
         }
     }
 }
@@ -142,6 +149,14 @@ struct Ctx {
     /// outline animation speed of the state
     sp: f32,
     small: bool,
+    /// water ripple line in design units, inside this size's canvas
+    floor: f32,
+}
+
+/// The ripple line for a canvas: [`FLOOR_Y`], or the last sub-pixel row when
+/// the canvas ends above it.
+fn floor_y(g: &Geom) -> f32 {
+    FLOOR_Y.min(CY + (g.h as f32 - 1.0 - g.rcy) / g.ppu)
 }
 
 impl Ctx {
@@ -154,6 +169,7 @@ impl Ctx {
             tf: phase_tick(p.tick),
             sp: state::speed(p.status),
             small: p.size.geom().small,
+            floor: floor_y(&p.size.geom()),
         }
     }
 }
@@ -237,17 +253,32 @@ mod tests {
     }
 
     #[test]
-    fn grid_size_s_is_11x5() {
-        assert_eq!(grid_size(Size::S), (11, 5));
-        let (m, l) = (grid_size(Size::M), grid_size(Size::L));
-        assert!(m.0 > 11 && m.1 >= 5 && l.0 > m.0 && l.1 >= m.1, "{m:?} {l:?}");
-        assert!(l.0 <= 17 && l.1 <= 7, "{l:?}");
-        assert_eq!(max_grid_size(), l);
+    fn grid_sizes_are_four_rows_tall() {
+        // card variant: every size fits the 4-row spirit band of a 24x9 card
+        assert_eq!(grid_size(Size::S), (11, 4));
+        assert_eq!(grid_size(Size::M), (14, 4));
+        assert_eq!(grid_size(Size::L), (17, 4));
+        assert_eq!(max_grid_size(), (17, 4));
         for size in Size::ALL {
-            let g = render(&params(Theme::Fire, Status::Running, size, 3, 1));
-            assert_eq!((g.cols, g.rows), grid_size(size));
-            assert_eq!(g.cells.len(), usize::from(g.cols) * usize::from(g.rows));
+            for theme in Theme::ALL {
+                for status in STATUSES {
+                    let g = render(&params(theme, status, size, 3, 1));
+                    assert_eq!((g.cols, g.rows), grid_size(size), "{theme:?} {status:?} {size:?}");
+                    assert_eq!(g.cells.len(), usize::from(g.cols) * usize::from(g.rows));
+                }
+            }
         }
+    }
+
+    #[test]
+    fn bigger_sizes_have_bigger_bodies() {
+        // M and L are wider and their bodies cover more dots than S
+        let dots = |size| -> u32 {
+            let g = render(&params(Theme::Water, Status::Idle, size, 0, 3));
+            g.cells.iter().filter(|c| ('\u{2801}'..='\u{28ff}').contains(&c.ch)).map(|c| (c.ch as u32 - 0x2800).count_ones()).sum()
+        };
+        let (s, m, l) = (dots(Size::S), dots(Size::M), dots(Size::L));
+        assert!(s < m && m < l, "S {s} < M {m} < L {l}");
     }
 
     #[test]
@@ -269,13 +300,29 @@ mod tests {
         // `Cell` has no background field: every cell is foreground-only by construction.
         for seed in [1, 9, 77] {
             let t = first_tick(seed, false);
-            for theme in Theme::ALL {
+            for (theme, size) in Theme::ALL.into_iter().flat_map(|t| Size::ALL.map(|s| (t, s))) {
                 for status in STATUSES {
-                    let g = render(&params(theme, status, Size::S, t, seed));
+                    let g = render(&params(theme, status, size, t, seed));
                     let white = white_cells(&g);
-                    assert_eq!(white.len(), 2, "{theme:?} {status:?}: {white:?}");
+                    assert_eq!(white.len(), 2, "{theme:?} {status:?} {size:?}: {white:?}");
                     assert!(white.iter().all(|w| w.2 == '\u{2802}'), "one white dot (⠂) per eye: {white:?}");
                     assert_eq!(white[0].1, white[1].1, "eyes on one row");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eyes_sit_inside_the_body_in_every_size() {
+        let seed = 9;
+        let t = first_tick(seed, false);
+        let is_body = |g: &SpiritGrid, c: u16, r: u16| ('\u{2801}'..='\u{28ff}').contains(&cell(g, c, r).ch);
+        for theme in Theme::ALL {
+            for size in Size::ALL {
+                let g = render(&params(theme, Status::Idle, size, t, seed));
+                for (col, row, _) in white_cells(&g) {
+                    assert!(row > 0 && row + 1 < g.rows, "{theme:?} {size:?}: eye row {row}");
+                    assert!(is_body(&g, col, row - 1) && is_body(&g, col, row + 1), "{theme:?} {size:?}: body above and below the eye");
                 }
             }
         }
@@ -311,17 +358,17 @@ mod tests {
     fn all_states_share_the_same_eye_cells() {
         let seed = 11;
         let t = first_tick(seed, false);
-        for theme in Theme::ALL {
-            let eyes_of = |status| white_cells(&render(&params(theme, status, Size::S, t, seed)));
+        for (theme, size) in Theme::ALL.into_iter().flat_map(|t| Size::ALL.map(|s| (t, s))) {
+            let eyes_of = |status| white_cells(&render(&params(theme, status, size, t, seed)));
             let base = eyes_of(Status::Idle);
             for status in STATUSES {
                 let e = eyes_of(status);
                 if status == Status::Running {
                     // a running spirit may glance one cell to the right, where it casts
                     let shifted: Vec<_> = base.iter().map(|&(c, r, ch)| (c + 1, r, ch)).collect();
-                    assert!(e == base || e == shifted, "{theme:?}: {e:?} vs {base:?}");
+                    assert!(e == base || e == shifted, "{theme:?} {size:?}: {e:?} vs {base:?}");
                 } else {
-                    assert_eq!(e, base, "{theme:?} {status:?}");
+                    assert_eq!(e, base, "{theme:?} {status:?} {size:?}");
                 }
             }
         }
@@ -364,15 +411,15 @@ mod tests {
 
     #[test]
     fn needs_input_shows_question_mark_cell() {
-        for theme in Theme::ALL {
+        for (theme, size) in Theme::ALL.into_iter().flat_map(|t| Size::ALL.map(|s| (t, s))) {
             let mut rows = std::collections::BTreeSet::new();
             for t in 0..60 {
-                let g = render(&params(theme, Status::NeedsInput, Size::S, t, 2));
+                let g = render(&params(theme, Status::NeedsInput, size, t, 2));
                 let q: Vec<_> = chars(&g).into_iter().filter(|c| c.2 == '?').collect();
-                assert_eq!(q.len(), 1, "{theme:?} {t}");
+                assert_eq!(q.len(), 1, "{theme:?} {size:?} {t}");
                 rows.insert(q[0].1);
             }
-            assert!(rows.len() > 1, "{theme:?}: the ? bobs");
+            assert!(rows.len() > 1, "{theme:?} {size:?}: the ? bobs");
             let other = render(&params(theme, Status::Running, Size::S, 5, 2));
             assert!(!chars(&other).iter().any(|c| c.2 == '?'));
         }
@@ -380,10 +427,10 @@ mod tests {
 
     #[test]
     fn idle_shows_z_cell() {
-        for theme in Theme::ALL {
+        for (theme, size) in Theme::ALL.into_iter().flat_map(|t| Size::ALL.map(|s| (t, s))) {
             for t in 0..60 {
-                let g = render(&params(theme, Status::Idle, Size::S, t, 2));
-                assert!(chars(&g).iter().any(|c| c.2 == 'z' || c.2 == 'Z'), "{theme:?} {t}");
+                let g = render(&params(theme, Status::Idle, size, t, 2));
+                assert!(chars(&g).iter().any(|c| c.2 == 'z' || c.2 == 'Z'), "{theme:?} {size:?} {t}");
             }
             let other = render(&params(theme, Status::Done, Size::S, 5, 2));
             assert!(!chars(&other).iter().any(|c| c.2 == 'z' || c.2 == 'Z'));
@@ -406,11 +453,14 @@ mod tests {
     /// Full-range seeds as cards produce them (FNV-1a of a session id).
     const BIG_SEEDS: [u32; 3] = [u32::MAX, 706_312_658, 0x9e37_79b9];
 
+    /// Mean luminance of the drawn cells, without `skip` glyphs and without the
+    /// eye catchlights (pure white, the same in every state; in a 4-row spirit
+    /// they are a large share of the cells and would mask the body's mood).
     fn luminance(g: &SpiritGrid, skip: &[char]) -> f32 {
         let lum: Vec<f32> = g
             .cells
             .iter()
-            .filter(|c| !skip.contains(&c.ch))
+            .filter(|c| !skip.contains(&c.ch) && c.fg != WHITE)
             .filter_map(|c| c.fg)
             .map(|(r, gg, b)| 0.2126 * f32::from(r) + 0.7152 * f32::from(gg) + 0.0722 * f32::from(b))
             .collect();
@@ -473,10 +523,10 @@ mod tests {
             let spread = lum.iter().cloned().fold(f32::MIN, f32::max) - lum.iter().cloned().fold(f32::MAX, f32::min);
             assert!(spread > 10.0, "{theme:?}: pulse spread {spread}");
             // IDLE is dimmer than RUNNING
-            for t in [0, 20, 45] {
-                let idle = luminance(&render(&params(theme, Status::Idle, Size::S, t, seed)), &['z', 'Z']);
-                let run = luminance(&render(&params(theme, Status::Running, Size::S, t, seed)), &[]);
-                assert!(idle < run * 0.8, "{theme:?} {t}: idle {idle} vs running {run}");
+            for (t, size) in [0, 20, 45].into_iter().flat_map(|t| Size::ALL.map(|s| (t, s))) {
+                let idle = luminance(&render(&params(theme, Status::Idle, size, t, seed)), &['z', 'Z']);
+                let run = luminance(&render(&params(theme, Status::Running, size, t, seed)), &[]);
+                assert!(idle < run * 0.8, "{theme:?} {size:?} {t}: idle {idle} vs running {run}");
             }
             // DONE: gold sparkles appear around the body
             let sparkle = |t| render(&params(theme, Status::Done, Size::S, t, seed)).cells.iter().any(|c| matches!(c.fg, Some((250, 236, 150)) | Some((204, 188, 120))));

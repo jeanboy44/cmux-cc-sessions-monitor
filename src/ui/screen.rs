@@ -11,7 +11,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
-use crate::ui::card::{compact_mode, render_card, render_compact, CARD_H};
+use crate::ui::card::{compact_mode, render_card, render_compact, CARD_H, CARD_W};
 use crate::ui::grid::{card_cols, cell_rect};
 use crate::ui::groups::{divider_text, place_rows, row_of, scroll_to_show_rows, Row};
 use crate::ui::hud::{render_hud, StatusCounts};
@@ -42,6 +42,7 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
         render_preview(f, panel, name.as_deref(), &app.preview_body());
     }
 
+    app.spirits_visible = false;
     let (above, below) = if app.sessions.is_empty() {
         app.cols = 1;
         app.scroll = 0;
@@ -61,6 +62,8 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
 /// vertical scrolling in layout rows; returns (more above, more below).
 /// In compact mode (preview shown, or the area cannot hold one full card,
 /// see [`compact_mode`]) every session is one line in a single column.
+/// Only placed (visible) rows are drawn, so off-screen cards never render a
+/// spirit; `app.spirits_visible` tells the event loop whether to animate.
 fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool, tick: u64) -> (bool, bool) {
     if area.is_empty() {
         return (false, false);
@@ -93,7 +96,9 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool, tick: u
             if compact {
                 render_compact(f, Rect { height: 1, ..*row_rect }, s, &app.config, selected);
             } else {
-                render_card(f, cell_rect(*row_rect, cols, col, 0), s, &app.config, selected, tick);
+                let rect = cell_rect(*row_rect, cols, col, 0);
+                app.spirits_visible |= rect.width >= CARD_W && rect.height >= CARD_H;
+                render_card(f, rect, s, &app.config, selected, tick);
             }
         }
     }
@@ -217,27 +222,89 @@ mod tests {
         assert!(text.contains("proj-t0") && text.contains("proj-t1"), "{text}");
         assert!(has_braille(&text), "scenes drawn: {text}");
         assert!(screen.last().unwrap().contains("Enter 포커스"));
-        assert_eq!(app.cols, 2);
+        assert_eq!(app.cols, 5, "120 / 24");
         // the selected (first) card has the blue border, the second does not
         assert_eq!(buf[(0, 1)].fg, style::SELECTED);
-        assert_eq!(buf[(60, 1)].symbol(), "╭");
-        assert_ne!(buf[(60, 1)].fg, style::SELECTED);
+        assert_eq!(buf[(24, 1)].symbol(), "╭");
+        assert_ne!(buf[(24, 1)].fg, style::SELECTED);
     }
 
     #[test]
     fn draw_scrolls_to_selected_and_hints_more() {
         let mut app = App::new(Config::default());
         app.set_sessions(ten_sessions());
-        // 100x34 -> 2 cols, 2 visible card rows of 5
-        let screen = render(&mut app, 100, 34, 0);
-        assert_eq!(app.cols, 2);
+        // 100x24 -> 4 cols, 2 visible card rows (of 9) out of 3
+        let screen = render(&mut app, 100, 24, 0);
+        assert_eq!(app.cols, 4);
         assert!(screen.last().unwrap().contains("▼ more"));
         app.selected = 9;
-        let screen = render(&mut app, 100, 34, 0);
-        assert_eq!(app.scroll, 3);
+        let screen = render(&mut app, 100, 24, 0);
+        assert_eq!(app.scroll, 1);
         assert!(screen.join("\n").contains("proj-t9"));
         assert!(screen.last().unwrap().contains("▲ more"));
         assert!(!screen.last().unwrap().contains("▼ more"));
+    }
+
+    fn twenty_sessions() -> App {
+        let mut app = App::new(Config::default());
+        app.set_sessions((0..20).map(|i| fake_session(&format!("t{i}"), Status::Running)).collect());
+        app
+    }
+
+    #[test]
+    fn offscreen_cards_are_not_rendered_by_spirit() {
+        use crate::ui::card::{reset_spirit_renders, spirit_renders};
+        let mut app = twenty_sessions();
+        // 100x30: middle 100x28 -> 4 columns, 3 card rows of 9 = 12 of 20 cards visible
+        reset_spirit_renders();
+        render(&mut app, 100, 30, 0);
+        assert_eq!(app.cols, 4);
+        assert_eq!(spirit_renders(), 12, "only visible cards");
+        assert!(app.spirits_visible);
+        // scrolled to the last card: still only what is on screen
+        app.selected = 19;
+        reset_spirit_renders();
+        render(&mut app, 100, 30, 1);
+        assert_eq!(app.scroll, 2);
+        assert_eq!(spirit_renders(), 12);
+        // compact one-line cards (preview on, or a tiny terminal) draw no spirit
+        app.preview = true;
+        reset_spirit_renders();
+        render(&mut app, 150, 30, 2);
+        assert_eq!(spirit_renders(), 0);
+        assert!(!app.spirits_visible);
+        app.preview = false;
+        render(&mut app, 20, 6, 3);
+        assert_eq!(spirit_renders(), 0);
+        assert!(!app.spirits_visible);
+        let mut empty = App::new(Config::default());
+        render(&mut empty, 100, 30, 0);
+        assert!(!empty.spirits_visible);
+    }
+
+    #[test]
+    fn moving_down_keeps_the_selected_card_visible() {
+        let mut app = twenty_sessions();
+        let mut seen = Vec::new();
+        for _ in 0..7 {
+            let buf = draw_buf(100, 30, |f| draw(f, &mut app, 0, Instant::now()));
+            let text = rows(&buf)[1..29].join("\n");
+            let sel = app.selected;
+            assert!(text.contains(&format!("proj-t{sel} ")), "sel={sel} scroll={}: {text}", app.scroll);
+            let blue: Vec<(u16, u16)> = (1..29).flat_map(|y| (0..100).map(move |x| (x, y))).filter(|&p| buf[p].symbol() == "╭" && buf[p].fg == style::SELECTED).collect();
+            assert_eq!(blue.len(), 1, "sel={sel}: one blue card on screen");
+            seen.push(sel);
+            app.apply_move(Dir::Down);
+        }
+        assert_eq!(seen, vec![0, 4, 8, 12, 16, 16, 16]);
+        assert_eq!(app.scroll, 2);
+        // and back up again
+        for _ in 0..4 {
+            app.apply_move(Dir::Up);
+            let text = render(&mut app, 100, 30, 0)[1..29].join("\n");
+            assert!(text.contains(&format!("proj-t{} ", app.selected)), "{text}");
+        }
+        assert_eq!((app.selected, app.scroll), (0, 0));
     }
 
     #[test]
@@ -430,8 +497,10 @@ mod tests {
             let screen = render(&mut app, w, h, 0);
             assert!(app.preview_too_small, "{w}x{h}");
             assert_eq!(app.grid_rect, Rect::new(0, 1, w, h - 2));
-            assert_eq!(app.cols, 1, "{w}x{h}");
-            assert_eq!(screen[1].starts_with('╭'), cards, "{w}x{h}: normal grid, not the preview list");
+            let want_cols = if cards { crate::ui::grid::card_cols(w) } else { 1 };
+            assert_eq!(app.cols, want_cols, "{w}x{h}: the normal grid (2 cards across at 60-69)");
+            // cards are centered in their grid cells
+            assert_eq!(screen[1].trim_start().starts_with('╭'), cards, "{w}x{h}: normal grid, not the preview list");
             assert!(screen.last().unwrap().contains(PREVIEW_TOO_SMALL), "{}", screen.last().unwrap());
             assert!(!screen[..h as usize - 1].join("\n").contains("미리보기 · "), "no panel");
         }

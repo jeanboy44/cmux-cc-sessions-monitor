@@ -9,7 +9,7 @@ use super::noise::{hf, seed_phase, slot, Rng};
 use super::particles::Particle;
 use super::state::twinkle;
 use super::theme::Theme;
-use super::{Ctx, BASE_R, CX, DH, DW, FLOOR_Y};
+use super::{Ctx, BASE_R, CX, DH, DW};
 
 /// Colour ramp: rim -> dark -> mid -> light.
 pub(super) fn ramp(e: Theme) -> [Rgb; 4] {
@@ -145,7 +145,7 @@ pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
                 let c = lerp(ramp[1], CARD_BG, p);
                 for i in 0..20 {
                     let a = i as f32 / 20.0 * TAU;
-                    cv.blk(CX + hw * a.cos() - 0.5, FLOOR_Y + vr * a.sin() - 0.5, c, 1, true);
+                    cv.blk(CX + hw * a.cos() - 0.5, ctx.floor + vr * a.sin() - 0.5, c, 1, true);
                 }
             }
         }
@@ -171,7 +171,7 @@ pub(super) fn max_life(e: Theme) -> u64 {
 }
 
 /// Ambient particles for one tick: embers, drips, falling snow, sparks and arcs.
-pub(super) fn ambient(e: Theme, act: f32, cy: f32, r: &mut Rng, parts: &mut Vec<Particle>) {
+pub(super) fn ambient(e: Theme, act: f32, cy: f32, floor: f32, r: &mut Rng, parts: &mut Vec<Particle>) {
     match e {
         Theme::Fire => {
             if r.chance(0.22 * act) {
@@ -187,7 +187,7 @@ pub(super) fn ambient(e: Theme, act: f32, cy: f32, r: &mut Rng, parts: &mut Vec<
                 let x = CX + r.range(-3.0, 3.0);
                 let mut p = Particle::new(x, cy + BASE_R + 0.3, 0.0, 0.05, 40, [130., 205., 255.], [60., 140., 235.]);
                 p.ay = 0.035;
-                p.floor = FLOOR_Y;
+                p.floor = floor;
                 parts.push(p);
             }
         }

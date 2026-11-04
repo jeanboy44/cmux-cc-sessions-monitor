@@ -32,8 +32,11 @@ pub use settings_ctl::PrPoller;
 pub const FLASH_DURATION: Duration = Duration::from_secs(3);
 /// How long a startup notice (e.g. an unreadable config file) stays visible.
 pub const NOTICE_DURATION: Duration = Duration::from_secs(6);
-/// Input poll timeout = one animation frame at [`FPS`].
+/// Redraw period while something animates: one animation frame at [`FPS`].
 pub const FRAME: Duration = Duration::from_millis(1000 / FPS);
+/// Redraw period when no spirit is on screen (compact list, empty screen):
+/// snapshots, footer messages and the preview still show up quickly.
+pub const IDLE_FRAME: Duration = Duration::from_millis(250);
 /// Footer text when the selected session has no cmux ids.
 pub const NO_TARGET: &str = "이동할 수 없는 세션";
 /// Footer text while a focus call is running in the background.
@@ -138,6 +141,8 @@ pub struct App {
     /// Screen lines the preview reads: the last drawn panel's inner height
     /// (capped), [`SCREEN_LINES`] before the first panel is drawn.
     preview_read_lines: u16,
+    /// The last drawn frame had at least one full card (with its spirit).
+    pub spirits_visible: bool,
     /// cmux windows in tree order (tiles are grouped by window).
     pub window_order: Vec<String>,
     /// The window holding the monitor itself, if known.
@@ -172,6 +177,7 @@ impl App {
             grid_rect: Rect::default(),
             preview_too_small: false,
             preview_read_lines: SCREEN_LINES,
+            spirits_visible: false,
             window_order: Vec::new(),
             current_window: None,
         }
@@ -299,6 +305,16 @@ impl App {
         self.sessions.get(self.selected)
     }
 
+    /// How long to wait between redraws: [`FRAME`] while spirits are on
+    /// screen (or the settings cursor blinks), else [`IDLE_FRAME`].
+    pub fn frame_timeout(&self) -> Duration {
+        if self.spirits_visible || self.mode == Mode::Settings {
+            FRAME
+        } else {
+            IDLE_FRAME
+        }
+    }
+
     /// Layout rows of the tile grid (window groups, `cols` columns); the
     /// renderer and the navigation both use it.
     pub fn grid_rows(&self) -> Vec<Row> {
@@ -412,9 +428,15 @@ pub fn latest<T>(rx: &mpsc::Receiver<T>) -> Option<T> {
     last
 }
 
-/// 12 fps animation tick since `start`.
+/// Animation tick ([`FPS`] per second) since `start`.
 pub fn tick_at(start: Instant, now: Instant) -> u64 {
     (now.saturating_duration_since(start).as_millis() * u128::from(FPS) / 1000) as u64
+}
+
+/// Input poll timeout for a frame that started at `frame_start`: what is left
+/// of `period`, so drawing time does not stretch the frame.
+pub fn poll_timeout(frame_start: Instant, now: Instant, period: Duration) -> Duration {
+    period.saturating_sub(now.saturating_duration_since(frame_start))
 }
 
 /// Runs the TUI until the user quits. Starts the refresh and branch threads
@@ -480,7 +502,8 @@ pub fn run(
                 app.focus_done(result, Instant::now());
             }
             terminal.draw(|f| screen::draw(f, &mut app, tick, now))?;
-            if event::poll(FRAME)? {
+            // Redraw every frame while spirits are visible; a key press redraws at once.
+            if event::poll(poll_timeout(now, Instant::now(), app.frame_timeout()))? {
                 if let Event::Key(key) = event::read()? {
                     app.handle_key(key, &cmux, Instant::now());
                 }
@@ -955,10 +978,45 @@ mod tests {
     }
 
     #[test]
-    fn tick_is_twelve_per_second() {
+    fn tick_advances_at_animation_rate_when_cards_visible() {
+        assert_eq!(FPS, 15);
+        assert!(FRAME >= Duration::from_millis(60) && FRAME <= Duration::from_millis(1000 / 15), "{FRAME:?}");
         let t0 = Instant::now();
         assert_eq!(tick_at(t0, t0), 0);
-        assert_eq!(tick_at(t0, t0 + Duration::from_secs(1)), 12);
-        assert_eq!(tick_at(t0, t0 + Duration::from_millis(2500)), 30);
+        assert_eq!(tick_at(t0, t0 + Duration::from_secs(1)), 15);
+        assert_eq!(tick_at(t0, t0 + Duration::from_millis(2500)), 37);
+        // one frame per FRAME: the tick never goes back and moves about once a frame
+        let ticks: Vec<u64> = (0..=30u32).map(|i| tick_at(t0, t0 + FRAME * i)).collect();
+        assert!(ticks.windows(2).all(|w| w[1] >= w[0] && w[1] - w[0] <= 1), "{ticks:?}");
+        assert!(ticks[30] >= 28, "about 15 per second: {ticks:?}");
+
+        // the loop redraws every FRAME while spirit cards are on screen
+        let mut app = app_with(3, 1);
+        let draw_at = |app: &mut App, w: u16, h: u16| {
+            crate::ui::test_util::draw(w, h, |f| screen::draw(f, app, 0, Instant::now()));
+        };
+        draw_at(&mut app, 120, 40);
+        assert!(app.spirits_visible);
+        assert_eq!(app.frame_timeout(), FRAME);
+        // no spirit on screen (preview list, tiny terminal, no sessions): a slower idle redraw
+        app.preview = true;
+        draw_at(&mut app, 150, 30);
+        assert!(!app.spirits_visible);
+        assert!(app.frame_timeout() == IDLE_FRAME && IDLE_FRAME > FRAME);
+        // the settings cursor blinks: full rate again
+        app.mode = Mode::Settings;
+        assert_eq!(app.frame_timeout(), FRAME);
+        app.mode = Mode::Tiles;
+        app.preview = false;
+        draw_at(&mut app, 120, 40);
+        assert_eq!(app.frame_timeout(), FRAME);
+        let mut empty = App::new(Config::default());
+        draw_at(&mut empty, 120, 40);
+        assert_eq!(empty.frame_timeout(), IDLE_FRAME);
+
+        // the poll waits only for what is left of the frame, so drawing time does not slow the clock
+        assert_eq!(poll_timeout(t0, t0 + Duration::from_millis(20), FRAME), FRAME - Duration::from_millis(20));
+        assert_eq!(poll_timeout(t0, t0 + FRAME * 2, FRAME), Duration::ZERO);
+        assert_eq!(poll_timeout(t0, t0, FRAME), FRAME);
     }
 }

@@ -106,7 +106,8 @@ pub(super) fn marks(grid: &mut SpiritGrid, cv: &Canvas, ctx: &Ctx, pulse: f32) {
     let g = &cv.g;
     let rr = BASE_R * g.ppu;
     let qc = ((g.rcx + 0.95 * rr) / 2.0).floor() as i32;
-    let qr = (((g.rcy - 1.05 * rr) / 4.0).floor() as i32).max(0);
+    // at least row 1, so the mark always has a row above to bob into
+    let qr = (((g.rcy - 1.05 * rr) / 4.0).floor() as i32).max(1);
     let mark = match ctx.state {
         Status::NeedsInput => {
             let r = if (ctx.tf * 0.12).sin() > 0.0 { (qr - 1).max(0) } else { qr };

@@ -62,7 +62,7 @@ pub(super) fn simulate(ctx: &Ctx) -> Sim {
         parts.retain(element::keep);
         let mut r = Rng::for_tick(ctx.seed, u);
         let cy = CY + state::bob(ctx.state, ctx.seed, super::phase_tick(u));
-        element::ambient(ctx.elem, act, cy, &mut r, &mut parts);
+        element::ambient(ctx.elem, act, cy, ctx.floor, &mut r, &mut parts);
         if running && state::casts_at(ctx.seed, u) {
             element::cast(ctx.elem, cy, &mut r, &mut parts);
             last_cast = Some(u);

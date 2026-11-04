@@ -18,11 +18,11 @@ pub const BORDER: border::Set = border::ROUNDED;
 /// Menu / selection cursor glyph.
 pub const CURSOR: &str = "▶";
 
-/// Cursor blink period in 12 fps ticks (visible for the first half).
+/// Cursor blink period in ticks, 0.8 s at [`FPS`] (visible for the first half).
 pub const CURSOR_PERIOD: u64 = 12;
 
-/// Animation frame rate the tick counter is based on.
-pub const FPS: u64 = 12;
+/// Animation frame rate the tick counter is based on (spirits move at it).
+pub const FPS: u64 = 15;
 
 /// Selection colour (selected card border, `▶` cursor, settings window,
 /// scroll hints): "cmux blue" `#4C8DFF`, the colour cmux itself gives agent
