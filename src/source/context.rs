@@ -80,7 +80,7 @@ fn usage_tokens(usage: &Value) -> Option<u64> {
 
 /// Usage percentage from the last main-chain `message.usage` in the last
 /// [`TAIL_BYTES`] of `path`, over `limit` tokens. A first line cut by the
-/// window and unparsable lines are skipped.
+/// window, unparsable lines and malformed usage records are skipped.
 pub fn read_transcript_usage(path: &Path, limit: u64) -> Option<f32> {
     if limit == 0 {
         return None;
@@ -110,7 +110,10 @@ pub fn read_transcript_usage(path: &Path, limit: u64) -> Option<f32> {
         let Some(usage) = v.pointer("/message/usage") else {
             continue;
         };
-        let tokens = usage_tokens(usage)?;
+        // A malformed usage falls back to the next older record.
+        let Some(tokens) = usage_tokens(usage) else {
+            continue;
+        };
         return percent(tokens as f64 / limit as f64 * 100.0);
     }
     None
@@ -299,6 +302,14 @@ mod tests {
         let s = dir.path().join("str.jsonl");
         write_lines(&s, &[r#"{"type":"assistant","message":{"usage":{"input_tokens":"5"}}}"#.into()]);
         assert_eq!(read_transcript_usage(&s, 200_000), None, "string tokens");
+    }
+
+    #[test]
+    fn transcript_malformed_newest_usage_falls_back_to_older() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(&t, &[assistant(40_000, 0, 0), r#"{"type":"assistant","message":{"usage":{"input_tokens":"oops"}}}"#.into()]);
+        assert_eq!(read_transcript_usage(&t, 200_000), Some(20.0));
     }
 
     #[test]

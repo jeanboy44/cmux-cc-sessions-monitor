@@ -43,6 +43,22 @@ pub(super) struct Sim {
     pub looking: bool,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests measuring the cast magic alone switch ambient particles off.
+    pub(super) static NO_AMBIENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn ambient_on() -> bool {
+    !NO_AMBIENT.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn ambient_on() -> bool {
+    true
+}
+
 /// Particles alive at `ctx.t` (ticks start at 1; tick 0 has none).
 pub(super) fn simulate(ctx: &Ctx) -> Sim {
     let window = element::max_life_for(ctx.elem, ctx.magic).max(LOOK_TICKS) + 1;
@@ -62,7 +78,9 @@ pub(super) fn simulate(ctx: &Ctx) -> Sim {
         parts.retain(|p| element::keep(p, ctx.right));
         let mut r = Rng::for_tick(ctx.seed, u);
         let cy = CY + state::bob(ctx.state, ctx.seed, super::phase_tick(u));
-        element::ambient(ctx.elem, act, cy, ctx.floor, &mut r, &mut parts);
+        if ambient_on() {
+            element::ambient(ctx.elem, act, cy, ctx.floor, &mut r, &mut parts);
+        }
         if running && state::casts_at(ctx.seed, u) {
             element::cast(ctx.elem, ctx.magic, ctx.right, cy, &mut r, &mut parts);
             last_cast = Some(u);
@@ -88,6 +106,17 @@ pub(super) fn draw(cv: &mut Canvas, parts: &[Particle]) {
             cv.blk(x + 1.0, y, c, p.prio, p.behind);
             cv.blk(x, y + 1.0, c, p.prio, p.behind);
             cv.blk(x + 1.0, y + 1.0, c, p.prio, p.behind);
+        }
+        // big magic: a 3 x 3 block while young, 2 x 2 while fading
+        if p.size == 3 {
+            let n = if lf > 0.5 { 3 } else if lf > 0.25 { 2 } else { 1 };
+            for j in 0..n {
+                for i in 0..n {
+                    if i > 0 || j > 0 {
+                        cv.blk(x + i as f32, y + j as f32, c, p.prio, p.behind);
+                    }
+                }
+            }
         }
     }
 }

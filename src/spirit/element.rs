@@ -170,15 +170,15 @@ pub(super) struct Scale {
     pub life: f32,
     /// launch speed (so: range)
     pub speed: f32,
-    /// particle size: -1 = always 1 dot block, 0 = as designed, 1 = always big
+    /// particle size: -1 = always 1 dot block, 0 = as designed, 1 = one step bigger (up to 3)
     pub grow: i8,
 }
 
 pub(super) fn scale(m: Magic) -> Scale {
     match m {
-        Magic::Small => Scale { count: 0.5, life: 0.5, speed: 0.8, grow: -1 },
+        Magic::Small => Scale { count: 0.4, life: 0.4, speed: 0.6, grow: -1 },
         Magic::Normal => Scale { count: 1.0, life: 1.0, speed: 1.0, grow: 0 },
-        Magic::Big => Scale { count: 1.6, life: 1.4, speed: 1.3, grow: 1 },
+        Magic::Big => Scale { count: 2.2, life: 1.8, speed: 1.7, grow: 1 },
     }
 }
 
@@ -194,7 +194,7 @@ impl Scale {
     fn size(self, s: u32) -> u32 {
         match self.grow {
             -1 => 1,
-            1 => 2,
+            1 => (s + 1).min(3),
             _ => s,
         }
     }
@@ -314,7 +314,7 @@ pub(super) fn cast(e: Theme, m: Magic, right: f32, cy: f32, r: &mut Rng, parts: 
             let mut x = CX + BASE_R - 0.5;
             // the bolt's length is the magic's range
             let end = match m {
-                Magic::Small => CX + BASE_R + 6.0,
+                Magic::Small => CX + BASE_R + 3.0,
                 _ => right - 1.0,
             };
             while x < end {

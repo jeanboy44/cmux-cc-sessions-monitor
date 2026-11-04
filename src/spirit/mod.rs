@@ -565,6 +565,47 @@ mod tests {
         }
     }
 
+    /// Painted cells right of the body and the farthest painted column of a
+    /// running spirit, over a replay window of several casts.
+    fn magic_spread(theme: Theme, magic: Magic) -> (u32, u16) {
+        // cast particles only: ambient snow/sparks are not part of the magic
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        let (mut cells, mut reach) = (0u32, 0u16);
+        let body_right = (body_center_x(Size::S) + 3.0).ceil() as u16;
+        for seed in [4, 11, 23] {
+            for t in 0..240 {
+                let g = render(&SpiritParams { magic, ..params(theme, Status::Running, Size::S, t, seed) });
+                for row in 0..g.rows {
+                    for col in body_right..g.cols {
+                        if ('\u{2801}'..='\u{28ff}').contains(&cell(&g, col, row).ch) {
+                            cells += 1;
+                            reach = reach.max(col);
+                        }
+                    }
+                }
+            }
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
+        (cells, reach)
+    }
+
+    #[test]
+    fn magic_levels_are_clearly_visible() {
+        let spreads: Vec<_> = Theme::ALL.iter().map(|&t| (t, Magic::ALL.map(|m| magic_spread(t, m)))).collect();
+        for (theme, [(s_cells, s_reach), (n_cells, n_reach), (b_cells, b_reach)]) in &spreads {
+            println!("{theme:?}: reach S {s_reach} N {n_reach} B {b_reach}; cells S {s_cells} N {n_cells} B {b_cells}");
+        }
+        for &(theme, [(s_cells, s_reach), (n_cells, n_reach), (b_cells, b_reach)]) in &spreads {
+            // a running lightning body's own spikes already reach col 8 (measured
+            // with no bolt at all), so small magic can only end 2 columns short
+            let gap = if theme == Theme::Lightning { 2 } else { 3 };
+            assert!(s_reach + gap <= n_reach, "{theme:?}: small reach {s_reach} vs normal {n_reach}");
+            assert!(b_reach >= n_reach + 4, "{theme:?}: big reach {b_reach} vs normal {n_reach}");
+            assert!(s_cells * 10 <= n_cells * 6, "{theme:?}: small cells {s_cells} vs normal {n_cells}");
+            assert!(b_cells * 10 >= n_cells * 15, "{theme:?}: big cells {b_cells} vs normal {n_cells}");
+        }
+    }
+
     #[test]
     fn magic_grid_widths() {
         assert_eq!(grid_size_for(Size::S, Magic::Small), (11, 4));
