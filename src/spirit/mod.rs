@@ -407,6 +407,7 @@ fn bubble_spots(p: &SpiritParams) -> Vec<(i32, i32, element::Stage)> {
 mod tests {
     use super::*;
     use crate::model::Status;
+    use std::f32::consts::TAU;
     use theme::Theme;
 
     const STATUSES: [Status; 5] = [Status::Running, Status::NeedsInput, Status::Idle, Status::Done, Status::Unknown];
@@ -1676,6 +1677,29 @@ mod tests {
         0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)
     }
 
+    /// Rotation (radians) of the water vortex between two ticks of a cast.
+    fn vortex_turn(magic: Magic, seed: u32, t: u64) -> f32 {
+        let at = |t| magic::vortex_rot(&Ctx::new(&SpiritParams { magic, ..params(Theme::Water, Status::Running, Size::S, t, seed) }));
+        at(t + 1) - at(t)
+    }
+
+    #[test]
+    fn water_normal_spins_very_slowly() {
+        for seed in [4, 11, 706_312_658] {
+            for t in [10, 500, 65_534, u64::MAX - 2] {
+                let [s, n, b] = Magic::ALL.map(|m| vortex_turn(m, seed, t));
+                if t % (1 << 16) == (1 << 16) - 1 {
+                    continue;
+                }
+                // about one revolution every 8 to 10 s at 15 fps at Normal
+                let rev = TAU / n / 15.0;
+                assert!((8.0..=10.0).contains(&rev), "{seed} {t}: normal revolution {rev} s");
+                assert!(n > 0.0 && n <= 0.3 * b, "{seed} {t}: normal {n} vs big {b}");
+                assert!(n <= 0.3 * s && b >= n, "{seed} {t}: small {s} normal {n} big {b}");
+            }
+        }
+    }
+
     #[test]
     fn water_vortex_is_glossy_and_shaded() {
         particles::NO_AMBIENT.with(|c| c.set(true));
@@ -1683,12 +1707,15 @@ mod tests {
             let c = first_cast(seed);
             for magic in [Magic::Normal, Magic::Big] {
                 let mut brightest = Vec::new();
-                let mut frames = Vec::new();
+                let (mut frames, mut flat) = (Vec::new(), 0usize);
                 for t in c + 5..c + 13 {
                     let g = render(&SpiritParams { magic, ..params(Theme::Water, Status::Running, Size::S, t, seed) });
                     let cells: Vec<(u16, u16, f32)> = magic_cells(&g).into_iter().filter_map(|(col, row)| cell(&g, col, row).fg.map(|fg| (col, row, lum(fg)))).collect();
                     let bands: std::collections::BTreeSet<u32> = cells.iter().map(|c| (c.2 / 50.0) as u32).collect();
-                    assert!(bands.len() >= 3, "{seed} {magic:?} {t}: luminance bands {bands:?}");
+                    // shaded in at least three luminance bands (on most frames: a
+                    // slow normal disc may hold an arm over the rim for a while)
+                    flat += usize::from(bands.len() < 3);
+                    assert!(bands.len() >= 2, "{seed} {magic:?} {t}: luminance bands {bands:?}");
                     let mean = cells.iter().map(|c| c.2).sum::<f32>() / cells.len() as f32;
                     let top = cells.iter().cloned().fold((0, 0, 0.0f32), |a, b| if b.2 > a.2 { b } else { a });
                     assert!(top.2 > mean + 45.0, "{seed} {magic:?} {t}: highlight {} vs mean {mean}", top.2);
@@ -1696,9 +1723,12 @@ mod tests {
                     let (cx, cy) = (cells.iter().map(|c| f32::from(c.0)).sum::<f32>() / cells.len() as f32, cells.iter().map(|c| f32::from(c.1)).sum::<f32>() / cells.len() as f32);
                     assert!(f32::from(top.0) <= cx + 0.5 && f32::from(top.1) <= cy + 0.5, "{seed} {magic:?} {t}: highlight {top:?} vs centre ({cx}, {cy})");
                     brightest.push((top.0, top.1));
-                    frames.push(cells.iter().map(|c| (c.0, c.1)).collect::<Vec<_>>());
+                    frames.push(magic_cells(&g).into_iter().map(|(col, row)| (col, row, *cell(&g, col, row))).collect::<Vec<_>>());
                 }
-                assert!(frames.windows(2).filter(|w| w[0] != w[1]).count() >= 4, "{seed} {magic:?}: the arms rotate");
+                assert!(flat * 4 <= frames.len(), "{seed} {magic:?}: {flat} of {} frames in under three bands", frames.len());
+                // the normal arms turn very slowly (see water_normal_spins_very_slowly)
+                let turns = if magic == Magic::Normal { 2 } else { 4 };
+                assert!(frames.windows(2).filter(|w| w[0] != w[1]).count() >= turns, "{seed} {magic:?}: the arms rotate");
                 let still = brightest.windows(2).filter(|w| w[0] == w[1]).count();
                 assert!(still * 10 >= (brightest.len() - 1) * 6, "{seed} {magic:?}: the light stays put {brightest:?}");
             }
@@ -1872,8 +1902,9 @@ mod tests {
     /// running water/poison frames that show their magic, and the level
     /// rebalance (smaller Normal, clearer Small) the 15 running fire, water
     /// and poison frames casting Small or Normal magic (entries 1-3, 5, 7,
-    /// 41-43, 45, 47, 81-83, 85, 87); every other frame is still the
-    /// pre-stage render.
+    /// 41-43, 45, 47, 81-83, 85, 87). The slow Normal vortex re-captured
+    /// the running water Normal frames 41-43 and 47. Every other frame is
+    /// still the pre-stage render.
     #[rustfmt::skip]
     const GOLDEN: [u64; 160] = [
         0x3512407e8b3be050, 0x47bbd98251e8fd5a, 0xeb233e7a17abe412, 0xcdf749eca37373e8, 0xac4e96eb863a74c1, 0x11dad5b57fe9a68b, 0xfc108cd1c4fb901d, 0xfb9527393cb63a77,
@@ -1881,7 +1912,7 @@ mod tests {
         0xef4f5337fe84e25d, 0x9491d9830f79a16d, 0xfade110e02982b10, 0xb3cae76b73ec5f64, 0x1bbf5c77d2e7c756, 0xb35def89ef4ff9c9, 0xe1361db73402ebb5, 0xae106a39f3427582,
         0xb07554c2511c01b3, 0x7c2ccbca01365697, 0x7324e7ce2c9bce28, 0xa4280c3f454ca467, 0x91eac22fa83d1bcf, 0xddb08feddde44f72, 0x7201e9d0b17de902, 0x0f45b90a4d2df7c3,
         0x9f8f36f54ef0c55f, 0x3bc34a7c5a30173a, 0x795315231571603c, 0xac841e8c4f701af2, 0x2bd983eaf378328d, 0x4684d7e93e1ecf26, 0x263984a74cd48d43, 0x9033c7cabef7dcce,
-        0xe0f1d9d204dbb53b, 0x3a41efc41974487d, 0xc91094288e06c585, 0x26c65b168f265c92, 0xcff087d2152ea409, 0x80fa72fb50148235, 0x724c882ced531194, 0x284402919eee487c,
+        0xe0f1d9d204dbb53b, 0x47136928f00dee87, 0x0c53bb4526ba73df, 0x0f1d25da1a6fc8d7, 0xcff087d2152ea409, 0x80fa72fb50148235, 0x724c882ced531194, 0xf063e204ce83a10e,
         0x623cb10f33e21bd2, 0xb81b2bfc61e53c3b, 0xeba92b71721f1094, 0x856abff4dcb80e08, 0x37d6e13fa7a6f6d8, 0xcee480f5bb3ba604, 0xf74fc0ab09547254, 0x67fdef386bcdef4a,
         0xd82350e5a41e871f, 0x6eda02e347dd31c1, 0x03f9c0c849cfb49c, 0xc0e10b81431aa916, 0xd021c09188dbd3c3, 0x6b4b5378291cb075, 0x5eab5e9a96b16fcf, 0x3e5bad230a45cfd7,
         0xa98ffb855054ad80, 0x5e2ff43d23c35201, 0x12d998a33761e63a, 0x47de1dd41ee777b0, 0xdc6417a2c1fe9a9e, 0x97a0921451361b80, 0x4e4fcdacb9d69a47, 0xd63cde832ab3eb0e,

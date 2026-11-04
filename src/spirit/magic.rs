@@ -247,6 +247,21 @@ const DISC_TILT: f32 = 1.15;
 /// Short over long axis of the disc (the perspective squash).
 const DISC_SQUASH: f32 = 0.76;
 
+/// Turn of the water vortex per tick (radians). Normal turns very slowly,
+/// one revolution in about 8.4 s at 15 fps (a seventh of the others); Small
+/// and Big keep the brisk spin.
+fn vortex_spin(m: Magic) -> f32 {
+    match m {
+        Magic::Small | Magic::Big => 0.35,
+        Magic::Normal => 0.05,
+    }
+}
+
+/// Rotation angle of the vortex's spiral arms on a frame.
+pub(super) fn vortex_rot(ctx: &Ctx) -> f32 {
+    ctx.tf * vortex_spin(ctx.magic) + seed_phase(ctx.seed, 0x5B1)
+}
+
 /// Water: a glossy, translucent whirlpool. A dark deep-blue core, a sparse
 /// mid-blue body, spiral arms that brighten toward their tips, a lighter rim
 /// and a bright specular highlight from the upper left (it stays put while
@@ -270,7 +285,7 @@ fn vortex(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
     // screen half extents of the tilted disc (normalise the highlight spot)
     let hx = (ra * ra * ca * ca + rb * rb * sa * sa).sqrt();
     let hy = (ra * ra * sa * sa + rb * rb * ca * ca).sqrt();
-    let rot = ctx.tf * 0.35 + seed_phase(ctx.seed, 0x5B1);
+    let rot = vortex_rot(ctx);
     let twist = 2.6;
     let arms_f = arms as f32;
     // disc coordinates (along the long axis, along the short axis) -> screen offset
