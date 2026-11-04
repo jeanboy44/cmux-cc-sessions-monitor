@@ -14,7 +14,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 - Context usage sets how hard the spirit works (relaxed, lively, struggling; see [Context usage setup](#context-usage-setup)) and, while running, the size of the magic: small under 30%, normal from 30%, big from 70%, and a red warning flicker above 90%.
 - The card border blinks blue while the session has unread cmux notifications, for example when it finished.
 - `Enter` (or `Space`) jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
-- Cards are grouped by cmux window. An optional PR chip shows the open pull request for the branch.
+- Cards are grouped by cmux window. An optional PR chip shows the session's own pull request, taken from the PR meta your hook writes (see Limitations below), not looked up from the branch, so two sessions on the same branch can show different PRs.
 - Running Claude Code subagents show on the card: a `◇×N` marker on the standard card's badge row, one `◇ kind · description` row each on the large card, and one round bead each in a row along the bottom of the spirit's animation area, growing right from the body, in the colour of the subagent model's element (see [Subagents](#subagents)).
 
 ## Install
@@ -108,7 +108,7 @@ If the session's process is gone, the session is Done. When signals disagree, th
 - Needs a terminal with 24-bit colour and a font with braille characters.
 - It reads cmux and Claude Code internal files, which are not a public API and may change between versions.
 - Read-only: it never sends input to sessions. The preview shows whatever is on the session's screen.
-- PR lookup (off by default) uses your existing `gh` or `az` login.
+- The PR chip (off by default) reads the session's own `~/.claude/session-meta/<session id>.json`, `{"prs":[{"number":N,"branch":"…",…}, …]}` with the newest entry last (the number may be an integer or a string; other fields are ignored). The entry on the session's current branch wins, else the last one; a session without that file shows no PR. The state (review, approved, …) comes from the branch lookup through your existing `gh` or `az` login when it finds that same PR number, and is shown as `?` otherwise.
 
 ## Development
 

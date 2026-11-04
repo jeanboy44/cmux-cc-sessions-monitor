@@ -16,7 +16,8 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::branch::{BranchCache, BranchTarget, BranchTargets};
 use crate::config::Config;
 use crate::merge::{apply_notifications, merge_sessions, select_refs};
-use crate::model::{Session, Status};
+use crate::model::{Pr, PrState, Session, Status};
+use crate::source::session_meta::{self, default_session_meta_dir};
 use crate::pr::{pr_note, PrCache, PrLookup};
 use crate::source::claude_sessions::read_claude_sessions;
 use crate::source::context::{default_ctx_dirs, read_ctx_latest, resolve_ctx, safe_id, CtxCalibration, TranscriptCache};
@@ -104,6 +105,8 @@ pub struct RefreshDeps<'a> {
     pub cmux: &'a dyn Cmux,
     pub config: Config,
     pub pr_cache: Option<&'a PrCache>,
+    /// Per-session PR meta (`<session id>.json`) written by the user's hook.
+    pub session_meta_dir: PathBuf,
     /// Filled by the branch thread; only read here (never blocks).
     pub branches: Option<&'a BranchCache>,
     pub now: SystemTime,
@@ -202,13 +205,18 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
     }
     let mut note = None;
     if extras.pr {
-        if let Some(cache) = deps.pr_cache {
-            let (mut reasons, mut pending) = (Vec::new(), false);
-            for s in sessions.iter_mut() {
-                let Some(b) = &s.branch else { continue };
+        // The PR number comes from the session's own meta (never from its
+        // branch, which sessions can share). The cached branch lookup only
+        // lends its title/state when it found that very PR.
+        let (mut reasons, mut pending) = (Vec::new(), false);
+        for s in sessions.iter_mut() {
+            let Some(prs) = session_meta::read_prs(&deps.session_meta_dir, &s.id) else { continue };
+            let Some(chosen) = session_meta::pick(&prs, s.branch.as_deref()) else { continue };
+            let mut pr = Pr { number: chosen.number, title: String::new(), state: PrState::Unknown };
+            if let (Some(cache), Some(b)) = (deps.pr_cache, &s.branch) {
                 match cache.get(&s.cwd, b) {
-                    PrLookup::Found(pr) => s.pr = Some(pr),
-                    PrLookup::None => {}
+                    PrLookup::Found(found) if found.number == chosen.number => pr = found,
+                    PrLookup::Found(_) | PrLookup::None => {}
                     PrLookup::Unknown => pending = true,
                     PrLookup::Unavailable(reason) => {
                         s.pr_unavailable = true;
@@ -216,8 +224,9 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
                     }
                 }
             }
-            note = pr_note(&reasons, pending);
+            s.pr = Some(pr);
         }
+        note = pr_note(&reasons, pending);
     }
     // Model and context usage. The transcript tail (cached, read once per
     // change) gives the model; usage prefers the small statusline file, which
@@ -305,6 +314,7 @@ pub fn spawn_refresh(
                     cmux: &cmux,
                     config: cfg,
                     pr_cache: pr.as_ref().map(|(c, _)| c.as_ref()),
+                    session_meta_dir: default_session_meta_dir(),
                     branches: branches.as_ref().map(|(c, _)| c.as_ref()),
                     now: SystemTime::now(),
                     own_surface: own_surface.clone(),
@@ -409,6 +419,7 @@ mod tests {
             cmux,
             config: Config::default(),
             pr_cache: None,
+            session_meta_dir: dir.join("session-meta"),
             branches: None,
             now: SystemTime::now(),
             own_surface: None,
@@ -913,6 +924,48 @@ mod tests {
         assert_eq!(transcript_for(&s, projects), None, "unsafe id");
     }
 
+    fn write_meta(d: &RefreshDeps, id: &str, body: &str) {
+        std::fs::create_dir_all(&d.session_meta_dir).unwrap();
+        std::fs::write(d.session_meta_dir.join(format!("{id}.json")), body).unwrap();
+    }
+
+    #[test]
+    fn same_branch_sessions_get_their_own_pr_or_none() {
+        let dir = setup();
+        for (pid, id) in [(11, "a"), (12, "b"), (13, "c")] {
+            write_claude(&dir.path().join("sessions"), pid, id, "busy");
+        }
+        let cmux = FakeCmux::new(vec![cref("a", true), cref("b", true), cref("c", true)]);
+        let branches = BranchCache::new();
+        for id in ["a", "b", "c"] {
+            cached(&branches, id, "shared");
+        }
+        // The branch lookup finds #699 (review pending) for everyone on the branch.
+        let prs = PrCache::new();
+        for id in ["a", "b", "c"] {
+            let key = (PathBuf::from(format!("/home/user/{id}")), "shared".to_string());
+            prs.put(key, PrLookup::Found(Pr { number: 699, title: "t".into(), state: PrState::ReviewPending }));
+        }
+        let mut d = deps(dir.path(), &cmux);
+        d.branches = Some(&branches);
+        d.pr_cache = Some(&prs);
+        d.config.extras.pr = true;
+        write_meta(&d, "a", r#"{"prs":[{"number":699,"branch":"shared"}]}"#);
+        write_meta(&d, "b", r#"{"prs":[{"number":"701","branch":"other"}]}"#);
+        // c has no meta file at all
+        let snap = build_snapshot(&d, &Snapshot::default());
+        let by = |id: &str| snap.sessions.iter().find(|s| s.id == id).unwrap();
+        let a = by("a").pr.clone().unwrap();
+        assert_eq!((a.number, a.state), (699, PrState::ReviewPending), "same number: lookup state kept");
+        let b = by("b").pr.clone().unwrap();
+        assert_eq!((b.number, b.state), (701, PrState::Unknown), "number differs from the branch lookup");
+        assert!(by("c").pr.is_none(), "no meta: no PR, no branch fallback");
+        assert!(!by("c").pr_unavailable);
+        d.config.extras.pr = false;
+        let snap = build_snapshot(&d, &Snapshot::default());
+        assert!(snap.sessions.iter().all(|s| s.pr.is_none()), "extras.pr off");
+    }
+
     #[test]
     fn build_snapshot_surfaces_pr_availability() {
         let dir = setup();
@@ -932,10 +985,13 @@ mod tests {
         d.branches = Some(&branches);
         d.pr_cache = Some(&prs);
         d.config.extras.pr = true;
+        for id in ["a", "b", "c"] {
+            write_meta(&d, id, r#"{"prs":[{"number":1}]}"#);
+        }
         let snap = build_snapshot(&d, &Snapshot::default());
         let by = |id: &str| snap.sessions.iter().find(|s| s.id == id).unwrap();
-        assert!(by("a").pr_unavailable && by("a").pr.is_none());
-        assert!(!by("b").pr_unavailable && by("b").pr.is_none(), "no PR: nothing shown");
+        assert!(by("a").pr_unavailable && by("a").pr.is_some(), "number from meta, lookup failed");
+        assert!(!by("b").pr_unavailable);
         assert!(!by("c").pr_unavailable, "not looked up yet");
         assert_eq!(snap.pr_note.as_deref(), Some("PR: az 로그인 필요"));
 
