@@ -21,7 +21,7 @@ use crate::ui::style;
 
 pub const EMPTY_MESSAGE: &str = "cmux에서 실행 중인 Claude 세션이 없습니다";
 pub const LOADING_MESSAGE: &str = "세션을 불러오는 중…";
-pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter 포커스 · p 미리보기 · i 설정 · q 종료 ";
+pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter/Space 포커스 · p 미리보기 · i 설정 · q 종료 ";
 
 /// Draws the full frame. Updates `app.cols`, `app.scroll`, `app.grid_rect`,
 /// `app.preview_too_small` and the preview's read line count from the layout.
@@ -227,7 +227,7 @@ mod tests {
         assert!(screen[0].contains("RUN 2") && screen[0].contains("INPUT 2") && screen[0].contains("DONE 2"));
         assert!(text.contains("proj-t0") && text.contains("proj-t1"), "{text}");
         assert!(has_braille(&text), "scenes drawn: {text}");
-        assert!(screen.last().unwrap().contains("Enter 포커스"));
+        assert!(screen.last().unwrap().contains("Enter/Space 포커스"), "{}", screen.last().unwrap());
         assert_eq!(app.cols, 6, "120 / 20");
         // the selected (first) card has the blue border, the second does not
         assert_eq!(buf[(0, 1)].fg, style::SELECTED);
@@ -306,13 +306,21 @@ mod tests {
         }
         assert_eq!(seen, vec![0, 5, 10, 15, 15, 15, 15]);
         assert_eq!(app.scroll, 1);
-        // and back up again
-        for _ in 0..4 {
+        // and back up again (one more k from the first card wraps to the last)
+        for _ in 0..3 {
             app.apply_move(Dir::Up);
             let text = render(&mut app, 100, 30, 0)[1..29].join("\n");
             assert!(text.contains(&format!("proj-t{} ", app.selected)), "{text}");
         }
         assert_eq!((app.selected, app.scroll), (0, 0));
+        app.apply_move(Dir::Up);
+        let text = render(&mut app, 100, 30, 0)[1..29].join("\n");
+        assert_eq!(app.selected, 19, "k on the first card wraps to the last");
+        assert!(text.contains("proj-t19 "), "scrolled to it: {text}");
+        app.apply_move(Dir::Right);
+        let text = render(&mut app, 100, 30, 0)[1..29].join("\n");
+        assert_eq!((app.selected, app.scroll), (0, 0), "l on the last card wraps to the first");
+        assert!(text.contains("proj-t0 "), "{text}");
     }
 
     #[test]
@@ -656,7 +664,7 @@ mod tests {
             render(&mut app, 150, 22, 0);
             seen.push(app.selected);
         }
-        let want: Vec<usize> = (0..24).chain([23, 23]).collect();
+        let want: Vec<usize> = (0..24).chain([0, 1]).collect();
         assert_eq!(seen, want);
         for sel in (0..24).rev() {
             app.selected = sel;

@@ -13,7 +13,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 - The spirit's state is its animation: running (the body churns and casts its magic to the right: fire breath from the mouth, and a water vortex, poison fog or lightning bolts centred in the room right of the body), needs input (a bobbing `?`), idle (dim slow bob and `z`), done (sparkles), unknown (gray).
 - Context usage sets how hard the spirit works (relaxed, lively, struggling; see [Context usage setup](#context-usage-setup)) and, while running, the size of the magic: small under 30%, normal, big from 70%, and a red warning flicker above 90%.
 - The card border blinks blue while the session has unread cmux notifications, for example when it finished.
-- `Enter` jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
+- `Enter` (or `Space`) jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
 - Cards are grouped by cmux window. An optional PR chip shows the open pull request for the branch.
 
 ## Install
@@ -28,8 +28,8 @@ Then run `cmux-magigent` in a cmux pane. Requires a Rust toolchain (1.89 or newe
 
 | Key | Action |
 |---|---|
-| `h` `j` `k` `l` / arrows | Move between cards (rows wrap) |
-| `Enter` | Focus the selected session's cmux workspace and pane |
+| `h` `j` `k` `l` / arrows | Move between cards (rows wrap; from the last card `l`/`j` go to the first, from the first `h`/`k` go to the last) |
+| `Enter` / `Space` | Focus the selected session's cmux workspace and pane |
 | `p` | Toggle preview (one-line cards plus the session's screen) |
 | `i` | Open settings |
 | `q` / `Ctrl-C` | Quit |

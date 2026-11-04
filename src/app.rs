@@ -69,7 +69,7 @@ pub enum Mode {
     Settings,
 }
 
-/// Maps a key press to an action: `h j k l` / arrows, Enter, `p`/`P`, `i`, `q`/`Q`, Ctrl-C.
+/// Maps a key press to an action: `h j k l` / arrows, Enter / Space, `p`/`P`, `i`, `q`/`Q`, Ctrl-C.
 /// Release and repeat events map to [`Action::None`].
 pub fn key_to_action(key: KeyEvent) -> Action {
     if key.kind != KeyEventKind::Press {
@@ -86,7 +86,8 @@ pub fn key_to_action(key: KeyEvent) -> Action {
         KeyCode::Char('j') | KeyCode::Down => Action::Move(Dir::Down),
         KeyCode::Char('k') | KeyCode::Up => Action::Move(Dir::Up),
         KeyCode::Char('l') | KeyCode::Right => Action::Move(Dir::Right),
-        KeyCode::Enter => Action::Focus,
+        // Space is a second focus key: the same action, the same code path.
+        KeyCode::Enter | KeyCode::Char(' ') => Action::Focus,
         KeyCode::Char('p' | 'P') => Action::TogglePreview,
         KeyCode::Char('i') => Action::OpenSettings,
         KeyCode::Char('q' | 'Q') => Action::Quit,
@@ -321,8 +322,9 @@ impl App {
         layout_groups(&self.sessions, &self.window_order, self.current_window.as_deref(), self.cols)
     }
 
-    /// Grid move over [`App::grid_rows`], stopping at the edges. j/k cross
-    /// window groups; a shorter target row clamps the column.
+    /// Grid move over [`App::grid_rows`] (see [`move_selection`]): j/k cross
+    /// window groups, a shorter target row clamps the column, and the first
+    /// and last cards wrap around to each other.
     pub fn apply_move(&mut self, dir: Dir) {
         if self.sessions.is_empty() {
             self.selected = 0;
@@ -398,7 +400,7 @@ impl App {
                 self.sync_preview_target();
             }
             Action::TogglePreview => self.toggle_preview(),
-            // While a focus is in flight further Enter presses are ignored.
+            // While a focus is in flight further Enter/Space presses are ignored.
             Action::Focus if self.focus_pending => {}
             Action::Focus => match self.focus_selected(cmux) {
                 Err(e) => {
@@ -627,16 +629,26 @@ mod tests {
     }
 
     #[test]
-    fn move_stops_at_edges() {
+    fn move_wraps_around_at_the_first_and_last_cards() {
         let mut app = app_with(6, 3);
-        app.apply_move(Dir::Left);
-        app.apply_move(Dir::Up);
-        assert_eq!(app.selected, 0);
-        app.selected = 2;
-        app.selected = 5;
-        app.apply_move(Dir::Down);
-        app.apply_move(Dir::Right); // last tile: no wrap
+        app.apply_move(Dir::Left); // first card -> last
         assert_eq!(app.selected, 5);
+        app.apply_move(Dir::Right); // last card -> first
+        assert_eq!(app.selected, 0);
+        app.apply_move(Dir::Up);
+        assert_eq!(app.selected, 5);
+        app.apply_move(Dir::Down);
+        assert_eq!(app.selected, 0);
+        // the first row's other cards do not wrap on k
+        app.selected = 2;
+        app.apply_move(Dir::Up);
+        assert_eq!(app.selected, 2);
+        // one session: stays
+        let mut one = app_with(1, 3);
+        for d in [Dir::Left, Dir::Down, Dir::Up, Dir::Right] {
+            one.apply_move(d);
+            assert_eq!(one.selected, 0, "{d:?}");
+        }
     }
 
     #[test]
@@ -662,9 +674,9 @@ mod tests {
         app.selected = 5;
         app.apply_move(Dir::Down);
         assert_eq!(app.selected, 6);
-        // last row: right stops at the last tile
+        // the last tile wraps to the first
         app.apply_move(Dir::Right);
-        assert_eq!(app.selected, 6);
+        assert_eq!(app.selected, 0);
     }
 
     #[test]
@@ -716,6 +728,7 @@ mod tests {
             (KeyCode::Char('l'), Action::Move(Dir::Right)),
             (KeyCode::Right, Action::Move(Dir::Right)),
             (KeyCode::Enter, Action::Focus),
+            (KeyCode::Char(' '), Action::Focus),
             (KeyCode::Char('i'), Action::OpenSettings),
             (KeyCode::Char('q'), Action::Quit),
             (KeyCode::Char('x'), Action::None),
@@ -852,6 +865,34 @@ mod tests {
         let empty = app_with(0, 3);
         empty.focus_selected(&cmux).unwrap();
         assert_eq!(cmux.calls().len(), 1);
+    }
+
+    #[test]
+    fn space_focuses_exactly_like_enter() {
+        for code in [KeyCode::Enter, KeyCode::Char(' ')] {
+            let mut app = app_with(3, 3);
+            app.selected = 1;
+            app.sessions[1].unread_notification = true;
+            let (focus, fake) = bg(FakeCmux::new(vec![]));
+            app.handle_key(key(code), &focus, Instant::now());
+            assert_eq!(app.footer_message(Instant::now()), Some(FOCUSING), "{code:?}");
+            // in flight: a second press is ignored
+            app.handle_key(key(code), &focus, Instant::now());
+            finish_focus(&mut app, &focus);
+            assert_eq!(fake.calls(), vec!["focus ws-s1 sf-s1".to_string()], "{code:?}");
+            assert!(app.sessions[1].unread_notification, "{code:?}: read-only, nothing marked read");
+            assert_eq!(app.selected, 1);
+        }
+        // in the settings window Space still toggles the row and never focuses
+        let mut app = app_with(3, 3);
+        let (focus, fake) = bg(FakeCmux::new(vec![]));
+        app.handle_key(key(KeyCode::Char('i')), &focus, Instant::now());
+        let before = app.config.clone();
+        app.handle_key(key(KeyCode::Char(' ')), &focus, Instant::now());
+        assert_ne!(app.config, before, "Space changes the settings row");
+        assert_eq!(app.mode, Mode::Settings);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(fake.calls().is_empty());
     }
 
     #[test]
