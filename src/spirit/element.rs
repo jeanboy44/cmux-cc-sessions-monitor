@@ -5,7 +5,7 @@ use std::f32::consts::{PI, TAU};
 
 use crate::model::Status;
 
-use super::canvas::{lerp, mul, Canvas, Rgb, CARD_BG};
+use super::canvas::{lerp, mul, Canvas, Rgb, CARD_BG, WHITE};
 use super::noise::{hf, seed_phase, slot, Rng};
 use super::particles::Particle;
 use super::theme::Theme;
@@ -132,38 +132,47 @@ pub(super) fn tint(ctx: &Ctx, ramp: &[Rgb; 4], tone: usize, c: Rgb, d: f32, th: 
     }
 }
 
-/// Colour of a forming poison bubble (bead and ring).
-pub(super) const BUBBLE_RING: Rgb = [205., 255., 150.];
-/// Colour of the sparkle when a poison bubble pops.
-pub(super) const BUBBLE_POP: Rgb = [238., 255., 205.];
+/// How far a poison bubble's dots blend from the colour under them toward
+/// the pale lime highlight: the bead, ring and swell brighten as they grow,
+/// the gloss dot is brighter still, and the pop sparkles fade back into
+/// their surroundings frame by frame.
+const BEAD_MIX: f32 = 0.4;
+const RING_MIX: f32 = 0.5;
+const SWELL_MIX: f32 = 0.62;
+const GLOSS_MIX: f32 = 0.85;
+const POP_MIX: [f32; 3] = [0.7, 0.4, 0.08];
+/// Last frame of a pop (the sparkles have faded into their surroundings).
+pub(super) const LAST_POP_FRAME: u8 = POP_MIX.len() as u8 - 1;
 
-/// Life stage of a poison bubble; each lasts one or two ticks.
+/// Life stage of a poison bubble; each lasts one to three ticks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Stage {
-    /// a single dot
+    /// a single light dot
     Bead,
     /// a tiny ring
     Ring,
     /// a slightly bigger ring
     Swell,
-    /// a burst of sparkle dots
+    /// sparkle dots flying outward and fading ([`Bubble::frame`] 0..=[`LAST_POP_FRAME`])
     Pop,
 }
 
-/// A poison bubble: offset from the body centre (design units) and stage.
+/// A poison bubble: offset from the body centre (design units), stage and
+/// frame within the stage (only a pop has more than one).
 pub(super) struct Bubble {
     pub dx: f32,
     pub dy: f32,
     pub stage: Stage,
+    pub frame: u8,
 }
 
-/// Stage by age (ticks) within a bubble's cycle.
-fn stage_at(age: u64) -> Option<Stage> {
+/// Stage and frame by age (ticks) within a bubble's cycle.
+fn stage_at(age: u64) -> Option<(Stage, u8)> {
     match age {
-        0 | 1 => Some(Stage::Bead),
-        2 | 3 => Some(Stage::Ring),
-        4 => Some(Stage::Swell),
-        5 => Some(Stage::Pop),
+        0 | 1 => Some((Stage::Bead, 0)),
+        2 | 3 => Some((Stage::Ring, 0)),
+        4 => Some((Stage::Swell, 0)),
+        5..=7 => Some((Stage::Pop, (age - 5) as u8)),
         _ => None,
     }
 }
@@ -188,7 +197,7 @@ pub(super) fn bubbles(ctx: &Ctx) -> Vec<Bubble> {
         let period = 18 + slot(key, 0xBB1, 0, 14);
         let shifted = ctx.t + slot(key, 0xBB2, 0, period as u32);
         let (cycle, age) = (shifted / period, shifted % period);
-        let Some(stage) = stage_at(age) else { continue };
+        let Some((stage, frame)) = stage_at(age) else { continue };
         let c = cycle as u32 ^ (cycle >> 32) as u32;
         if hf(key ^ 0xB0B1, c) >= chance {
             continue;
@@ -196,51 +205,91 @@ pub(super) fn bubbles(ctx: &Ctx) -> Vec<Bubble> {
         // in the lower half of the body, below the eyes
         let a = PI * (0.15 + 0.7 * hf(key ^ 0xB0B2, c));
         let r = BASE_R * (0.35 + 0.3 * hf(key ^ 0xB0B3, c));
-        out.push(Bubble { dx: r * a.cos(), dy: r * a.sin() * 0.8, stage });
+        out.push(Bubble { dx: r * a.cos(), dy: r * a.sin() * 0.8, stage, frame });
     }
     // casting: one more bubble races through its stages and pops on the release
     if ctx.state == Status::Running {
         use super::state::CastPhase::{Release, WindUp};
         let (t, f) = (ctx.t, |f: u8| u64::from(f));
         let stage = match super::state::cast_phase(ctx.seed, t) {
-            Some(WindUp(0)) => Some((Stage::Bead, t + 3)),
-            Some(WindUp(1)) => Some((Stage::Ring, t + 2)),
-            Some(WindUp(k)) => Some((Stage::Swell, t + 3 - f(k))),
-            Some(Release(0)) => Some((Stage::Pop, t)),
-            _ => None,
+            Some(WindUp(0)) => Some((Stage::Bead, 0, t + 3)),
+            Some(WindUp(1)) => Some((Stage::Ring, 0, t + 2)),
+            Some(WindUp(k)) => Some((Stage::Swell, 0, t + 3 - f(k))),
+            Some(Release(k)) => Some((Stage::Pop, k, t - f(k))),
+            // the last pop frame, the tick after the release
+            None if t >= 2 && super::state::casts_at(ctx.seed, t - 2) => Some((Stage::Pop, 2, t - 2)),
+            None => None,
         };
-        if let Some((stage, cast)) = stage {
+        if let Some((stage, frame, cast)) = stage {
             let c = cast as u32 ^ (cast >> 32) as u32;
             let a = PI * (0.15 + 0.7 * hf(ctx.seed ^ 0xCA5B, c));
             let r = BASE_R * (0.35 + 0.3 * hf(ctx.seed ^ 0xCA5C, c));
-            out.push(Bubble { dx: r * a.cos(), dy: r * a.sin() * 0.8, stage });
+            out.push(Bubble { dx: r * a.cos(), dy: r * a.sin() * 0.8, stage, frame });
         }
     }
     out
 }
 
-/// Draws one bubble centred on sub-pixel (px, py).
-fn draw_bubble(cv: &mut Canvas, px: i32, py: i32, stage: Stage, bright: f32) {
-    let ring = mul(BUBBLE_RING, bright);
-    let pop = mul(BUBBLE_POP, bright);
-    let (dots, hole, c): (&[(i32, i32)], &[(i32, i32)], Rgb) = match stage {
-        Stage::Bead => (&[(0, 0)], &[], ring),
-        Stage::Ring => (&[(-1, 0), (1, 0), (0, -1), (0, 1)], &[(0, 0)], ring),
-        Stage::Swell => (&[(-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, -1), (-1, 1), (1, 1)], &[(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)], ring),
-        Stage::Pop => (&[(-2, -2), (2, -2), (-2, 2), (2, 2), (-3, 0), (3, 0)], &[(0, 0)], pop),
+/// Bubbles at sub-pixel centres: `cx`/`cy` is the body centre (design units,
+/// after bobbing and the casting pose). A bubble never reaches the eye rows:
+/// one that would is lowered just below them.
+pub(super) fn bubble_spots(cv: &Canvas, ctx: &Ctx, cx: f32, cy: f32) -> Vec<(i32, i32, Bubble)> {
+    let sx = sway(ctx);
+    let eyes_bottom = super::eyes::boxes(cv).iter().map(|b| (b.1 + b.3) * 4).max().unwrap_or(0);
+    bubbles(ctx)
+        .into_iter()
+        .map(|b| {
+            let (px, py) = cv.to_px(cx + sx + b.dx, cy + b.dy);
+            (px, py.max(eyes_bottom + 2), b)
+        })
+        .collect()
+}
+
+/// Draws one bubble centred on sub-pixel (px, py) as an overlay: every dot
+/// lightens what is under it toward `light` (the body keeps its dots), so a
+/// bubble is a glossy ring on the body and a faint ring off it, never a hole.
+fn draw_bubble(cv: &mut Canvas, px: i32, py: i32, b: &Bubble, light: Rgb) {
+    const DIAMOND: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    const RING: [(i32, i32); 8] = [(-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, -1), (-1, 1), (1, 1)];
+    // the last pop frame has faded into the card: no new dots on empty cells
+    let spawn = !(b.stage == Stage::Pop && b.frame >= LAST_POP_FRAME);
+    let mut put = |dots: &[(i32, i32)], m: f32| {
+        for &(x, y) in dots {
+            cv.overlay_px(px + x, py + y, light, m, spawn);
+        }
     };
-    for &(x, y) in hole {
-        cv.clear_px(px + x, py + y);
+    match b.stage {
+        Stage::Bead => put(&[(0, 0)], BEAD_MIX),
+        Stage::Ring => {
+            put(&DIAMOND, RING_MIX);
+            put(&[(-1, -1)], GLOSS_MIX);
+        }
+        Stage::Swell => {
+            put(&RING, SWELL_MIX);
+            put(&[(-1, -1)], GLOSS_MIX);
+        }
+        Stage::Pop => {
+            // the ring breaks into sparkles that fly 1-2 cells out and fade
+            let k = usize::from(b.frame.min(LAST_POP_FRAME));
+            let (d, h, v) = ([2, 3, 4][k], [3, 4, 5][k], [2, 3, 3][k]);
+            put(&[(-d, -v), (d, -v), (-d, v), (d, v), (-h, 0), (h, 0)], POP_MIX[k]);
+        }
     }
-    for &(x, y) in dots {
-        cv.set_px(px + x, py + y, c, 2, false);
+}
+
+/// Poison: bubbles forming and popping on the body, drawn over everything
+/// but the eyes. `cx`/`cy`: body centre in design units.
+pub(super) fn draw_bubbles(cv: &mut Canvas, ctx: &Ctx, cx: f32, cy: f32, bright: f32) {
+    let light = mul(lerp(ramp(ctx.elem)[3], WHITE, 0.45), bright);
+    for (px, py, b) in bubble_spots(cv, ctx, cx, cy) {
+        draw_bubble(cv, px, py, &b, light);
     }
 }
 
 /// Element decorations around the body: orbiting droplets and floor ripples
-/// (water), bubbles forming and popping on the body (poison).
-/// `cx`/`cy`: body centre in design units (after bobbing and the casting pose).
-pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cx: f32, cy: f32, bright: f32) {
+/// (water). Poison bubbles are drawn later, over the magic (see [`draw_bubbles`]).
+/// `cy`: body centre y in design units (after bobbing and the casting pose).
+pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
     let (tf, sp) = (ctx.tf, ctx.sp);
     let ramp = ramp(ctx.elem);
     match ctx.elem {
@@ -263,13 +312,6 @@ pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cx: f32, cy: f32, bright: f32
                     let a = i as f32 / 20.0 * TAU;
                     cv.blk(CX + hw * a.cos() - 0.5, ctx.floor + vr * a.sin() - 0.5, c, 1, true);
                 }
-            }
-        }
-        Theme::Poison => {
-            let sx = sway(ctx);
-            for b in bubbles(ctx) {
-                let (px, py) = cv.to_px(cx + sx + b.dx, cy + b.dy);
-                draw_bubble(cv, px, py, b.stage, bright);
             }
         }
         _ => {}

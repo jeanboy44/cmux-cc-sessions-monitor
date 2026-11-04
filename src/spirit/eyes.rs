@@ -41,6 +41,12 @@ fn eye_set(cv: &Canvas) -> EyeSet {
     EyeSet { eyes: [(lcol, row0), (rcol, row0)], ew, eh }
 }
 
+/// Both eye boxes in terminal cells: (col0, row0, width, height).
+pub(super) fn boxes(cv: &Canvas) -> [(i32, i32, i32, i32); 2] {
+    let es = eye_set(cv);
+    es.eyes.map(|(c, r)| (c, r, es.ew, es.eh))
+}
+
 /// Punches both eyes into the canvas. `facing`: the dot looks one sub-pixel
 /// right (casting); `body` is the body's dark tone (for the blink dash),
 /// `bright` the state brightness.

@@ -24,6 +24,11 @@ pub(super) fn lerp(a: Rgb, b: Rgb, t: f32) -> Rgb {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
 }
 
+/// Perceived brightness (Rec. 709 luma).
+pub(super) fn luma(c: Rgb) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
 pub(super) fn mul(c: Rgb, m: f32) -> Rgb {
     [(c[0] * m).min(255.), (c[1] * m).min(255.), (c[2] * m).min(255.)]
 }
@@ -89,6 +94,41 @@ impl Canvas {
             self.px[i] = None;
             self.body[i] = false;
         }
+    }
+
+    /// Highest priority painted in the braille cell holding sub-pixel (x, y)
+    /// and the mean colour of its dots at that priority (what the cell shows).
+    fn cell_top(&self, x: i32, y: i32) -> Option<(u8, Rgb)> {
+        let (x0, y0) = (x.div_euclid(2) * 2, y.div_euclid(4) * 4);
+        let dots: Vec<(Rgb, u8)> = (y0..y0 + 4).flat_map(|yy| (x0..x0 + 2).map(move |xx| (xx, yy))).filter_map(|(xx, yy)| self.idx(xx, yy).and_then(|i| self.px[i])).collect();
+        let top = dots.iter().map(|d| d.1).max()?;
+        let (mut sum, mut n) = ([0f32; 3], 0f32);
+        for (c, _) in dots.iter().filter(|d| d.1 == top) {
+            sum = [sum[0] + c[0], sum[1] + c[1], sum[2] + c[2]];
+            n += 1.0;
+        }
+        Some((top, [sum[0] / n, sum[1] / n, sum[2] / n]))
+    }
+
+    /// Lightens sub-pixel (x, y) by `m` toward `light` as an overlay: a dot
+    /// that is there keeps its place, priority and body flag and only gets
+    /// lighter; an empty spot gets a new low-priority dot blended from what
+    /// its cell shows (or the card). Never darkens, never erases, and leaves
+    /// cells won by higher-priority dots (magic, sparkles) alone. `spawn`:
+    /// whether a dot may appear in a cell that is empty.
+    pub(super) fn overlay_px(&mut self, x: i32, y: i32, light: Rgb, m: f32, spawn: bool) {
+        let Some(i) = self.idx(x, y) else { return };
+        let (top, avg) = match self.cell_top(x, y) {
+            Some(t) => t,
+            None if spawn => (1, CARD_BG),
+            None => return,
+        };
+        if top > 1 {
+            return;
+        }
+        let under = self.px[i].map_or(avg, |(c, _)| c);
+        let c = if luma(light) > luma(under) { lerp(under, light, m) } else { under };
+        self.px[i] = Some((c, 1));
     }
 
     /// Rightmost body sub-pixel column over all rows, if any body is drawn.

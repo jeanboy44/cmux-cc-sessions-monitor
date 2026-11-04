@@ -255,12 +255,23 @@ impl Ctx {
 
 /// Renders one frame of a spirit.
 pub fn render(p: &SpiritParams) -> SpiritGrid {
+    render_with(p, true)
+}
+
+/// Body bob plus the casting pose's vertical shift, in real sub-pixels.
+fn bob_px(ctx: &Ctx, g: &Geom, pose: &state::Pose) -> f32 {
+    (state::bob(ctx.state, ctx.seed, ctx.tf) * g.ppu).round() + pose.dy
+}
+
+/// Renders one frame; `bubbles: false` leaves the poison bubbles out (a seam
+/// for tests: bubbles only ever lighten and add to the frame without them).
+fn render_with(p: &SpiritParams, bubbles: bool) -> SpiritGrid {
     let g = geom_for(p.size, p.magic);
     let ctx = Ctx::new(p);
     let parts = particles::simulate(&ctx);
     let pulse = state::pulse(ctx.state, ctx.tf);
     let pose = state::pose(ctx.elem, ctx.state, ctx.seed, ctx.t);
-    let bob_px = (state::bob(ctx.state, ctx.seed, ctx.tf) * g.ppu).round() + pose.dy;
+    let bob_px = bob_px(&ctx, &g, &pose);
     let look = body::Look {
         cy: CY + bob_px / g.ppu,
         pulse,
@@ -273,14 +284,28 @@ pub fn render(p: &SpiritParams) -> SpiritGrid {
     };
     let mut cv = canvas::Canvas::new(g);
     body::draw(&mut cv, &ctx, &look);
-    element::decorate(&mut cv, &ctx, CX + pose.dx / g.ppu, look.cy, look.bright);
+    element::decorate(&mut cv, &ctx, look.cy);
     particles::draw(&mut cv, &parts);
     magic::draw(&mut cv, &ctx, CY + (bob_px - pose.dy) / g.ppu);
     state::sparkles(&mut cv, &ctx);
+    if bubbles {
+        element::draw_bubbles(&mut cv, &ctx, CX + pose.dx / g.ppu, look.cy, look.bright);
+    }
     eyes::draw(&mut cv, pose.facing, eyes::blinking(ctx.seed, ctx.t), element::ramp(ctx.elem)[1], look.bright);
     let mut grid = cv.cells();
     state::marks(&mut grid, &cv, &ctx, pulse);
     grid
+}
+
+/// Sub-pixel centre (x, y) and stage of every poison bubble drawn on a frame.
+#[cfg(test)]
+fn bubble_spots(p: &SpiritParams) -> Vec<(i32, i32, element::Stage)> {
+    let g = geom_for(p.size, p.magic);
+    let ctx = Ctx::new(p);
+    let pose = state::pose(ctx.elem, ctx.state, ctx.seed, ctx.t);
+    let cy = CY + bob_px(&ctx, &g, &pose) / g.ppu;
+    let cv = canvas::Canvas::new(g);
+    element::bubble_spots(&cv, &ctx, CX + pose.dx / g.ppu, cy).into_iter().map(|(x, y, b)| (x, y, b.stage)).collect()
 }
 
 #[cfg(test)]
@@ -811,13 +836,16 @@ mod tests {
 
     #[test]
     fn poison_bubbles_form_and_pop() {
-        let ring = Some(canvas::to_rgb(element::BUBBLE_RING, 250.0));
-        let pop = Some(canvas::to_rgb(element::BUBBLE_POP, 250.0));
-        let has = |g: &SpiritGrid, c| g.cells.iter().any(|x| x.fg == c);
         for seed in [3, 41, 706_312_658] {
-            let frames: Vec<SpiritGrid> = (0..240).map(|t| render(&params(Theme::Poison, Status::Running, Size::S, t, seed))).collect();
-            // a ring shows on the body, then pops into a sparkle a few ticks later
-            let popped = (0..236).filter(|&t| has(&frames[t], ring) && (t + 1..=t + 3).any(|u| has(&frames[u], pop))).count();
+            let p = |t| params(Theme::Poison, Status::Running, Size::S, t, seed);
+            // a bubble is visible on frame t when it changes the grid; its stage
+            // comes from the bubble schedule
+            let visible = |t: u64, stage| {
+                let b = element::bubbles(&Ctx::new(&p(t)));
+                b.iter().any(|b| b.stage == stage) && render_with(&p(t), true) != render_with(&p(t), false)
+            };
+            // a ring shows on the body, then pops into sparkles a few ticks later
+            let popped = (0..236).filter(|&t| visible(t, element::Stage::Ring) && (t + 1..=t + 3).any(|u| visible(u, element::Stage::Pop))).count();
             assert!(popped >= 2, "{seed}: {popped} ring -> pop sequences");
         }
         // every bubble goes bead -> ring -> swell -> pop, one stage per tick or more
@@ -860,6 +888,178 @@ mod tests {
             assert!(sw.windows(2).all(|w| (w[0] - w[1]).abs() < 0.12), "{status:?}: no jitter");
             let spread = sw.iter().cloned().fold(f32::MIN, f32::max) - sw.iter().cloned().fold(f32::MAX, f32::min);
             assert!(spread > 0.5, "{status:?}: sway spread {spread}");
+        }
+    }
+
+    /// Braille dot bits of a cell (0 for blanks and text marks).
+    fn bits(c: &Cell) -> u32 {
+        if is_braille(c.ch) {
+            c.ch as u32 - 0x2800
+        } else {
+            0
+        }
+    }
+
+    /// Every poison frame that can hold a bubble (running incl. casting,
+    /// needs-input, idle, done), each rendered with and without bubbles:
+    /// several seeds and sizes over a long tick window and at a long uptime.
+    fn bubble_frames(mut f: impl FnMut(&SpiritParams, &SpiritGrid, &SpiritGrid)) {
+        let ticks = (0..260).chain(40_000_000..40_000_080);
+        for seed in [3, 41, 706_312_658, u32::MAX] {
+            for status in [Status::Running, Status::NeedsInput, Status::Idle, Status::Done] {
+                for size in Size::ALL {
+                    for t in ticks.clone() {
+                        let p = params(Theme::Poison, status, size, t, seed);
+                        f(&p, &render_with(&p, true), &render_with(&p, false));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn poison_bubbles_never_erase_body_dots() {
+        let (mut drawn, mut cast) = (0, 0);
+        bubble_frames(|p, with, without| {
+            if with != without {
+                drawn += 1;
+                cast += usize::from(p.status == Status::Running && state::cast_phase(p.seed, p.tick).is_some());
+            }
+            for (i, (a, b)) in with.cells.iter().zip(&without.cells).enumerate() {
+                // every dot painted without bubbles is still there with them
+                assert_eq!(bits(a) & bits(b), bits(b), "{p:?} cell {i}: {b:?} -> {a:?}");
+                if b.fg.is_some() {
+                    assert!(a.fg.is_some(), "{p:?} cell {i}: painted cell emptied");
+                }
+            }
+        });
+        assert!(drawn > 1000 && cast > 50, "bubbles show ({drawn} frames, {cast} while casting)");
+    }
+
+    #[test]
+    fn poison_bubbles_never_darken_the_body() {
+        bubble_frames(|p, with, without| {
+            for (i, (a, b)) in with.cells.iter().zip(&without.cells).enumerate() {
+                if let (Some(fa), Some(fb)) = (a.fg, b.fg) {
+                    assert!(lum(fa) + 0.5 >= lum(fb), "{p:?} cell {i}: {fb:?} darkened to {fa:?}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn poison_bubble_rings_are_light_green_not_white() {
+        let mut lit = 0;
+        bubble_frames(|p, with, without| {
+            let b = element::bubbles(&Ctx::new(p));
+            if b.iter().any(|b| b.stage == element::Stage::Pop) {
+                return;
+            }
+            for (i, (a, o)) in with.cells.iter().zip(&without.cells).enumerate() {
+                if a == o || o.fg == WHITE {
+                    continue;
+                }
+                let fa = a.fg.expect("a bubble cell is painted");
+                assert!(a.fg != WHITE && fa.0.max(fa.1).max(fa.2) <= 250, "{p:?} cell {i}: {fa:?} too white");
+                assert!(lum(fa) > o.fg.map_or(0.0, lum), "{p:?} cell {i}: ring {fa:?} not lighter than {:?}", o.fg);
+                assert!(fa.1 > fa.0 && fa.1 > fa.2, "{p:?} cell {i}: ring {fa:?} not green");
+                lit += 1;
+            }
+        });
+        assert!(lit > 1000, "rings light the body ({lit} cells)");
+    }
+
+    #[test]
+    fn poison_pop_sparkles_fade_into_their_surroundings() {
+        let mut checked = 0;
+        bubble_frames(|p, with, without| {
+            let b = element::bubbles(&Ctx::new(p));
+            // frames where every bubble is on the last pop frame
+            if b.is_empty() || !b.iter().all(|b| b.stage == element::Stage::Pop && b.frame == element::LAST_POP_FRAME) {
+                return;
+            }
+            for (i, (a, o)) in with.cells.iter().zip(&without.cells).enumerate() {
+                if a == o {
+                    continue;
+                }
+                let fa = a.fg.expect("a sparkle cell is painted");
+                match o.fg {
+                    Some(fo) => assert!((lum(fa) - lum(fo)).abs() <= 20.0, "{p:?} cell {i}: {fa:?} vs surrounding {fo:?}"),
+                    None => assert!(lum(fa) <= 60.0, "{p:?} cell {i}: {fa:?} has not faded to the card"),
+                }
+                checked += 1;
+            }
+        });
+        assert!(checked > 30, "last pop frames seen ({checked} cells)");
+    }
+
+    #[test]
+    fn poison_bubbles_leave_the_eyes_alone() {
+        bubble_frames(|p, with, without| {
+            let cv = canvas::Canvas::new(geom_for(p.size, p.magic));
+            for (col0, row0, w, h) in eyes::boxes(&cv) {
+                for (c, r) in (row0..row0 + h).flat_map(|r| (col0..col0 + w).map(move |c| (c as u16, r as u16))) {
+                    assert_eq!(cell(with, c, r), cell(without, c, r), "{p:?} eye cell ({c}, {r})");
+                }
+            }
+            assert_eq!(white_cells(with), white_cells(without), "{p:?}");
+        });
+        // the bubbles that are drawn never sit on the eye rows
+        for seed in [3, 41, 706_312_658] {
+            for size in Size::ALL {
+                for t in 0..400 {
+                    let p = params(Theme::Poison, Status::Done, size, t, seed);
+                    let cv = canvas::Canvas::new(geom_for(size, p.magic));
+                    let bottom = eyes::boxes(&cv).iter().map(|b| (b.1 + b.3) * 4).max().unwrap_or(0);
+                    for (_, py, _) in bubble_spots(&p) {
+                        assert!(py - 2 >= bottom, "{p:?}: bubble at row {py} reaches the eyes (bottom {bottom})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Prints a poison bubble growing and popping on the body, with and
+    /// without colour (`cargo test dump_bubble -- --ignored --nocapture`;
+    /// `SPIRIT_ANSI=1`, `SPIRIT_SEED=…`).
+    #[test]
+    #[ignore]
+    fn dump_bubble() {
+        let seed = std::env::var("SPIRIT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(41);
+        let ansi = std::env::var("SPIRIT_ANSI").is_ok();
+        let p = |t| params(Theme::Poison, Status::Done, Size::M, t, seed);
+        let swell = (20..2000).find(|&t| {
+            let b = |t| element::bubbles(&Ctx::new(&p(t)));
+            b(t).len() == 1 && b(t)[0].stage == element::Stage::Swell && !eyes::blinking(seed, t) && !eyes::blinking(seed, t + 3)
+        });
+        let s = swell.expect("a swell frame");
+        let frames: Vec<(String, SpiritGrid)> =
+            [(s - 2, "ring"), (s, "swell"), (s + 1, "pop 0"), (s + 2, "pop 1"), (s + 3, "pop 2")].iter().map(|&(t, l)| (format!("{l} t{t}"), render(&p(t)))).collect();
+        println!("{}", frames.iter().map(|f| format!("{:<16}", f.0)).collect::<String>());
+        for row in 0..4 {
+            let mut line = String::new();
+            for (_, g) in &frames {
+                for col in 0..g.cols {
+                    let x = cell(g, col, row);
+                    match (ansi, x.fg) {
+                        (true, Some((r, gg, b))) => line += &format!("\x1b[38;2;{r};{gg};{b}m{}\x1b[0m", x.ch),
+                        _ => line.push(x.ch),
+                    }
+                }
+                line += &" ".repeat(16 - usize::from(g.cols));
+            }
+            println!("{line}");
+        }
+        // what the bubble changes, cell by cell, against the same frame without it
+        for (label, g) in &frames {
+            let t: u64 = label.rsplit('t').next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let bare = render_with(&p(t), false);
+            let diff: Vec<String> = (0..g.rows)
+                .flat_map(|r| (0..g.cols).map(move |c| (c, r)))
+                .filter(|&(c, r)| cell(g, c, r) != cell(&bare, c, r))
+                .map(|(c, r)| format!("({c},{r}) {}{:?} -> {}{:?}", cell(&bare, c, r).ch, cell(&bare, c, r).fg, cell(g, c, r).ch, cell(g, c, r).fg))
+                .collect();
+            println!("{label}: {}", diff.join(", "));
         }
     }
 
@@ -1155,8 +1355,9 @@ mod tests {
                     if c - prev < life || next - c <= 12 {
                         continue;
                     }
+                    // the fog alone: pop sparkles of a bubble at the body's right edge may fly into the fog area
                     let at = |age: u64| -> Vec<(f32, f32)> {
-                        let g = render(&SpiritParams { magic, ..params(Theme::Poison, Status::Running, Size::S, c + age, seed) });
+                        let g = render_with(&SpiritParams { magic, ..params(Theme::Poison, Status::Running, Size::S, c + age, seed) }, false);
                         dots(&g).into_iter().filter(|&(x, _)| x >= x_min).map(|(x, y)| (x as f32 + 0.5 - ax, y as f32 + 0.5 - ay)).collect()
                     };
                     let radius = |d: &[(f32, f32)]| d.iter().map(|p| p.0.hypot(p.1)).fold(0.0f32, f32::max);
