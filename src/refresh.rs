@@ -23,7 +23,7 @@ use crate::source::context::{default_ctx_dirs, read_ctx_latest, resolve_ctx, saf
 use crate::source::cmux::{Cmux, CmuxCli, CmuxSessionRef, SCREEN_LINES};
 use crate::source::hook_sessions::read_hook_sessions;
 use crate::source::subagents::{self, SubagentCache};
-use crate::status::resolve_status;
+use crate::status::{resolve_status, settle_with_transcript};
 
 /// How often the refresh thread rebuilds the snapshot.
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -244,6 +244,9 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
         if let Some(c) = calib {
             ctx_calibration.insert(s.id.clone(), c);
         }
+        // A finished turn with only background work left is not Running.
+        let c = claude.iter().find(|c| c.session_id == s.id);
+        s.status = settle_with_transcript(s.status, tail.as_ref().and_then(|t| t.turn), c, deps.now);
         s.model = tail.and_then(|t| t.model);
         // Subagents live next to the transcript; a finished session has none running.
         s.subagents = match t.as_deref().map(subagents::subagents_dir) {
@@ -1001,5 +1004,77 @@ mod tests {
         assert!(second.sessions.iter().all(|s| s.branch.is_none()), "not resolved yet: no branch");
         stop.store(true, Ordering::Relaxed);
         drop(h); // detach: never wait for the hanging resolver
+    }
+
+    /// The "stuck RUN" shapes measured on a real machine, with synthetic ids:
+    /// sessions file `busy` long ago, a hook refreshed by subagent tool calls,
+    /// and the transcript tail deciding whether the turn is still in progress.
+    #[test]
+    fn build_snapshot_does_not_keep_finished_turns_running() {
+        const T0: u64 = 1_793_768_400_000; // 2026-11-04T05:00:00Z
+        let dir = setup();
+        let sessions = dir.path().join("sessions");
+        let session = |pid: u32, id: &str, status: &str, status_ms: u64| {
+            let json = format!(
+                r#"{{"pid":{pid},"sessionId":"{id}","cwd":"/home/user/{id}","status":"{status}","updatedAt":{status_ms},"statusUpdatedAt":{status_ms}}}"#
+            );
+            std::fs::write(sessions.join(format!("{pid}.json")), json).unwrap();
+        };
+        // a: busy 80 min ago, turn ended 4 min ago, a subagent keeps the hook at PreToolUse
+        session(11, "a", "busy", T0);
+        // b: busy 80 min ago, a tool call is in progress
+        session(12, "b", "busy", T0);
+        // c: busy 80 min ago, hook Stop afterwards, no transcript at all
+        session(13, "c", "busy", T0);
+        // e: `shell`, turn ended with background work pending
+        session(14, "e", "shell", T0);
+        // f: busy just now, the new prompt is not in the transcript yet
+        session(15, "f", "busy", T0 + 80 * 60_000 - 1000);
+        // g: waiting for an answer stays NeedsInput
+        session(16, "g", "waiting", T0);
+        let hook = |id: &str, lifecycle: &str, event: &str, ms: u64| {
+            format!(
+                r#""{id}":{{"sessionId":"{id}","pid":1,"workspaceId":"ws-{id}","surfaceId":"sf-{id}","cwd":"/home/user/{id}","agentLifecycle":"{lifecycle}","hookEventName":"{event}","runtimeStatus":"idle","hadPendingBackgroundWorkAtStop":true,"updatedAt":{}.{:03}}}"#,
+                ms / 1000,
+                ms % 1000
+            )
+        };
+        let now = T0 + 80 * 60_000;
+        let hooks = [
+            hook("a", "running", "PreToolUse", now - 1000),
+            hook("b", "running", "PreToolUse", now - 1000),
+            hook("c", "backgroundWorkPending", "Stop", T0 + 60_000),
+            hook("e", "backgroundWorkPending", "Stop", T0 + 60_000),
+            hook("f", "running", "PreToolUse", now - 1000),
+            hook("g", "needsInput", "Notification", T0 + 60_000),
+        ];
+        std::fs::write(dir.path().join("hooks.json"), format!(r#"{{"sessions":{{{}}}}}"#, hooks.join(","))).unwrap();
+        let ids = ["a", "b", "c", "e", "f", "g"];
+        let cmux = FakeCmux::new(ids.iter().map(|id| cref(id, true)).collect());
+        let mut d = deps(dir.path(), &cmux);
+        d.now = std::time::UNIX_EPOCH + Duration::from_millis(now);
+        let transcript = |id: &str, lines: &[&str]| {
+            let proj = d.projects_dir.join(format!("-home-user-{id}"));
+            std::fs::create_dir_all(&proj).unwrap();
+            std::fs::write(proj.join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
+        };
+        let ended = [
+            r#"{"type":"assistant","isSidechain":false,"timestamp":"2026-11-04T06:16:00.000Z","message":{"stop_reason":"end_turn","content":[]}}"#,
+            r#"{"type":"system","subtype":"turn_duration","isSidechain":false,"timestamp":"2026-11-04T06:16:00.100Z"}"#,
+            r#"{"type":"mode"}"#,
+        ];
+        transcript("a", &ended);
+        transcript("b", &[r#"{"type":"assistant","isSidechain":false,"timestamp":"2026-11-04T06:19:00.000Z","message":{"stop_reason":"tool_use","content":[]}}"#]);
+        transcript("e", &ended);
+        transcript("f", &ended);
+        transcript("g", &ended);
+        let snap = build_snapshot(&d, &Snapshot::default());
+        let status = |id: &str| snap.sessions.iter().find(|s| s.id == id).unwrap().status;
+        assert_eq!(status("a"), Status::Idle, "turn ended after the busy change");
+        assert_eq!(status("b"), Status::Running, "tool call in progress");
+        assert_eq!(status("c"), Status::Idle, "hook Stop newer than busy");
+        assert_eq!(status("e"), Status::Idle, "shell is not running");
+        assert_eq!(status("f"), Status::Running, "fresh busy, prompt not written yet");
+        assert_eq!(status("g"), Status::NeedsInput);
     }
 }

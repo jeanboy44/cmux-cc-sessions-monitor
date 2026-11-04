@@ -14,6 +14,8 @@ pub struct ClaudeSessionRecord {
     pub status: Option<String>,
     pub started_at_ms: Option<u64>,
     pub updated_at_ms: Option<u64>,
+    /// When `status` last changed (`statusUpdatedAt`, epoch ms).
+    pub status_updated_at_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -33,6 +35,8 @@ struct Raw {
     started_at: Option<u64>,
     #[serde(default, deserialize_with = "lenient")]
     updated_at: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
+    status_updated_at: Option<u64>,
 }
 
 fn parse(text: &str) -> Option<ClaudeSessionRecord> {
@@ -45,6 +49,7 @@ fn parse(text: &str) -> Option<ClaudeSessionRecord> {
         status: raw.status,
         started_at_ms: raw.started_at,
         updated_at_ms: raw.updated_at,
+        status_updated_at_ms: raw.status_updated_at,
     })
 }
 
@@ -80,6 +85,7 @@ mod tests {
         assert_eq!(r[0].cwd, PathBuf::from("/home/user/proj"));
         assert_eq!(r[0].started_at_ms, Some(1700000000000));
         assert_eq!(r[0].updated_at_ms, Some(1700000005000));
+        assert_eq!(r[0].status_updated_at_ms, Some(1700000005000));
         assert_eq!(r[0].name.as_deref(), Some("demo"));
     }
 
@@ -123,6 +129,20 @@ mod tests {
         assert_eq!(r[0].name, None);
         assert_eq!(r[0].started_at_ms, None);
         assert_eq!(r[0].updated_at_ms, None);
+        assert_eq!(r[0].status_updated_at_ms, None);
+    }
+
+    #[test]
+    fn claude_sessions_status_updated_at_is_its_own_field() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join("9.json"),
+            r#"{"pid":9,"sessionId":"s","cwd":"/home/user/p","status":"busy","updatedAt":1700000009000,"statusUpdatedAt":1700000001000}"#,
+        )
+        .unwrap();
+        let r = read_claude_sessions(d.path());
+        assert_eq!(r[0].updated_at_ms, Some(1700000009000));
+        assert_eq!(r[0].status_updated_at_ms, Some(1700000001000));
     }
 
     #[test]

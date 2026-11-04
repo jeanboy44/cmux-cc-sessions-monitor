@@ -26,11 +26,23 @@ fn num(s: &str) -> Option<i64> {
 }
 
 /// Parses `YYYY-MM-DDTHH:MM:SS(.fff)Z` or a plain number (seconds, or
-/// milliseconds when 12+ digits). Anything else yields `None`.
-fn parse_time(s: &str) -> Option<SystemTime> {
+/// milliseconds when 12+ digits), optionally with a decimal fraction (cmux
+/// writes the hook `updatedAt` as float seconds). Anything else yields `None`.
+pub(crate) fn parse_time(s: &str) -> Option<SystemTime> {
     let s = s.trim();
-    if let Some(n) = num(s) {
-        let ms = if n >= 100_000_000_000 { n as u64 } else { (n as u64).checked_mul(1000)? };
+    let (int, frac) = match s.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (s, None),
+    };
+    if let Some(n) = num(int).filter(|_| frac.map_or(true, |f| num(f).is_some())) {
+        let frac = frac.unwrap_or("");
+        let ms = if n >= 100_000_000_000 {
+            n as u64
+        } else {
+            let digits: String = frac.chars().take(3).collect();
+            let frac_ms = if digits.is_empty() { 0 } else { num(&digits)? * 10_i64.pow(3 - digits.len() as u32) };
+            (n as u64).checked_mul(1000)?.checked_add(frac_ms as u64)?
+        };
         return Some(UNIX_EPOCH + Duration::from_millis(ms));
     }
     let b = s.strip_suffix('Z')?.as_bytes();
@@ -270,6 +282,7 @@ mod tests {
             status: Some(status.into()),
             started_at_ms: started_ms,
             updated_at_ms: None,
+            status_updated_at_ms: None,
         }
     }
 
@@ -415,6 +428,13 @@ mod tests {
         assert_eq!(ms(parse_time("1700000009")), Some(1_700_000_009_000));
         assert_eq!(ms(parse_time("1700000009123")), Some(1_700_000_009_123));
         assert!(parse_time("2024-02-29T00:00:00Z").is_some());
+        // cmux writes the hook `updatedAt` as float seconds
+        assert_eq!(ms(parse_time("1700000009.25")), Some(1_700_000_009_250));
+        assert_eq!(ms(parse_time("1700000009.123456")), Some(1_700_000_009_123));
+        assert_eq!(ms(parse_time("1700000009123.5")), Some(1_700_000_009_123));
+        for bad in ["1.", ".5", "1.2.3", "1e9", "1700000009.x"] {
+            assert_eq!(parse_time(bad), None, "{bad}");
+        }
         for bad in [
             "",
             "x",

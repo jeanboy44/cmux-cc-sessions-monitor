@@ -116,13 +116,67 @@ fn usage_tokens(usage: &Value) -> Option<u64> {
     any.then_some(total)
 }
 
+/// The state of the main-chain turn at the end of a transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Turn {
+    /// A prompt, a tool call/result or a model request is the newest record.
+    Active,
+    /// The turn ended (assistant `end_turn`, `stop_hook_summary` /
+    /// `turn_duration`, an interrupt) or is parked on background agents
+    /// (an `async_launched` tool result), at this time in epoch ms if known.
+    Finished(Option<u64>),
+}
+
 /// What the tail of a transcript tells: the context tokens of the last
-/// main-chain usage record and the model of the last main-chain assistant
-/// reply. Each is searched on its own, so they may come from different records.
+/// main-chain usage record, the model of the last main-chain assistant
+/// reply and the state of the last turn. Each is searched on its own, so they
+/// may come from different records.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptTail {
     pub tokens: Option<u64>,
     pub model: Option<String>,
+    pub turn: Option<Turn>,
+}
+
+/// The turn state a main-chain record shows, or `None` when it tells nothing
+/// (sidechain, meta and bookkeeping records).
+fn turn_of(v: &Value) -> Option<Turn> {
+    if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let finished = || {
+        let at = v.get("timestamp").and_then(Value::as_str).and_then(crate::merge::parse_time);
+        Turn::Finished(at.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64))
+    };
+    match v.get("type").and_then(Value::as_str)? {
+        "assistant" => match v.pointer("/message/stop_reason").and_then(Value::as_str) {
+            Some("end_turn" | "stop_sequence") => Some(finished()),
+            _ => Some(Turn::Active),
+        },
+        "user" => {
+            if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+                return None;
+            }
+            if v.pointer("/toolUseResult/status").and_then(Value::as_str) == Some("async_launched") {
+                return Some(finished());
+            }
+            let text = match v.pointer("/message/content") {
+                Some(Value::String(s)) => Some(s.as_str()),
+                Some(Value::Array(items)) => items.first().and_then(|i| i.get("text")).and_then(Value::as_str),
+                _ => None,
+            };
+            if text.is_some_and(|t| t.starts_with("[Request interrupted by user")) {
+                return Some(finished());
+            }
+            Some(Turn::Active)
+        }
+        "system" => match v.get("subtype").and_then(Value::as_str) {
+            Some("turn_duration" | "stop_hook_summary") => Some(finished()),
+            _ => None,
+        },
+        "api-request" => Some(Turn::Active),
+        _ => None,
+    }
 }
 
 impl TranscriptTail {
@@ -168,12 +222,15 @@ fn read_transcript_window(path: &Path, window: u64) -> Option<TranscriptTail> {
     }
     let mut tail = TranscriptTail::default();
     for line in body.lines().rev() {
-        if tail.tokens.is_some() && tail.model.is_some() {
+        if tail.tokens.is_some() && tail.model.is_some() && tail.turn.is_some() {
             break;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if tail.turn.is_none() {
+            tail.turn = turn_of(&v);
+        }
         if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
         }
@@ -237,6 +294,7 @@ impl TranscriptCache {
             if let Some(wide) = read_transcript_window(path, RETRY_BYTES) {
                 tail.tokens = tail.tokens.or(wide.tokens);
                 tail.model = tail.model.take().or(wide.model);
+                tail.turn = tail.turn.or(wide.turn);
             }
         }
         self.entries.insert(path.to_path_buf(), (key.0, key.1, tail.clone()));
@@ -713,7 +771,7 @@ mod tests {
         assert_eq!(model_of(&t), None);
         // usage without a model: tokens only
         write_lines(&t, &[assistant(1000, 0, 0)]);
-        assert_eq!(read_transcript_tail(&t), Some(TranscriptTail { tokens: Some(1000), model: None }));
+        assert_eq!(read_transcript_tail(&t), Some(TranscriptTail { tokens: Some(1000), model: None, turn: Some(Turn::Active) }));
         assert_eq!(read_transcript_tail(&dir.path().join("missing.jsonl")), None);
     }
 
@@ -845,7 +903,8 @@ mod tests {
         let t = dir.path().join("t.jsonl");
         write_lines(&t, &[r#"{"type":"user","message":{"content":"hi"}}"#.into()]);
         let mut cache = TranscriptCache::default();
-        assert_eq!(cache.tail(&t), Some(TranscriptTail::default()));
+        // no usage or model yet; the first prompt is an active turn
+        assert_eq!(cache.tail(&t), Some(TranscriptTail { turn: Some(Turn::Active), ..TranscriptTail::default() }));
         // a fresh unseen file whose assistant is beyond every window: None
         let u = dir.path().join("u.jsonl");
         write_lines(&u, &[assistant_model("claude-opus-4-5"), big_user(RETRY_BYTES as usize + 1000)]);
@@ -879,5 +938,72 @@ mod tests {
         let tail = cache.tail(&t).unwrap();
         assert_eq!(tail.model.as_deref(), Some("claude-haiku-5-5"));
         assert_eq!(tail.tokens, Some(20_000));
+    }
+
+    /// 2026-11-04T05:00:00.000Z
+    const T0_MS: u64 = 1_793_768_400_000;
+
+    fn rec(body: &str, secs: u64) -> String {
+        format!(r#"{{{body},"isSidechain":false,"timestamp":"2026-11-04T05:00:{secs:02}.000Z"}}"#)
+    }
+
+    fn turn_of(lines: &[String]) -> Option<Turn> {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(&t, lines);
+        read_transcript_tail(&t).unwrap().turn
+    }
+
+    /// Measured tail shapes (record kinds only, synthetic bodies).
+    #[test]
+    fn transcript_turn_state_table() {
+        let a_tool = rec(r#""type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use"}]}"#, 1);
+        let tool_result = rec(r#""type":"user","message":{"content":[{"type":"tool_result"}]}"#, 2);
+        let api = rec(r#""type":"api-request""#, 3);
+        let a_end = rec(r#""type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text"}]}"#, 4);
+        let hook_sum = rec(r#""type":"system","subtype":"stop_hook_summary""#, 5);
+        let duration = rec(r#""type":"system","subtype":"turn_duration""#, 6);
+        let attach = rec(r#""type":"attachment""#, 7);
+        let meta = r#"{"type":"mode"}"#.to_string();
+        let prompt = rec(r#""type":"user","message":{"content":"next"}"#, 8);
+        let async_launch = rec(
+            r#""type":"user","message":{"content":[{"type":"tool_result"}]},"toolUseResult":{"status":"async_launched","isAsync":true}"#,
+            9,
+        );
+        let interrupted = rec(r#""type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}"#, 10);
+        let meta_user = rec(r#""type":"user","isMeta":true,"message":{"content":"x"}"#, 11);
+        let side = r#"{"type":"user","isSidechain":true,"message":{"content":"x"},"timestamp":"2026-11-04T05:00:12.000Z"}"#.to_string();
+        let local = rec(r#""type":"system","subtype":"local_command""#, 13);
+        let fin = |secs: u64| Some(Turn::Finished(Some(T0_MS + secs * 1000)));
+        let cases: Vec<(Vec<String>, Option<Turn>, &str)> = vec![
+            (vec![a_tool.clone()], Some(Turn::Active), "tool running"),
+            (vec![a_tool.clone(), tool_result.clone()], Some(Turn::Active), "tool result, model next"),
+            (vec![tool_result.clone(), api.clone()], Some(Turn::Active), "request in flight"),
+            (vec![a_tool.clone(), a_end.clone()], fin(4), "end_turn"),
+            (vec![a_end.clone(), hook_sum.clone(), duration.clone(), attach.clone(), meta.clone()], fin(6), "ended + trailing metadata"),
+            (vec![duration.clone(), prompt.clone()], Some(Turn::Active), "new prompt after a finished turn"),
+            (vec![a_tool.clone(), async_launch.clone(), meta.clone()], fin(9), "parked on a background agent"),
+            (vec![a_tool.clone(), interrupted.clone()], fin(10), "interrupted"),
+            (vec![duration.clone(), meta_user.clone(), side.clone(), local.clone()], fin(6), "meta, sidechain, local command skipped"),
+            (vec![meta.clone(), attach.clone()], None, "no turn record"),
+            (vec![], None, "empty"),
+        ];
+        for (lines, want, why) in cases {
+            assert_eq!(turn_of(&lines), want, "{why}");
+        }
+        // an unparsable timestamp still finishes the turn, without a time
+        let no_ts = r#"{"type":"system","subtype":"turn_duration","timestamp":"later"}"#.to_string();
+        assert_eq!(turn_of(&[a_tool, no_ts]), Some(Turn::Finished(None)));
+    }
+
+    #[test]
+    fn transcript_turn_is_never_carried_over_by_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        write_lines(&t, &[rec(r#""type":"system","subtype":"turn_duration""#, 1)]);
+        let mut cache = TranscriptCache::default();
+        assert!(matches!(cache.tail(&t).unwrap().turn, Some(Turn::Finished(_))));
+        append(&t, &big_user(RETRY_BYTES as usize + 1000));
+        assert_eq!(cache.tail(&t).unwrap().turn, None, "an unknown turn is not the old one");
     }
 }
