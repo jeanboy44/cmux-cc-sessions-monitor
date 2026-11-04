@@ -34,6 +34,13 @@
 //! of the spirit band, from the body's lower right, in the element of the
 //! subagent's model (see `spirit::subdots`).
 //!
+//! Running tool calls (see [`crate::source::tools`]): a [`TOOL_GLYPH`]`N`
+//! marker after the subagent marker on standard and compact cards (N =
+//! foreground calls plus background tasks; dropped first when the row is
+//! too narrow), and one `⚙ Tool · hint  12s` row on the large card (`+N`
+//! parallel calls and `bg×N` background tasks on its right, or `⚙ bg ×N`
+//! alone) after the summary, whose third line it takes. Done cards show none.
+//!
 //! When a card of the configured layout does not fit a compact one-line card
 //! is drawn instead ([`render_compact`]). Empty areas draw nothing; no size
 //! panics.
@@ -83,6 +90,9 @@ const LARGE_SUBAGENT_ROWS: usize = 3;
 /// cards, `◇ kind · description` rows on the large card). A plain geometric
 /// shape, not an emoji, one column wide like the other card glyphs.
 pub const SUBAGENT_GLYPH: &str = "◇";
+/// Marker of running tool calls (`⚙3` on the badge row, `⚙ Bash · …` on the
+/// large card). One cell wide (text presentation).
+pub const TOOL_GLYPH: &str = "⚙";
 const _: () = assert!(
     spirit::grid_size_for(Size::S, Magic::Big).0 + SPIRIT_LEFT_PAD <= LARGE_W - 2,
     "big magic fits right of the padded S body"
@@ -284,7 +294,12 @@ pub fn render_compact(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, sele
     let tag = format!(" {} ", style::status_tag(s.status));
     let elapsed = cfg.extras.elapsed.then(|| elapsed_text(s, SystemTime::now())).flatten().map(|d| format!(" {d}"));
     let running = running_count(&s.subagents);
-    let marker = (running > 0).then(|| format!(" {SUBAGENT_GLYPH}{running}"));
+    let tools = tool_count(s);
+    let marker = (running > 0 || tools > 0).then(|| {
+        let sub = if running > 0 { format!(" {SUBAGENT_GLYPH}{running}") } else { String::new() };
+        let tool = if tools > 0 { format!(" {TOOL_GLYPH}{tools}") } else { String::new() };
+        sub + &tool
+    });
     let name_w = s.name.width();
     // Keep at least a few name columns before adding the badge and elapsed.
     let need = name_w.min(6) + 1;
@@ -355,8 +370,15 @@ fn pr_label(state: PrState) -> &'static str {
 /// takes its place.
 fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Line<'static>> {
     let running = running_count(&s.subagents);
-    let marker = (running > 0).then(|| format!(" {SUBAGENT_GLYPH}×{running}"));
-    let mut lines = vec![name_line(s, width), Line::from(badge_spans(s, cfg, width, now, marker))];
+    let sub = (running > 0).then(|| format!(" {SUBAGENT_GLYPH}×{running}"));
+    let tools = tool_count(s);
+    let both = (tools > 0).then(|| format!("{} {TOOL_GLYPH}{tools}", sub.as_deref().unwrap_or("")));
+    // both markers when they fit, else the subagent marker alone
+    let mut badge = badge_spans(s, cfg, width, now, both.clone().or(sub.clone()));
+    if both.is_some_and(|b| badge.last().is_none_or(|sp| sp.content != b.as_str())) {
+        badge = badge_spans(s, cfg, width, now, sub);
+    }
+    let mut lines = vec![name_line(s, width), Line::from(badge)];
     let mut extras = extra_lines(s, cfg, width);
     let summary = s.summary.as_ref().filter(|_| cfg.extras.summary).map(|sum| Line::styled(truncate_to_width(sum, width), dim()));
     if !extras.is_empty() {
@@ -386,12 +408,66 @@ fn large_text_lines(s: &Session, cfg: &Config, width: usize, rows: usize, now: S
     let mut lines = vec![name_line(s, width), Line::from(badge)];
     lines.extend(branch_line(s, cfg, width));
     lines.extend(pr_line(s, cfg, width));
+    // a running tool takes the summary's third line
+    let tool = tool_line(s, width, now);
+    let summary_rows = LARGE_SUMMARY_ROWS - usize::from(tool.is_some());
     if let Some(sum) = s.summary.as_ref().filter(|_| ex.summary) {
-        lines.extend(summary_lines(sum, width, LARGE_SUMMARY_ROWS).into_iter().map(|l| Line::styled(l, dim())));
+        lines.extend(summary_lines(sum, width, summary_rows).into_iter().map(|l| Line::styled(l, dim())));
     }
+    lines.extend(tool);
     let free = rows.saturating_sub(lines.len());
     lines.extend(subagent_lines(s, width, free));
     lines
+}
+
+/// Running tool calls of a session that is not Done.
+fn tool_count(s: &Session) -> usize {
+    if s.status == Status::Done {
+        0
+    } else {
+        s.tools.count()
+    }
+}
+
+/// Columns the tool name and hint keep before the right part is dropped.
+const TOOL_LEFT_MIN: usize = 8;
+
+/// The large card's tool row: `⚙ Tool · hint` cut to the width (CJK-aware)
+/// with the elapsed time, `+N` parallel calls and `bg×N` background tasks
+/// on the right when they fit; `⚙ bg ×N` when only background tasks run.
+/// `None` when nothing runs or the session is Done.
+fn tool_line(s: &Session, width: usize, now: SystemTime) -> Option<Line<'static>> {
+    if width == 0 || tool_count(s) == 0 {
+        return None;
+    }
+    let t = &s.tools;
+    let (left, right) = match &t.current {
+        Some(c) => {
+            let left = if c.hint.is_empty() {
+                format!("{TOOL_GLYPH} {}", c.name)
+            } else {
+                format!("{TOOL_GLYPH} {} · {}", c.name, c.hint)
+            };
+            let mut right = Vec::new();
+            right.extend(since(c.started_at, now));
+            if t.more > 0 {
+                right.push(format!("+{}", t.more));
+            }
+            if t.background > 0 {
+                right.push(format!("bg×{}", t.background));
+            }
+            (left, right.join(" "))
+        }
+        None => (format!("{TOOL_GLYPH} bg ×{}", t.background), String::new()),
+    };
+    let text = Style::new().fg(style::TEXT);
+    let rw = right.width();
+    if rw > 0 && rw + 1 + TOOL_LEFT_MIN <= width {
+        let l = truncate_to_width(&left, width - rw - 1);
+        let pad = width - l.width() - rw;
+        return Some(Line::from(vec![Span::styled(l, text), Span::raw(" ".repeat(pad)), Span::styled(right, dim())]));
+    }
+    Some(Line::styled(truncate_to_width(&left, width), text))
 }
 
 fn subagent_style() -> Style {
@@ -556,6 +632,7 @@ mod tests {
     use super::*;
     use crate::config::{CardLayout, Extras};
     use crate::model::Pr;
+    use crate::source::tools::{RunningTool, ToolActivity};
     use crate::ui::test_util::{draw, rows};
     use ratatui::style::Color;
     use std::path::PathBuf;
@@ -585,6 +662,7 @@ mod tests {
             model: None,
             unread_notification: false,
             subagents: Vec::new(),
+            tools: Default::default(),
         }
     }
 
@@ -1573,6 +1651,120 @@ mod tests {
         assert_eq!(line(&two, 14), "  proj-a  RUN");
         for w in [0, 1, 2, 3, 5] {
             draw(w.max(1), 1, |f| render_compact(f, Rect::new(0, 0, w, 1), &two, &Config::default(), true, 0));
+        }
+    }
+
+    fn with_tool(mut s: Session, name: &str, hint: &str, secs_ago: u64, more: usize, background: usize) -> Session {
+        let current = (!name.is_empty()).then(|| RunningTool {
+            name: name.into(),
+            hint: hint.into(),
+            started_at: Some(SystemTime::now() - Duration::from_secs(secs_ago)),
+        });
+        s.tools = ToolActivity { current, more, background };
+        s
+    }
+
+    #[test]
+    fn standard_card_badge_shows_the_tool_marker_after_the_subagents() {
+        assert_eq!(TOOL_GLYPH.width(), 1, "one cell, like the subagent glyph");
+        let badge = |s: &Session, cfg: &Config| info(&card(s, cfg, false)[1 + SCENE_ROWS as usize + 1]);
+        let one = with_tool(session("proj-a", Status::Running), "Bash", "cargo test", 12, 0, 0);
+        assert_eq!(badge(&one, &Config::default()), " RUN  3h ⚙1");
+        let bg = with_tool(session("proj-a", Status::Running), "", "", 0, 0, 2);
+        assert_eq!(badge(&bg, &Config::default()), " RUN  3h ⚙2");
+        let both = with_tool(with_subs(session("proj-a", Status::Running), 2, 0), "Read", "a.rs", 3, 1, 1);
+        assert_eq!(badge(&both, &Config::default()), " RUN  3h ◇×2 ⚙3");
+        // last activity makes room first
+        assert_eq!(badge(&both, &all_extras()), " RUN  3h ◇×2 ⚙3");
+        // the other rows and the geometry are unchanged
+        let rows = card(&both, &all_extras(), false);
+        assert!(rows.iter().all(|r| r.width() == usize::from(CARD_W)), "{rows:?}");
+        let no_tools = Session { tools: ToolActivity::default(), ..both.clone() };
+        assert_eq!(rows[..1 + SCENE_ROWS as usize + 1], card(&no_tools, &all_extras(), false)[..1 + SCENE_ROWS as usize + 1], "band and name");
+        assert_eq!(info(&rows[1 + SCENE_ROWS as usize + 3]), "fixing the parser");
+        // too narrow for both markers: the subagent marker stays
+        let now = SystemTime::now();
+        let flat = |w: usize| -> String { text_lines(&both, &all_extras(), w, now)[1].spans.iter().map(|sp| sp.content.as_ref()).collect() };
+        assert_eq!(flat(15), " RUN  3h ◇×2 ⚙3");
+        assert_eq!(flat(14), " RUN  3h ◇×2");
+        assert_eq!(flat(9), " RUN  3h");
+        // nothing on a Done card
+        let mut done = with_tool(session("proj-a", Status::Done), "Bash", "x", 1, 0, 1);
+        done.ended_at = done.started_at;
+        assert!(!card(&done, &Config::default(), false).join("").contains('⚙'));
+    }
+
+    #[test]
+    fn compact_card_shows_the_tool_marker() {
+        let line = |s: &Session, w: u16| rows(&draw(w, 1, |f| render_compact(f, f.area(), s, &Config::default(), false, 0)))[0].trim_end().to_string();
+        let s = with_tool(with_subs(session("proj-a", Status::Running), 2, 0), "Bash", "x", 1, 0, 0);
+        assert_eq!(line(&s, 30), "  proj-a  RUN  3h ◇2 ⚙1");
+        let only = with_tool(session("proj-a", Status::Running), "Bash", "x", 1, 0, 0);
+        assert_eq!(line(&only, 30), "  proj-a  RUN  3h ⚙1");
+        for w in [0, 1, 2, 3, 5, 14, 17] {
+            draw(w.max(1), 1, |f| render_compact(f, Rect::new(0, 0, w, 1), &s, &Config::default(), true, 0));
+        }
+    }
+
+    #[test]
+    fn large_card_shows_one_tool_row_after_the_summary() {
+        let cfg = large_cfg();
+        let inner = usize::from(LARGE_W - 2);
+        let base = large_info(&opus("proj-a", Status::Running), &cfg);
+        let s = with_tool(opus("proj-a", Status::Running), "Bash", "cargo test -q", 12, 0, 0);
+        let rows = large_info(&s, &cfg);
+        assert_eq!(rows[..5].to_vec(), base[..5].to_vec(), "priority rows intact");
+        assert!(rows[5].starts_with("⚙ Bash · cargo test -q ") && rows[5].ends_with(" 12s"), "{:?}", rows[5]);
+        assert_eq!(rows[5].width(), inner);
+        // parallel calls and background tasks go to the right
+        let all = with_tool(opus("proj-a", Status::Running), "Bash", "cargo test --quiet", 12, 1, 2);
+        let row = &large_info(&all, &cfg)[5];
+        assert!(row.starts_with("⚙ Bash · cargo t") && row.contains('…') && row.ends_with(" 12s +1 bg×2"), "{row:?}");
+        assert_eq!(row.width(), inner);
+        // background only; no hint; no time
+        assert_eq!(large_info(&with_tool(opus("proj-a", Status::Running), "", "", 0, 0, 2), &cfg)[5], "⚙ bg ×2");
+        let bare = with_tool(opus("proj-a", Status::Running), "WebFetch", "", 7, 0, 0);
+        assert!(large_info(&bare, &cfg)[5].starts_with("⚙ WebFetch ") && large_info(&bare, &cfg)[5].ends_with(" 7s"));
+        let mut untimed = bare.clone();
+        untimed.tools.current.as_mut().unwrap().started_at = None;
+        assert_eq!(large_info(&untimed, &cfg)[5], "⚙ WebFetch");
+        // subagents follow the tool row
+        let subs = with_tool(with_subs(opus("proj-a", Status::Running), 2, 0), "Read", "main.rs", 3, 0, 0);
+        let rows = large_info(&subs, &cfg);
+        assert!(rows[5].starts_with("⚙ Read · main.rs"), "{:?}", rows[5]);
+        assert!(rows[6].starts_with("◇ Explore · task 0") && rows[7].starts_with("◇ Explore · task 1"), "{rows:?}");
+        // a three-line summary gives its last line to the tool row
+        let mut long = with_tool(with_subs(opus("proj-a", Status::Running), 2, 0), "Read", "main.rs", 3, 0, 0);
+        long.summary = Some("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau".into());
+        let rows = large_info(&long, &cfg);
+        let plain = large_info(&Session { tools: ToolActivity::default(), subagents: Vec::new(), ..long.clone() }, &cfg);
+        assert_eq!(rows[..5].to_vec(), plain[..5].to_vec());
+        assert!(rows[5].ends_with('…'), "summary cut on its second line: {:?}", rows[5]);
+        assert!(rows[6].starts_with("⚙ Read · main.rs"), "{:?}", rows[6]);
+        assert!(rows[7].starts_with("◇ Explore · task 0") && rows[7].ends_with("+1"), "{:?}", rows[7]);
+        // nothing on a Done card
+        let mut done = with_tool(opus("proj-a", Status::Done), "Bash", "x", 1, 0, 1);
+        done.ended_at = done.started_at;
+        assert!(!large_rows(&done, &cfg).join("").contains('⚙'));
+    }
+
+    #[test]
+    fn large_card_tool_row_cuts_wide_hints_inside_the_card() {
+        let cfg = large_cfg();
+        let s = with_tool(opus("proj-a", Status::Running), "Bash", "한글로 된 아주 긴 설명이 카드 폭을 넘음", 75, 0, 3);
+        let rows = large_rows(&s, &cfg);
+        assert!(rows.iter().all(|r| r.width() == usize::from(LARGE_W)), "borders intact: {rows:?}");
+        let row = &large_info(&s, &cfg)[5];
+        assert!(row.starts_with("⚙ Bash · 한글") && row.contains('…') && row.ends_with(" 1m bg×3"), "{row:?}");
+        assert_eq!(row.width(), usize::from(LARGE_W - 2));
+        // very narrow text area: the right part goes, the left is cut
+        let now = SystemTime::now();
+        let line = |w: usize| -> String {
+            tool_line(&s, w, now).map(|l| l.spans.iter().map(|sp| sp.content.as_ref()).collect()).unwrap_or_default()
+        };
+        assert!(line(12).width() <= 12 && line(12).starts_with("⚙ Bash"), "{:?}", line(12));
+        for w in 0..8 {
+            assert!(line(w).width() <= w);
         }
     }
 

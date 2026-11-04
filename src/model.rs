@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 pub use crate::source::subagents::SubagentInfo;
+pub use crate::source::tools::ToolActivity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -64,6 +65,10 @@ pub struct Session {
     /// The newest Claude Code subagents of the session (see
     /// [`crate::source::subagents`]); filled by every refresh round.
     pub subagents: Vec<SubagentInfo>,
+    /// Tool calls running now, foreground and background (see
+    /// [`crate::source::tools`]); filled by every refresh round, empty for
+    /// finished sessions.
+    pub tools: ToolActivity,
 }
 
 /// Claude model family; each one maps to a spirit element in the config.

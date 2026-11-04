@@ -124,6 +124,7 @@ fn build(c: Option<&ClaudeSessionRecord>, h: Option<&HookRecord>, x: &CmuxSessio
         model: None,
         unread_notification: false,
         subagents: Vec::new(),
+        tools: Default::default(),
     }
 }
 

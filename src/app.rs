@@ -551,6 +551,7 @@ pub(crate) fn fake_session(id: &str, status: Status) -> Session {
         model: None,
         unread_notification: false,
         subagents: Vec::new(),
+        tools: Default::default(),
     }
 }
 

@@ -24,6 +24,7 @@ use crate::source::context::{default_ctx_dirs, read_ctx_latest, resolve_ctx, saf
 use crate::source::cmux::{Cmux, CmuxCli, CmuxSessionRef, SCREEN_LINES};
 use crate::source::hook_sessions::read_hook_sessions;
 use crate::source::subagents::{self, SubagentCache};
+use crate::source::tools::ToolCache;
 use crate::status::{resolve_status, settle_with_transcript};
 
 /// How often the refresh thread rebuilds the snapshot.
@@ -61,6 +62,8 @@ pub struct Snapshot {
     pub(crate) ctx_calibration: HashMap<String, CtxCalibration>,
     /// Subagent folder listings and metas, pruned to the sessions of the round.
     pub(crate) subagents: SubagentCache,
+    /// Transcript parse states for the running tool calls, pruned likewise.
+    pub(crate) tools: ToolCache,
 }
 
 impl Snapshot {
@@ -237,6 +240,7 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
     let mut used = Vec::new();
     let mut sub_cache = prev.subagents.clone();
     let mut sub_dirs = Vec::new();
+    let mut tools = prev.tools.clone();
     for s in sessions.iter_mut() {
         let t = transcript_for(s, &deps.projects_dir);
         let tail = t.as_deref().and_then(|p| transcripts.tail(p));
@@ -269,10 +273,13 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
             }
             None => Vec::new(),
         };
+        // Tool calls running now; a finished session runs none.
+        s.tools = t.as_deref().map(|p| tools.scan(p, s.status, deps.now)).unwrap_or_default();
         used.extend(t);
     }
     transcripts.retain(&used);
     sub_cache.retain(&sub_dirs);
+    tools.retain(&used);
     Snapshot {
         sessions,
         message,
@@ -284,6 +291,7 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
         transcripts,
         ctx_calibration,
         subagents: sub_cache,
+        tools,
     }
 }
 
@@ -1132,5 +1140,50 @@ mod tests {
         assert_eq!(status("e"), Status::Idle, "shell is not running");
         assert_eq!(status("f"), Status::Running, "fresh busy, prompt not written yet");
         assert_eq!(status("g"), Status::NeedsInput);
+    }
+
+    #[test]
+    fn build_snapshot_fills_running_tools_and_done_sessions_show_none() {
+        const T0: u64 = 1_793_768_400_000; // 2026-11-04T05:00:00Z
+        let dir = setup();
+        for (pid, id) in [(11, "a"), (12, "b"), (13, "c")] {
+            write_claude(&dir.path().join("sessions"), pid, id, "busy");
+        }
+        let mut cmux = FakeCmux::new(vec![cref("a", true), cref("b", true), cref("c", true)]);
+        let mut d = deps(dir.path(), &cmux);
+        d.now = std::time::UNIX_EPOCH + Duration::from_millis(T0 + 60_000);
+        let lines = [
+            r#"{"type":"assistant","isSidechain":false,"timestamp":"2026-11-04T05:00:10.000Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 9","run_in_background":true}}]}}"#,
+            r#"{"type":"user","isSidechain":false,"timestamp":"2026-11-04T05:00:11.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]},"toolUseResult":{"backgroundTaskId":"bk1"}}"#,
+            r#"{"type":"assistant","isSidechain":false,"timestamp":"2026-11-04T05:00:48.000Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"cargo test","description":"Run tests"}}]}}"#,
+        ];
+        for id in ["a", "c"] {
+            let proj = d.projects_dir.join(format!("-home-user-{id}"));
+            std::fs::create_dir_all(&proj).unwrap();
+            std::fs::write(proj.join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
+        }
+        let snap = build_snapshot(&d, &Snapshot::default());
+        let tools = |s: &Snapshot, id: &str| s.sessions.iter().find(|x| x.id == id).unwrap().tools.clone();
+        let a = tools(&snap, "a");
+        let cur = a.current.clone().unwrap();
+        assert_eq!((cur.name.as_str(), cur.hint.as_str(), a.more, a.background), ("Bash", "Run tests", 0, 1));
+        assert_eq!(cur.started_at, Some(std::time::UNIX_EPOCH + Duration::from_millis(T0 + 48_000)));
+        assert_eq!(tools(&snap, "b"), Default::default(), "no transcript");
+        assert_eq!(tools(&snap, "c").count(), 2);
+        assert_eq!(snap.tools.len(), 2, "one parse state per transcript");
+        // c finishes: nothing runs on a Done card; its state stays until the tab closes
+        cmux.sessions_result = Ok(vec![cref("a", true), cref("b", true), cref("c", false)]);
+        cmux.tree_result = Ok(tree_of(&[("SF-A", ""), ("SF-B", ""), ("SF-C", "")]));
+        let mut d = deps(dir.path(), &cmux);
+        d.now = std::time::UNIX_EPOCH + Duration::from_millis(T0 + 60_000);
+        let done = build_snapshot(&d, &snap);
+        let c = done.sessions.iter().find(|s| s.id == "c").unwrap();
+        assert_eq!((c.status, c.tools.count()), (Status::Done, 0));
+        assert_eq!(tools(&done, "a").count(), 2);
+        std::fs::remove_file(dir.path().join("sessions").join("13.json")).unwrap();
+        cmux.tree_result = Ok(tree_of(&[("SF-A", ""), ("SF-B", "")]));
+        let mut d = deps(dir.path(), &cmux);
+        d.now = std::time::UNIX_EPOCH + Duration::from_millis(T0 + 60_000);
+        assert_eq!(build_snapshot(&d, &done).tools.len(), 1, "closed tab pruned");
     }
 }

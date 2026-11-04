@@ -16,6 +16,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 - `Enter` (or `Space`) jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
 - Cards are grouped by cmux window. An optional PR chip shows the session's own pull request, taken from the PR meta your hook writes (see Limitations below), not looked up from the branch, so two sessions on the same branch can show different PRs.
 - Running Claude Code subagents show on the card: a `◇×N` marker on the standard card's badge row, one `◇ kind · description` row each on the large card, and one round bead each in a row along the bottom of the spirit's animation area, growing right from the body, in the colour of the subagent model's element (see [Subagents](#subagents)).
+- Running tool calls show on the card: a `⚙N` marker after the subagent marker (foreground calls plus background Bash / Monitor tasks), and on the large card one `⚙ Bash · cargo test…  12s` row for the tool running now (see [Running tools](#running-tools)).
 
 ## Install
 
@@ -93,6 +94,22 @@ A subagent counts as running when its meta does not say `finished: true` (honour
 - Large card: below the summary, one row per running subagent, newest first, `◇ kind · description` with the model family on the right; at most three rows, the last ending in `+N` when more are running. The name, badge, branch, PR and summary rows always come first.
 - One-line cards: `◇N` after the elapsed time.
 - Spirit: one round bead per running subagent (at most five, as many as fit; the text counts the rest) in one row along the bottom of the animation area, starting one empty cell right of the body and growing to the right. Each bead is exactly one braille cell (`⠿`) with one empty cell between two beads, so N beads always read as N. Its colour is the element of the model the subagent actually runs on (`pickedEffortModel` from the meta, else the requested `model`, through the same `model_themes` mapping as the spirit; an unknown model takes the spirit's own element). The beads bob one sub-pixel behind the spirit, pulse while it runs, are dim while it is idle and are gone once it is done.
+
+## Running tools
+
+cmux-magigent also shows which tool call a session is running right now and how many background tasks it has, read from the session transcript (`~/.claude/projects/<project>/<session id>.jsonl`). The first refresh reads the last 2 MiB of the transcript; later refreshes read only the lines appended since, so the cost per round is one `stat` per session plus the new bytes.
+
+- Current tool: a main-chain `tool_use` block of an assistant reply counts as running until a `tool_result` with its id arrives; an `end_turn` reply, an interrupt or a new prompt clears them all. `Agent` / `Task` calls are left out (they are subagents, see above). The hint is the Bash `description` (else the first command line, at most 30 characters), the file name for Read / Edit / Write / NotebookEdit, the pattern for Grep / Glob, and nothing for other tools. The time is measured from the assistant record's timestamp. Parallel calls show the oldest one and `+N`.
+- Background tasks: a main-chain tool result carrying `backgroundTaskId` (Bash run in the background, also when backgrounded later) or a Monitor `taskId` starts a task; a `<task-notification>` naming its task id (any status: completed, failed, killed, stopped) or a `TaskStop` / `KillShell` call naming it ends it.
+- Standard and one-line cards: `⚙N` after the subagent marker (N = foreground calls plus background tasks); it is dropped first when the badge row is too narrow.
+- Large card: one row after the summary, `⚙ Tool · hint` with the elapsed time, `+N` parallel calls and `bg×N` background tasks on the right, or `⚙ bg ×N` when only background tasks run. While it shows, the summary keeps two lines instead of three; running subagent rows follow it.
+
+Detection limits, chosen to undercount rather than overcount:
+
+- Claude Code's task output files (`/tmp/claude-<uid>/<project>/<session id>/tasks/<task id>.output`) carry no exit marker and stay after the task ends, so they cannot tell running from finished. They only extend a task's life: an open background task counts while it was launched within the last 30 minutes or its output file was written within the last 5 minutes. A silent task running longer than 30 minutes is therefore no longer counted. A Monitor never counts past its `timeoutMs`; a persistent Monitor counts until it is notified or stopped.
+- The hook file's `hadPendingBackgroundWorkAtStop` is only a yes/no flag at the moment a turn stopped, so it is not used.
+- A pending call of an Idle session older than 120 seconds is ignored (an interrupted or crashed call); a session waiting for permission (`INPUT`) keeps showing the call it asks about. Done sessions show nothing.
+- Background tasks started by subagents belong to the subagent and are not counted, and a task launched before the first 2 MiB window is unknown until it ends.
 
 ## How status is detected
 

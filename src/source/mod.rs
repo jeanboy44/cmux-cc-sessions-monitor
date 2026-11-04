@@ -4,6 +4,7 @@ pub mod context;
 pub mod hook_sessions;
 pub mod session_meta;
 pub mod subagents;
+pub mod tools;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
