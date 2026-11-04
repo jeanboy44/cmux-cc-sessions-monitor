@@ -1,172 +1,94 @@
 # cmux-cc-monitor
 
-cmux 안에서 여러 Claude Code 세션을 동시에 돌릴 때, 어떤 세션이 일하는 중인지, 내 입력을 기다리는지, 끝났는지를 한 화면에서 보여주는 게임 스타일 터미널 UI(ratatui)입니다. 세션마다 타일 하나가 생기고, 도트 마스코트 "Pochi"가 상태를 표정과 동작으로 보여줍니다. vim 방식(`h` `j` `k` `l`)으로 타일을 고르고 `Enter`를 누르면 해당 세션이 있는 cmux 워크스페이스와 패인으로 포커스가 이동합니다.
+[![ci](https://github.com/jeanboy44/cmux-cc-sessions-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/jeanboy44/cmux-cc-sessions-monitor/actions/workflows/ci.yml) ![license MIT](https://img.shields.io/badge/license-MIT-blue) ![platform macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
 
-스크린샷은 추후 추가합니다.
+A cmux extension that shows every Claude Code session running in cmux as a small card with a living spirit, so you can see at a glance which session is working, waiting for you, or done.
 
-## Pochi 갤러리
+<!-- TODO: screenshot/GIF -->
 
-아래는 마스코트 Pochi의 상태별 모습입니다(실제 화면에서는 색과 애니메이션이 함께 나옵니다). 왼쪽부터 일하는 중(RUN), 입력 대기(INPUT), 대기(IDLE), 완료(DONE) 순서입니다. 점자(Braille) 문자 한 칸에 점 2×4개가 들어가므로, 원래 도트 그림(둥근 몸통, 꺾인 안테나, 눈, 발)을 작은 자리 안에 그대로 그립니다. 눈은 몸통에 뚫린 구멍으로 보입니다. 세로형 타일(뷰 B)과 빈 화면에서는 6×3칸(12×12 도트)을 씁니다.
+## Features
 
-```
-RUN       INPUT     IDLE      DONE
- ⣀⣠⣂⠈      ⣀⣠⣂ !     ⣀⣠⣂       ⣀⣠⣂ ✓
-⣾⢻⣿⡟⣷     ⣾⠛⣿⠛⣷     ⡾⢿⣿⡿⢷z    ⡾⡻⣿⢟⢷
-⠙⢿⠿⣿⠋     ⠙⣿⠭⣿⠋     ⠙⣿⠿⣿⠋     ⠙⣿⠭⣿⠋
-```
+- One 20x9 card per session: a small Gastly-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, and the git branch (or PR).
+- Each spirit stands for a Claude model: fable is water, opus is fire, sonnet is lightning, haiku is poison (green). You can change the element per model in settings, and unknown models use the `theme` element (default fire).
+- The spirit's state is its animation: running (the body churns and casts its magic to the right: fire breath, water vortex, poison fog, lightning bolt), needs input (a bobbing `?`), idle (dim slow bob and `z`), done (sparkles), unknown (gray).
+- Context usage sets the size of the magic: small under 30%, normal, big from 70%, and a red warning flicker above 90%.
+- The card border blinks blue while the session has unread cmux notifications, for example when it finished.
+- `Enter` jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
+- Cards are grouped by cmux window. An optional PR chip shows the open pull request for the branch.
 
-가로형 타일(뷰 A)에서는 4×2칸(8×8 도트)입니다. 상태는 모양과 함께 색, 동작, 옆의 기호(`!` `z` `?` `✓`, 반짝임)로도 구별됩니다.
-
-```
-RUN    INPUT  IDLE   DONE
-⣠⣤⣔⠈   ⡠⣤⢔!   ⣠⣤⣔    ⡠⣤⢔✓
-⠳⡿⡞    ⢳⠿⡞    ⢲⠿⡖z   ⢻⠭⡟
-```
-
-색이 들어간 갤러리는 `cargo test dump_color_gallery -- --ignored --nocapture`로 터미널에서 볼 수 있습니다. 점자 문자가 없는 글꼴에서는 점이 깨져 보일 수 있습니다.
-
-타일은 상태 색의 얇은 둥근 테두리(`╭─╮`)로 감싸고, 장식은 최소한으로 줄여 Pochi와 텍스트가 잘 보이도록 했습니다.
-
-## 요구 사항
-
-- macOS 전용입니다.
-- cmux 0.65 기준으로 만들고 확인했습니다. 다른 버전에서는 동작이 다를 수 있습니다.
-- Rust 툴체인(`cargo`)이 필요합니다.
-- Claude Code 세션이 cmux 안에서 실행 중이어야 합니다.
-
-## 설치와 실행
+## Install
 
 ```
 cargo install --git https://github.com/jeanboy44/cmux-cc-sessions-monitor
 ```
 
-cmux 패인 하나에서 다음 명령으로 실행합니다.
+Then run `cmux-cc-monitor` in a cmux pane. Requires a Rust toolchain (1.89 or newer).
 
-```
-cmux-cc-monitor
-```
+## Usage
 
-`cmux-cc-monitor --help`, `cmux-cc-monitor --version`도 지원합니다.
-
-## 키
-
-| 키 | 동작 |
+| Key | Action |
 |---|---|
-| `h` `j` `k` `l` / 방향키 | 타일 사이 이동 |
-| `Enter` | 선택한 세션의 워크스페이스와 패인으로 포커스 이동 |
-| `p` / `P` | 선택한 세션의 미리보기 켜기·끄기(켜면 목록이 한 열로 바뀜) |
-| `i` | 설정 창 열기 |
-| `q` / `Q` | 종료 |
-| `Ctrl-C` | 종료 |
+| `h` `j` `k` `l` / arrows | Move between cards (rows wrap) |
+| `Enter` | Focus the selected session's cmux workspace and pane |
+| `p` | Toggle preview (one-line cards plus the session's screen) |
+| `i` | Open settings |
+| `q` / `Ctrl-C` | Quit |
 
-설정 창에서는 다음 키를 씁니다.
+The selected card has a blue border. In settings, `j` `k` move, `Enter` or `Space` changes a value (saved immediately), and `Esc` closes.
 
-| 키 | 동작 |
-|---|---|
-| `j` `k` / 위아래 방향키 | 항목 이동 |
-| `Enter` / `Space` | 값 켜기·끄기 또는 다음 값으로 변경(바로 저장됨) |
-| `Esc` / `i` / `q` / `Q` | 설정 창 닫기(종료하지 않음) |
-| `Ctrl-C` | 종료 |
+## Configuration
 
-## 미리보기
+The config file is `~/.config/cmux-cc-monitor/config.toml`. It is optional, missing keys use the defaults, and the settings screen (`i`) writes it for you.
 
-`p`를 누르면 세션 타일 목록이 한 줄에 타일 하나씩인 세로 목록(열 1개)으로 바뀌고, 남은 공간 전체에 선택한 세션의 터미널 화면을 크게 보여 주는 미리보기 패널이 붙습니다. 다시 누르면 패널이 닫히고 원래 여러 열 그리드로 돌아갑니다. 켜고 끌 때 선택한 세션은 그대로 선택된 채 화면에 보이도록 스크롤됩니다. 실행할 때마다 꺼진 상태로 시작하며 설정 파일에는 저장하지 않습니다. 타일을 옮기면 미리보기도 곧바로 그 세션으로 바뀌고, 켜져 있는 동안 약 1초마다 다시 읽습니다. 화면 읽기는 별도 스레드에서 하므로 타일과 상태 갱신은 이를 기다리지 않습니다.
+| Key | Default | Meaning |
+|---|---|---|
+| `theme` | `"fire"` | Element for sessions whose model is unknown (`fire`, `water`, `poison`, `lightning`) |
+| `model_themes` | fable `water`, opus `fire`, sonnet `lightning`, haiku `poison` | Element per model family, e.g. `[model_themes]` with `opus = "water"` |
+| `context_limit_tokens` | `200000` | Context window size used when usage is estimated from the transcript |
+| `ctx_fresh_seconds` | `300` | How long the statusline context file is trusted |
+| `pr_poll_seconds` | `45` | PR lookup interval |
+| `guess_worktree` | `true` | Guess the worktree of sessions started in the main repository |
+| `done_retention_minutes` | `10` | How long finished sessions stay on screen |
+| `[extras]` | `branch`, `elapsed`, `summary` on; `last_activity`, `pr` off | Extra info shown on cards |
 
-배치는 터미널 크기를 보고 자동으로 정합니다. HUD와 아래 안내 줄을 뺀 영역의 너비가 70칸 이상이고 높이가 8줄 이상이면 왼쪽에 목록(너비의 1/5, 26~34칸), 오른쪽에 미리보기(나머지, 최소 44칸)를 둡니다. 목록 타일이 좁아지므로 긴 세션 이름은 타일 안에서 `…`로 줄입니다. 너비가 70칸보다 좁고 높이가 24줄 이상이면 위쪽에 목록(높이의 2/5, 8~14줄), 아래쪽에 미리보기(나머지)를 둡니다. 이때도 목록은 한 열입니다. 둘 다 아니면 패널을 그리지 않고 원래 그리드를 그대로 보여 주며 아래 안내 줄에 "터미널이 작아 미리보기를 쓸 수 없습니다"를 표시합니다. 한 열 목록에서 `j` `k`는 타일을 하나씩 옮기고 `h` `l`은 움직이지 않으며, 창 구분선과 `▲ more`/`▼ more` 스크롤 표시는 그리드와 똑같이 동작합니다. 패널보다 긴 줄은 자르지 않고 패널 너비에서 다음 줄로 접어 보여 줍니다(한글 같은 넓은 글자는 쪼개지 않고, 들여쓰기는 이어지는 줄에도 유지하되 글자 칸이 20칸 이상 남도록 줄이며, 탭은 8칸 단위 공백으로 바꿉니다). 접은 줄까지 세어 패널에 들어가는 마지막 줄들을 보여 주므로 가장 최근 내용이 항상 패널 맨 아래에 보입니다. 화면은 패널 안쪽 높이만큼(최대 80줄) 읽습니다. 원본 한 줄은 접어도 최소 한 줄을 차지하므로 이만큼이면 패널이 항상 채워집니다.
+## Context usage setup
 
-완료된 세션이나 cmux ID가 없는 세션은 화면을 읽지 않고 "종료된 세션", "이동할 수 없는 세션"이라고만 표시합니다. 읽기에 실패하면 "미리보기를 읽지 못했습니다"가, 처음 읽는 동안에는 "읽는 중…"이 보입니다. 탭이 닫힌 세션은 타일 자체가 사라지므로 미리보기 대상에서도 빠집니다.
+The monitor reads context usage from `~/.cache/cmux-cc-monitor/ctx/<session_id>.json`, containing `{"session_id":"...","used_percentage":NN}`. Claude Code's statusline script receives this data on stdin, so add a few lines to yours:
 
-## 여러 창
-
-cmux 창을 여러 개 띄워(`Ctrl+Shift+N` 등) 세션이 두 개 이상의 창에 나뉘어 있으면, 타일을 창별로 묶어서 보여 줍니다. 묶음마다 맨 위에 테두리 없는 흐린 구분선 한 줄(`── 창 2 · 세션 3 ──────`)이 붙고, 그 아래에 그 창의 타일이 따로 줄을 이룹니다. 창 번호는 `cmux tree --all`에 나오는 창 순서이고, 모니터가 떠 있는 창에는 ` (현재)`가 붙습니다. 어느 창인지 알 수 없는 세션은 맨 끝의 `창 ?` 묶음에 들어갑니다.
-
-세션이 모두 한 창에 있으면 구분선 없이 예전과 똑같이 보입니다. 위쪽 HUD의 개수는 창과 관계없이 전체를 셉니다. `h` `l`은 같은 줄 안에서만 움직이고, `j` `k`는 구분선을 건너 다음(이전) 묶음의 첫(마지막) 줄로 넘어갑니다. 넘어간 줄이 짧으면 그 줄의 마지막 타일에 멈춥니다. `Enter`로 다른 창의 세션에도 그대로 포커스를 옮길 수 있습니다. `cmux tree` 호출이 실패한 회차에는 창 정보가 없으므로 묶지 않은 목록 하나로 보여 줍니다.
-
-## 설정
-
-설정 파일은 `~/.config/cmux-cc-monitor/config.toml`입니다. 파일이 없으면 기본값을 쓰고, 일부 키만 있어도 나머지는 기본값으로 채웁니다. 파일이 있는데 읽거나 해석하지 못하면(오타 등) 기본값으로 시작하면서 화면 아래에 잠시 알려 줍니다. 이때 설정 창에서 값을 바꾸면 저장하기 전에 원래 파일을 같은 폴더의 `config.toml.bak`(이미 있으면 `config.toml.bak.1` 등)으로 한 번 복사해 둡니다. 설정 창에서 바꾸면 이 파일에 저장되며, 설정 파일이 심볼릭 링크(dotfile 관리 도구 등)이면 링크는 그대로 두고 실제 파일을 바꿉니다. 아래는 모든 키와 기본값입니다.
-
-```toml
-# 뷰: "a"(가로형, 작게 많이), "b"(세로형, 크게), "auto"(세션 수에 따라 자동)
-view = "auto"
-# PR 조회 간격(초)
-pr_poll_seconds = 45
-# 세션 cwd가 메인 저장소일 때 하위 프로세스와 transcript로 워크트리를 추정할지
-guess_worktree = true
-# 종료된 세션을 완료(done) 상태로 화면에 남겨두는 시간(분)
-done_retention_minutes = 10
-
-# 타일에 보여줄 부가정보(브랜치, 경과 시간, 마지막 활동, 요약, PR)
-[extras]
-branch = true
-elapsed = true
-last_activity = false
-summary = true
-# PR 정보는 기본 꺼짐
-pr = false
+```sh
+input=$(cat)
+dir="$HOME/.cache/cmux-cc-monitor/ctx"; mkdir -p "$dir"
+echo "$input" | jq -c '{session_id: .session_id, used_percentage: (.context_window.used_percentage // 0)}' \
+  > "$dir/$(echo "$input" | jq -r .session_id).json"
 ```
 
-## 상태는 어떻게 판정하나
+Without it, the monitor falls back to the last usage recorded in the session transcript divided by `context_limit_tokens`.
 
-세션 하나의 상태는 일하는 중, 입력 대기, 대기, 완료 중 하나로 정하고, 다음 순서로 신호를 확인합니다.
+## How status is detected
 
-1. `~/.claude/sessions/<pid>.json`의 `status`를 먼저 봅니다. `waiting`은 입력 대기, `busy`와 `shell`은 일하는 중, `idle`은 대기입니다. 관찰한 바로는 가장 빠르고 정확한 신호입니다.
-2. 이 파일이 없거나 값을 알 수 없으면 cmux hook 파일 `~/.cmuxterm/claude-hook-sessions.json`의 `agentLifecycle`과 `hookEventName`을 봅니다. 입력 대기 기록이 몇 초 늦고 승인 뒤에도 낡은 값이 남을 수 있어 보조 신호로만 씁니다.
-3. 둘 다 판단할 수 없을 때만 `cmux read-screen`으로 화면 텍스트를 읽어 권한 승인 프롬프트가 떠 있는지 확인합니다.
+1. The `status` in Claude's own session file (`~/.claude/sessions/<pid>.json`).
+2. The cmux hook file (`~/.cmuxterm/claude-hook-sessions.json`).
+3. Reading the terminal screen with `cmux read-screen` (only when the first two are unclear).
 
-세션 프로세스가 종료되었거나 sessions 파일과 hook 항목이 모두 없으면 완료로 봅니다. 완료된 세션은 `done_retention_minutes` 동안 흐린 타일로 남습니다. 다만 세션이 돌던 cmux 탭 자체를 닫은 경우에는 완료 타일을 남기지 않고 다음 갱신에서 바로 지웁니다(탭이 남아 있는지는 `cmux tree`로 확인합니다). 파일은 있는데 상태 값을 알아볼 수 없고 화면으로도 판단하지 못하면 `unknown`으로 표시합니다. 두 신호가 충돌하면 항상 sessions 파일의 `status`가 이깁니다.
+If the session's process is gone, the session is Done. When signals disagree, the earlier one in this list wins.
 
-## 한계
+## Limitations
 
-- cmux와 Claude Code의 내부 파일 형식은 공식 API가 아니며 버전에 따라 바뀔 수 있습니다. 알 수 없는 값은 `unknown` 상태로 표시하고 죽지 않도록 느슨하게 파싱하지만, 형식이 바뀌면 판정이 틀릴 수 있습니다.
-- 입력 대기 판정은 제가 직접 관찰한 신호에 기반합니다. 권한 승인 프롬프트는 확인했지만 그 밖의 대화 상자(질문, 계획 승인 등)나 auto mode, 서브에이전트 실행 중의 동작은 충분히 검증하지 못했습니다.
-- 브랜치나 워크트리를 정확히 알 수 없어 추정한 경우 타일에 `~`가 붙습니다(예: `⎇ ~feat/login`). 설정에서 추정을 끌 수 있습니다.
-- 상태 갱신은 일정 간격 폴링입니다(파일 감시는 쓰지 않습니다).
-- 미리보기는 `cmux read-screen`으로 읽은 세션 터미널의 마지막 줄(패널 높이만큼, 최대 80줄)을 그대로 보여 줄 뿐입니다. 색과 서식은 지우고 긴 줄은 패널 너비에서 접어 보여 주며, 읽기 전용이라 입력을 보낼 수 없습니다. 그 화면에 떠 있는 내용은 무엇이든(코드, 경로, 토큰 등) 그대로 보이므로 화면을 공유할 때 주의하세요.
-- `cmux sessions list`는 닫힌 탭의 기록도 남겨 두므로, 탭이 아직 있는지는 매 갱신마다 `cmux tree --all`로 따로 확인합니다. 이 호출이 실패하면 그 회차에는 닫힌 탭을 가려내지 못하고 평소처럼 완료 타일로 남깁니다.
+- macOS only, and it needs the `cmux` CLI on your `PATH`. Developed against cmux 0.65.
+- Needs a terminal with 24-bit colour and a font with braille characters.
+- It reads cmux and Claude Code internal files, which are not a public API and may change between versions.
+- Read-only: it never sends input to sessions. The preview shows whatever is on the session's screen.
+- PR lookup (off by default) uses your existing `gh` or `az` login.
 
-## PR 연동 (선택)
-
-기본은 꺼져 있고 설정 창에서 켭니다. 이미 로그인되어 있는 `az`(Azure DevOps: `az login`과 azure-devops 확장) 또는 `gh`를 그대로 사용하며, 토큰을 저장하거나 따로 받지 않습니다. 세션의 브랜치를 소스로 하는 열린 PR만 조회하고, 저장소의 `origin` remote만 봅니다. CI 상태는 보여주지 않습니다. 조회는 백그라운드에서 이뤄지고 화면은 조회를 기다리지 않습니다.
-
-## 하지 않는 것
-
-- 세션에 입력을 보내거나 Claude Code를 조종하지 않습니다. 읽기(미리보기 포함)와 포커스 이동만 합니다.
-- tmux 등 cmux 이외의 멀티플렉서는 지원하지 않습니다.
-- Claude Code 외의 에이전트는 지원하지 않습니다.
-
-## 문제 해결
-
-- 화면 아래에 "cmux unavailable"이 보이면 `cmux` 명령을 실행할 수 없거나 cmux가 응답하지 않는 상태입니다. cmux가 실행 중인지, `cmux` CLI가 `PATH`에 있는지 확인하세요.
-- 설정 창의 PR 항목에 "사용 불가"가 보이면 `az`와 `gh`를 둘 다 찾을 수 없다는 뜻입니다. PR 정보를 켠 뒤 세션들의 remote를 확인한 다음에는 필요한 도구를 짚어 "az 없음"처럼 보여 줍니다. 해당 도구를 설치하고 로그인하세요.
-- PR 정보를 켰는데 PR이 보이지 않으면 화면 아래의 흐린 안내(예: "PR: az 로그인 필요", "PR: 조회 중…")를 확인하세요. 조회에 실패한 세션 타일에는 `PR ?`가 표시됩니다. 열린 PR이 없는 브랜치는 아무것도 표시하지 않습니다.
-- 탭을 닫았는데 타일이 완료(DONE) 상태로 남아 있다면 `cmux tree --all --id-format uuids`가 정상적으로 실행되는지 확인하세요. 이 명령이 실패하는 동안에는 닫힌 탭과 정상 종료를 구별할 수 없어, 닫힌 탭의 세션도 완료 타일로 `done_retention_minutes` 동안 남습니다.
-- 비정상 종료로 터미널 표시가 깨졌다면 `reset`을 실행하세요.
-
-## 로드맵
-
-v2 후보입니다. 도구 호출 내역 표시, 토큰과 컨텍스트 사용량, 프로세스 CPU와 메모리, CI 상태, brew 또는 바이너리 릴리스, 폴링 대신 파일 감시(file watching)로 갱신 지연 줄이기.
-
-## 개발
-
-CI(GitHub Actions)는 macOS에서 빌드와 테스트만 실행합니다. 배포나 publish 단계는 없습니다.
+## Development
 
 ```
 cargo build --locked
 cargo test --locked
 ```
 
-## 기여
+`tests/no_personal_info.rs` scans tracked text files for home-directory paths, real-looking UUIDs and extra private patterns you add via `CCMON_FORBIDDEN` or a gitignored `.personal-info-patterns` file.
 
-공개 저장소이므로 개인 경로, 실제 ID, 회사·팀 이름 같은 정보가 들어가지 않도록 `tests/no_personal_info.rs` 가드 테스트가 git이 추적하는(또는 무시되지 않은) 모든 텍스트 파일을 검사합니다. 기본으로는 macOS 홈 디렉터리 경로, 실제처럼 보이는 UUID, 예시가 아닌 `dev.azure.com` 조직 이름만 잡습니다.
+## License
 
-자신만 아는 금지어(회사 이름 등)는 저장소에 적지 말고 로컬에서 추가합니다. 대소문자를 구분하지 않고 검사합니다.
-
-- 환경 변수: `CCMON_FORBIDDEN="foo-inc,bar-team" cargo test` 처럼 쉼표로 구분해 넘깁니다.
-- 로컬 파일: 저장소 루트에 `.personal-info-patterns` 파일을 만들고 한 줄에 하나씩 적습니다. `#`으로 시작하는 줄은 주석입니다. 이 파일은 `.gitignore`에 들어 있어 커밋되지 않습니다.
-
-## 라이선스와 고지
-
-MIT 라이선스입니다. 자세한 내용은 [LICENSE](LICENSE)를 보세요.
-
-마스코트 Pochi는 이 프로젝트를 위해 새로 만든 오리지널 캐릭터이며 Anthropic과 관련이 없습니다. "Claude"와 "Claude Code"는 Anthropic의 상표이고, 이 프로젝트는 비공식 프로젝트입니다.
+MIT, see [LICENSE](LICENSE). This is an unofficial project and is not affiliated with Anthropic or cmux. "Claude" and "Claude Code" are trademarks of Anthropic.

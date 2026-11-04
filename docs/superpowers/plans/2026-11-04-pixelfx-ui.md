@@ -1,3 +1,5 @@
+> Superseded/abandoned — replaced by the spirit UI (`../specs/2026-11-04-spirit-ui-design.md`).
+
 # pixelfx 마법 UI Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

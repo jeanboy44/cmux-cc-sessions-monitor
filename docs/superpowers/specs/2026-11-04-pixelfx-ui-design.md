@@ -1,3 +1,5 @@
+> Superseded/abandoned — replaced by the spirit UI (`2026-11-04-spirit-ui-design.md`).
+
 # pixelfx 마법 UI 재설계
 
 ## 의도
