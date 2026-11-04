@@ -78,6 +78,12 @@ impl Size {
     }
 }
 
+/// Horizontal centre of the body in grid columns (the right side of the grid
+/// is reserved for cast particles, so this sits left of the grid centre).
+pub fn body_center_x(size: Size) -> f32 {
+    size.geom().rcx / 2.0
+}
+
 /// Grid size (columns, rows) of a spirit of `size`.
 pub const fn grid_size(size: Size) -> (u16, u16) {
     let g = size.geom();

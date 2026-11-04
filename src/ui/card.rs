@@ -82,8 +82,12 @@ fn draw_spirit(buf: &mut Buffer, band: Rect, params: &SpiritParams) -> Rect {
     #[cfg(test)]
     SPIRIT_RENDERS.with(|c| c.set(c.get() + 1));
     let grid = spirit::render(params);
-    let (cols, rows) = (grid.cols.min(band.width), grid.rows.min(band.height));
-    let at = Rect::new(band.x + (band.width - cols) / 2, band.y, cols, rows);
+    // Centre the BODY (not the grid) in the band; the particle side of the
+    // grid is clipped at the band's right edge.
+    let want = band.x as f32 + band.width as f32 / 2.0 - spirit::body_center_x(params.size);
+    let x = (want.round().max(band.x as f32) as u16).min(band.right().saturating_sub(1)).max(band.x);
+    let (cols, rows) = (grid.cols.min(band.right().saturating_sub(x)), grid.rows.min(band.height));
+    let at = Rect::new(x, band.y, cols, rows);
     draw_grid(buf, at, &grid);
     at
 }
@@ -389,12 +393,39 @@ mod tests {
             let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
             let at = draw_spirit(&mut buf, band, &params);
             let (w, h) = spirit::grid_size(size);
-            assert_eq!(at, Rect::new(band.x + (band.width - w) / 2, band.y, w, h), "{size:?}");
+            assert!(at.width <= w && at.height == h, "{size:?}");
+            assert!(at.x >= band.x && at.right() <= band.right(), "{size:?}: grid inside the band");
             for y in 0..CARD_H {
                 for x in 0..CARD_W {
                     if !at.contains((x, y).into()) {
                         assert_eq!(buf[(x, y)].symbol(), " ", "{size:?}: ({x},{y}) outside the spirit rect");
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spirit_body_is_centered_in_the_inner_area() {
+        let band = Rect::new(1, 1, CARD_W - 2, SCENE_ROWS);
+        let center = band.x as f32 + band.width as f32 / 2.0;
+        for theme in [Theme::Fire, Theme::Water, Theme::Ice, Theme::Lightning] {
+            for status in [Status::Idle, Status::Running] {
+                for size in Size::ALL {
+                    let params = SpiritParams { theme, status, size, tick: 3, seed: 1, warning: false };
+                    let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
+                    draw_spirit(&mut buf, band, &params);
+                    let lo = (0..CARD_W)
+                        .find(|&x| (0..CARD_H).any(|y| buf[(x, y)].symbol().chars().any(is_braille)))
+                        .expect("painted");
+                    // body radius in sub-pixels: 5.5 / 6 / 6.5; the left edge cell holds the body's left edge
+                    let r = match size {
+                        Size::S => 5.5,
+                        Size::M => 6.0,
+                        Size::L => 6.5,
+                    };
+                    let body_c = lo as f32 + 0.5 + r / 2.0;
+                    assert!((body_c - center).abs() <= 1.0, "{theme:?} {status:?} {size:?}: body centre {body_c} vs {center}");
                 }
             }
         }
