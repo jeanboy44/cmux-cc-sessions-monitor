@@ -20,8 +20,6 @@ pub(super) struct Particle {
     pub ay: f32,
     pub life: u32,
     pub max: u32,
-    pub size: u32,
-    pub wide: bool,
     pub c0: Rgb,
     pub c1: Rgb,
     /// drawn behind the body (skips body dots)
@@ -33,7 +31,7 @@ pub(super) struct Particle {
 
 impl Particle {
     pub(super) fn new(x: f32, y: f32, vx: f32, vy: f32, life: u32, c0: Rgb, c1: Rgb) -> Self {
-        Particle { x, y, vx, vy, ax: 0.0, ay: 0.0, life, max: life, size: 1, wide: false, c0, c1, behind: false, prio: 1, floor: f32::MAX }
+        Particle { x, y, vx, vy, ax: 0.0, ay: 0.0, life, max: life, c0, c1, behind: false, prio: 1, floor: f32::MAX }
     }
 }
 
@@ -61,7 +59,7 @@ fn ambient_on() -> bool {
 
 /// Particles alive at `ctx.t` (ticks start at 1; tick 0 has none).
 pub(super) fn simulate(ctx: &Ctx) -> Sim {
-    let window = element::max_life_for(ctx.elem, ctx.magic).max(LOOK_TICKS) + 1;
+    let window = element::max_life(ctx.elem).max(LOOK_TICKS) + 1;
     let start = ctx.t.saturating_sub(window);
     let act = state::activity(ctx.state);
     let running = ctx.state == Status::Running;
@@ -81,8 +79,8 @@ pub(super) fn simulate(ctx: &Ctx) -> Sim {
         if ambient_on() {
             element::ambient(ctx.elem, act, cy, ctx.floor, &mut r, &mut parts);
         }
+        // the cast itself is drawn by `magic`; here it only steers the gaze
         if running && state::casts_at(ctx.seed, u) {
-            element::cast(ctx.elem, ctx.magic, ctx.right, cy, &mut r, &mut parts);
             last_cast = Some(u);
         }
     }
@@ -97,26 +95,6 @@ pub(super) fn draw(cv: &mut Canvas, parts: &[Particle]) {
         if lf < 0.35 {
             c = lerp(CARD_BG, c, lf / 0.35);
         }
-        let (x, y) = (p.x - 0.5, p.y - 0.5);
-        cv.blk(x, y, c, p.prio, p.behind);
-        if p.wide {
-            cv.blk(x + 1.0, y, c, p.prio, p.behind);
-        }
-        if p.size == 2 && lf > 0.5 {
-            cv.blk(x + 1.0, y, c, p.prio, p.behind);
-            cv.blk(x, y + 1.0, c, p.prio, p.behind);
-            cv.blk(x + 1.0, y + 1.0, c, p.prio, p.behind);
-        }
-        // big magic: a 3 x 3 block while young, 2 x 2 while fading
-        if p.size == 3 {
-            let n = if lf > 0.5 { 3 } else if lf > 0.25 { 2 } else { 1 };
-            for j in 0..n {
-                for i in 0..n {
-                    if i > 0 || j > 0 {
-                        cv.blk(x + i as f32, y + j as f32, c, p.prio, p.behind);
-                    }
-                }
-            }
-        }
+        cv.blk(p.x - 0.5, p.y - 0.5, c, p.prio, p.behind);
     }
 }

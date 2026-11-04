@@ -1,11 +1,9 @@
 //! The body: a filled, shaded silhouette whose outline comes from the element.
 
-use std::f32::consts::{PI, TAU};
-
 use crate::model::Status;
 
 use super::canvas::{lerp, mul, Canvas, Rgb, CARD_BG};
-use super::element::{self, bolt_shape, ice_facets};
+use super::element::{self, bolt_shape};
 use super::theme::Theme;
 use super::{Ctx, CX, CY};
 
@@ -40,28 +38,17 @@ fn tone(ctx: &Ctx, th: f32, dist: f32, d: f32, dl: f32, lx: f32, ly: f32) -> usi
         }
     };
     match ctx.elem {
-        Theme::Ice => {
-            let (n, rot) = ice_facets(ctx.seed, ctx.tf, ctx.sp);
-            let seg = TAU / n;
-            let kk = ((th - rot).rem_euclid(TAU) / seg).floor();
-            let fc = rot + (kk + 0.5) * seg;
-            let light = (fc + 0.75 * PI).cos();
-            let mut tone: usize = if light > 0.55 {
-                3
-            } else if light > 0.0 {
-                2
-            } else if light > -0.5 {
-                1
-            } else {
+        // hottest in the middle: yellow core, orange, red edges
+        Theme::Fire => {
+            if d > 0.84 {
                 0
-            };
-            if d > 0.9 {
-                tone = tone.saturating_sub(1);
+            } else if d > 0.66 {
+                1
+            } else if d > 0.4 {
+                2
+            } else {
+                3
             }
-            if d < 0.38 {
-                tone = 3;
-            }
-            tone
         }
         Theme::Lightning => {
             let (core, spike) = bolt_shape(ctx, th);

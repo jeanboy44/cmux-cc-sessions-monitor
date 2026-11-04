@@ -6,9 +6,9 @@
 //! background colour. The same parameters always give the same grid; motion
 //! comes from `tick` (about 15 per second).
 //!
-//! - Element ([`Theme`]): palette, outline (fire tongues, water drop, ice
-//!   facets, lightning spikes), decorations and particles.
-//! - State ([`Status`]): RUNNING shoots element particles to the right,
+//! - Element ([`Theme`]): palette, outline (fire tongues, water drop, poison
+//!   slither with bubbles, lightning spikes), decorations and particles.
+//! - State ([`Status`]): RUNNING casts element magic to the right (see `magic`),
 //!   NEEDS_INPUT shows a bobbing `?` and a pulsing glow, IDLE is dim and slow
 //!   with a `z`, DONE sparkles and bounces, UNKNOWN is grey.
 //! - Eyes are the same in every state (see `eyes`).
@@ -17,6 +17,7 @@ mod body;
 mod canvas;
 mod element;
 mod eyes;
+mod magic;
 mod noise;
 mod particles;
 mod state;
@@ -60,15 +61,15 @@ const WARNING_ABOVE: f32 = 90.0;
 /// card's inner width minus a one-column left pad.
 const BIG_MAGIC_W: usize = 34;
 
-/// How strong the cast magic (RUNNING particles) is; driven by context usage.
+/// How strong the cast magic (RUNNING, see `magic`) is; driven by context usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Magic {
-    /// few, tiny, short-range particles
+    /// a short, thin cast right next to the body
     Small,
     /// the approved reference look
     #[default]
     Normal,
-    /// more, larger particles that fly farther (on a wider canvas)
+    /// a longer, wider, denser cast (on a wider canvas)
     Big,
 }
 
@@ -107,7 +108,7 @@ impl Size {
 
     /// Card variants: every size is 4 rows tall (16 sub-pixels) so a 20x9
     /// card never changes size; bigger steps get a bigger body and more room
-    /// to the right for cast particles. The body centre sits at 1/3 of the
+    /// to the right for the cast magic. The body centre sits at 1/3 of the
     /// width (as in the reference design) and high enough that the eye row
     /// (cell row 1) has body above and below it.
     const fn geom(self) -> Geom {
@@ -123,7 +124,7 @@ impl Size {
 }
 
 /// Horizontal centre of the body in grid columns (the right side of the grid
-/// is reserved for cast particles, so this sits left of the grid centre).
+/// is reserved for the cast magic, so this sits left of the grid centre).
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn body_center_x(size: Size) -> f32 {
     size.geom().rcx / 2.0
@@ -265,8 +266,9 @@ pub fn render(p: &SpiritParams) -> SpiritGrid {
     };
     let mut cv = canvas::Canvas::new(g);
     body::draw(&mut cv, &ctx, &look);
-    element::decorate(&mut cv, &ctx, look.cy);
+    element::decorate(&mut cv, &ctx, look.cy, look.bright);
     particles::draw(&mut cv, &sim.parts);
+    magic::draw(&mut cv, &ctx, look.cy);
     state::sparkles(&mut cv, &ctx);
     eyes::draw(&mut cv, sim.looking, eyes::blinking(ctx.seed, ctx.t), element::ramp(ctx.elem)[1], look.bright);
     let mut grid = cv.cells();
@@ -470,7 +472,7 @@ mod tests {
         let avg = |theme, status| (0..60).map(|t| spikes(theme, status, t, 0.8)).sum::<usize>() as f32 / 60.0;
         for status in STATUSES {
             let bolt = avg(Theme::Lightning, status);
-            for other in [Theme::Fire, Theme::Water, Theme::Ice] {
+            for other in [Theme::Fire, Theme::Water, Theme::Poison] {
                 let n = avg(other, status);
                 assert!(bolt > n + 1.0, "{status:?}: lightning {bolt} vs {other:?} {n}");
             }
@@ -568,7 +570,7 @@ mod tests {
     /// Painted cells right of the body and the farthest painted column of a
     /// running spirit, over a replay window of several casts.
     fn magic_spread(theme: Theme, magic: Magic) -> (u32, u16) {
-        // cast particles only: ambient snow/sparks are not part of the magic
+        // the cast magic only: ambient sparks/embers are not part of it
         particles::NO_AMBIENT.with(|c| c.set(true));
         let (mut cells, mut reach) = (0u32, 0u16);
         let body_right = (body_center_x(Size::S) + 3.0).ceil() as u16;
@@ -710,12 +712,12 @@ mod tests {
             let rot0 = element::bolt_rot(&at(Theme::Lightning, 0));
             assert!((1..400).all(|t| element::bolt_rot(&at(Theme::Lightning, t)) != rot0), "{seed}: lightning rotates");
             assert!((element::bolt_rot(&at(Theme::Lightning, 400)) - rot0).abs() > 5.0);
-            let ice = |t| element::ice_facets(seed, at(Theme::Ice, t).tf, at(Theme::Ice, t).sp).1;
-            assert!((ice(400) - ice(0)).abs() > 2.0, "{seed}: ice facets rotate");
-            for i in 0..4 {
-                let ph: Vec<f32> = (0..60).map(|t| element::star_phase(&at(Theme::Ice, t), i)).collect();
-                assert!(ph.windows(2).all(|w| w[0] != w[1]), "{seed}: star {i} twinkles");
-            }
+            let sway: Vec<f32> = (0..400).map(|t| element::sway(&at(Theme::Poison, t))).collect();
+            assert!(sway.windows(2).all(|w| w[0] != w[1]), "{seed}: poison keeps swaying");
+            let spread = sway.iter().cloned().fold(f32::MIN, f32::max) - sway.iter().cloned().fold(f32::MAX, f32::min);
+            assert!(spread > 0.8, "{seed}: sway spread {spread}");
+            let pops = (0..400).filter(|&t| element::bubbles(&at(Theme::Poison, t)).iter().any(|b| b.stage == element::Stage::Pop)).count();
+            assert!(pops >= 3, "{seed}: bubbles keep popping ({pops})");
         }
     }
 
@@ -754,13 +756,157 @@ mod tests {
 
     #[test]
     fn render_has_no_hidden_state() {
-        let p = params(Theme::Ice, Status::Running, Size::M, 300, 706_312_658);
+        let p = params(Theme::Poison, Status::Running, Size::M, 300, 706_312_658);
         let fresh = render(&p);
         for t in 0..300 {
             render(&SpiritParams { tick: t, ..p });
         }
         render(&SpiritParams { seed: 1, ..p });
         assert_eq!(render(&p), fresh);
+    }
+
+    fn is_braille(ch: char) -> bool {
+        ('\u{2801}'..='\u{28ff}').contains(&ch)
+    }
+
+    /// First tick a running spirit of `seed` casts.
+    fn first_cast(seed: u32) -> u64 {
+        (1..).find(|&t| state::casts_at(seed, t)).expect("casts")
+    }
+
+    /// Body cells (columns 0..7, left of the magic area) that carry a colour,
+    /// without eyes and text marks.
+    fn body_cells(g: &SpiritGrid) -> Vec<Cell> {
+        (0..g.rows)
+            .flat_map(|r| (0..7).map(move |c| (c, r)))
+            .map(|(c, r)| *cell(g, c, r))
+            .filter(|c| c.fg.is_some() && c.fg != WHITE && !matches!(c.ch, '?' | 'z' | 'Z'))
+            .collect()
+    }
+
+    #[test]
+    fn poison_body_is_green() {
+        for seed in [9, 706_312_658] {
+            for status in [Status::Running, Status::NeedsInput, Status::Idle] {
+                for t in [0, 17, 33, 90, 141] {
+                    let g = render(&params(Theme::Poison, status, Size::S, t, seed));
+                    let body = body_cells(&g);
+                    assert!(body.len() >= 10, "{status:?} {t}: {} body cells", body.len());
+                    let green = body.iter().filter(|c| c.fg.is_some_and(|(r, gg, b)| gg > r && gg > b)).count();
+                    assert!(green * 10 >= body.len() * 9, "{status:?} {t}: {green} of {} cells green", body.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn poison_bubbles_form_and_pop() {
+        let ring = Some(canvas::to_rgb(element::BUBBLE_RING, 250.0));
+        let pop = Some(canvas::to_rgb(element::BUBBLE_POP, 250.0));
+        let has = |g: &SpiritGrid, c| g.cells.iter().any(|x| x.fg == c);
+        for seed in [3, 41, 706_312_658] {
+            let frames: Vec<SpiritGrid> = (0..240).map(|t| render(&params(Theme::Poison, Status::Running, Size::S, t, seed))).collect();
+            // a ring shows on the body, then pops into a sparkle a few ticks later
+            let popped = (0..236).filter(|&t| has(&frames[t], ring) && (t + 1..=t + 3).any(|u| has(&frames[u], pop))).count();
+            assert!(popped >= 2, "{seed}: {popped} ring -> pop sequences");
+        }
+        // every bubble goes bead -> ring -> swell -> pop, one stage per tick or more
+        let ctx = |status, t| Ctx::new(&params(Theme::Poison, status, Size::S, t, 5));
+        let pops = |status| (0..600).map(|t| element::bubbles(&ctx(status, t)).iter().filter(|b| b.stage == element::Stage::Pop).count()).sum::<usize>();
+        let (run, idle, done) = (pops(Status::Running), pops(Status::Idle), pops(Status::Done));
+        assert!(idle >= 1 && idle < run, "idle bubbles are occasional: idle {idle}, running {run}");
+        assert!(done > idle, "done pops like sparkles: done {done}, idle {idle}");
+        assert_eq!(pops(Status::Unknown), 0, "unknown is still");
+        for theme in [Theme::Fire, Theme::Water, Theme::Lightning] {
+            assert!((0..100).all(|t| element::bubbles(&Ctx::new(&params(theme, Status::Running, Size::S, t, 5))).is_empty()));
+        }
+    }
+
+    /// Mean share of body cells (columns 0..7) whose glyph changes between adjacent ticks.
+    fn churn(theme: Theme, seed: u32) -> f32 {
+        let body = |t| {
+            let g = render(&params(theme, Status::Running, Size::S, t, seed));
+            (0..g.rows).flat_map(|r| (0..7).map(move |c| (c, r))).map(|(c, r)| cell(&g, c, r).ch).collect::<Vec<char>>()
+        };
+        let frames: Vec<Vec<char>> = (100..340).map(body).collect();
+        let changed: usize = frames.windows(2).map(|w| w[0].iter().zip(&w[1]).filter(|(a, b)| a != b).count()).sum();
+        changed as f32 / ((frames.len() - 1) * frames[0].len()) as f32
+    }
+
+    #[test]
+    fn poison_slithers_smoothly() {
+        for seed in [4, 11, 706_312_658] {
+            let (poison, fire) = (churn(Theme::Poison, seed), churn(Theme::Fire, seed));
+            println!("{seed}: churn poison {poison:.3} fire {fire:.3}");
+            assert!(poison < 0.19, "{seed}: poison body changes {poison} of its cells per tick");
+            assert!(poison < fire * 0.7, "{seed}: poison {poison} calmer than fire {fire}");
+        }
+        // smooth slow sway: tiny steps per tick, a visible range over a few seconds
+        for status in [Status::Running, Status::Idle] {
+            let sw: Vec<f32> = (0..300).map(|t| element::sway(&Ctx::new(&params(Theme::Poison, status, Size::S, t, 7)))).collect();
+            assert!(sw.windows(2).all(|w| (w[0] - w[1]).abs() < 0.12), "{status:?}: no jitter");
+            let spread = sw.iter().cloned().fold(f32::MIN, f32::max) - sw.iter().cloned().fold(f32::MAX, f32::min);
+            assert!(spread > 0.5, "{status:?}: sway spread {spread}");
+        }
+    }
+
+    /// Whether some row is painted in each of the `n` columns from `from`.
+    fn jet_run(g: &SpiritGrid, from: u16, n: u16) -> bool {
+        (0..g.rows).any(|r| (from..from + n).all(|c| c < g.cols && is_braille(cell(g, c, r).ch)))
+    }
+
+    #[test]
+    fn fire_breath_is_a_continuous_jet() {
+        for seed in [4, 11, 23, 706_312_658] {
+            let start = first_cast(seed) + 3;
+            let ticks: Vec<u64> = (start..start + 240).collect();
+            let at = |t, magic| render(&SpiritParams { magic, ..params(Theme::Fire, Status::Running, Size::S, t, seed) });
+            let normal = ticks.iter().filter(|&&t| jet_run(&at(t, Magic::Normal), 7, 4)).count();
+            assert!(normal * 10 >= ticks.len() * 9, "{seed}: normal jet on {normal} of {} ticks", ticks.len());
+            let big = ticks.iter().filter(|&&t| jet_run(&at(t, Magic::Big), 7, 8)).count();
+            assert!(big * 10 >= ticks.len() * 9, "{seed}: big jet on {big} of {} ticks", ticks.len());
+            for status in [Status::Idle, Status::Done, Status::NeedsInput] {
+                assert!((0..240).all(|t| !jet_run(&render(&params(Theme::Fire, status, Size::S, t, seed)), 7, 2)), "{seed} {status:?}: no breath");
+            }
+        }
+    }
+
+    /// (col, row) of the painted cells right of the body (column 7 on).
+    fn magic_cells(g: &SpiritGrid) -> Vec<(u16, u16)> {
+        (0..g.rows).flat_map(|r| (7..g.cols).map(move |c| (c, r))).filter(|&(c, r)| is_braille(cell(g, c, r).ch)).collect()
+    }
+
+    #[test]
+    fn water_casts_a_spinning_vortex() {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        for seed in [4, 11, 23] {
+            let c = first_cast(seed);
+            for (magic, rows) in [(Magic::Normal, 3), (Magic::Big, 4)] {
+                let at = |t| magic_cells(&render(&SpiritParams { magic, ..params(Theme::Water, Status::Running, Size::S, t, seed) }));
+                let spread: std::collections::BTreeSet<u16> = at(c + 6).iter().map(|p| p.1).collect();
+                assert!(spread.len() >= rows, "{seed} {magic:?}: vortex spans {spread:?}");
+                assert!((c + 4..c + 10).any(|t| at(t) != at(t + 1)), "{seed} {magic:?}: the vortex spins");
+            }
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
+    }
+
+    #[test]
+    fn lightning_bolt_strikes_top_to_bottom() {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        for seed in [4, 11, 23] {
+            let casts: Vec<u64> = (1..400).filter(|&t| state::casts_at(seed, t)).take(4).collect();
+            let mut shapes = std::collections::BTreeSet::new();
+            for &c in &casts {
+                let g = render(&params(Theme::Lightning, Status::Running, Size::S, c, seed));
+                for row in 0..g.rows {
+                    assert!((8..g.cols).any(|col| is_braille(cell(&g, col, row).ch)), "{seed} {c}: bolt crosses row {row}");
+                }
+                shapes.insert(chars(&g).into_iter().filter(|p| p.0 >= 8).collect::<Vec<_>>());
+            }
+            assert!(shapes.len() >= 3, "{seed}: each cast strikes a new zig-zag");
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
     }
 
     /// Every element x state as ANSI text. Run with
@@ -793,9 +939,9 @@ mod tests {
     #[test]
     #[ignore]
     fn dump_magic() {
-        let tick = std::env::var("SPIRIT_TICK").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
-        for magic in Magic::ALL {
-            println!("{magic:?}");
+        let ticks: Vec<u64> = std::env::var("SPIRIT_TICK").unwrap_or_else(|_| "40".into()).split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        for (tick, magic) in ticks.into_iter().flat_map(|t| Magic::ALL.map(|m| (t, m))) {
+            println!("tick {tick} {magic:?}");
             let grids: Vec<SpiritGrid> =
                 Theme::ALL.iter().map(|&theme| render(&SpiritParams { magic, ..params(theme, Status::Running, Size::S, tick, 4) })).collect();
             for row in 0..grids[0].rows {

@@ -91,7 +91,7 @@ pub fn theme_label(theme: Theme) -> &'static str {
     match theme {
         Theme::Fire => "불",
         Theme::Water => "물",
-        Theme::Ice => "얼음",
+        Theme::Poison => "독",
         Theme::Lightning => "번개",
     }
 }
@@ -168,7 +168,7 @@ mod tests {
             toggle(&mut c, SettingsItem::Theme);
             seen.push(c.theme);
         }
-        assert_eq!(seen, [Theme::Water, Theme::Ice, Theme::Lightning, Theme::Fire]);
+        assert_eq!(seen, [Theme::Water, Theme::Poison, Theme::Lightning, Theme::Fire]);
         assert_eq!(item_value(&c, SettingsItem::Theme), "불");
         c.theme = Theme::Lightning;
         assert_eq!(item_value(&c, SettingsItem::Theme), "번개");
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn settings_render_shows_cursor_and_values() {
         let mut cfg = Config::default();
-        cfg.theme = Theme::Ice;
+        cfg.theme = Theme::Poison;
         let text = screen(&cfg, 2, 0, None);
         let all = text.join("\n");
         for item in ALL_ITEMS {
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(all.matches(CURSOR).count(), 1);
         assert!(row("경과 시간").contains("[x]") && row("경과 시간").trim_end_matches(['│', ' ']).ends_with("켜짐"));
         assert!(row("마지막 활동").contains("[ ]") && row("마지막 활동").contains("꺼짐"));
-        assert!(row("기본 테마").trim_end_matches(['│', ' ']).ends_with("얼음"), "{all}");
+        assert!(row("기본 테마").trim_end_matches(['│', ' ']).ends_with("독"), "{all}");
         assert!(!all.contains("뷰"), "the A/B view row is gone");
         assert!(row("PR 상태").contains("꺼짐"));
         // hidden half of the blink: no cursor

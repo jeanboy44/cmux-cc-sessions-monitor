@@ -225,9 +225,9 @@ mod tests {
     fn config_partial_file_fills_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "theme = \"ice\"\n[extras]\npr = true\n").unwrap();
+        std::fs::write(&path, "theme = \"poison\"\n[extras]\npr = true\n").unwrap();
         let c = Config::load(&path);
-        assert_eq!(c.theme, Theme::Ice);
+        assert_eq!(c.theme, Theme::Poison);
         assert!(c.extras.pr);
         assert!(c.extras.summary);
         assert_eq!(c.pr_poll_seconds, 45);
@@ -281,7 +281,7 @@ mod tests {
         let real_dir = dir.path().join("dotfiles");
         std::fs::create_dir(&real_dir).unwrap();
         let real = real_dir.join("config.toml");
-        std::fs::write(&real, "theme = \"ice\"\n").unwrap();
+        std::fs::write(&real, "theme = \"poison\"\n").unwrap();
         let link_dir = dir.path().join("cfg");
         std::fs::create_dir(&link_dir).unwrap();
         let link = link_dir.join("config.toml");
@@ -324,16 +324,29 @@ mod tests {
     }
 
     #[test]
+    fn removed_ice_theme_is_an_unknown_theme() {
+        // ice was replaced by poison: an old file naming it takes the unknown-theme path
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "theme = \"ice\"\npr_poll_seconds = 30\n";
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(Config::load_checked(&path), (Config::default(), Some(LOAD_FAILED.into())));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "loading never rewrites the file");
+        std::fs::write(&path, "[card_themes]\n\"/w/proj\" = \"ice\"\n").unwrap();
+        assert_eq!(Config::load_checked(&path), (Config::default(), Some(LOAD_FAILED.into())));
+    }
+
+    #[test]
     fn themes_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let mut c = Config::default();
-        c.theme = Theme::Ice;
+        c.theme = Theme::Poison;
         c.card_themes.insert("/w/proj-a".into(), Theme::Lightning);
         c.card_themes.insert("sess-1".into(), Theme::Water);
         c.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("theme = \"ice\""), "{text}");
+        assert!(text.contains("theme = \"poison\""), "{text}");
         assert_eq!(Config::load(&path), c);
     }
 

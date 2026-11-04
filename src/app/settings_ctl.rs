@@ -290,7 +290,7 @@ mod tests {
         let mut app = app_in(&dir);
         let path = app.config_path.clone().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "theme = \"ice\"\n").unwrap();
+        std::fs::write(&path, "theme = \"poison\"\n").unwrap();
         app.apply_setting(SettingsItem::ExtraSummary, Instant::now());
         assert!(!path.with_file_name("config.toml.bak").exists());
     }

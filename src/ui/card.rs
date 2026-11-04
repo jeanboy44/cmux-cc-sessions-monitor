@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn spirit_body_sits_left_in_the_inner_area() {
         let band = Rect::new(1, 1, CARD_W - 2, SCENE_ROWS);
-        for theme in [Theme::Fire, Theme::Water, Theme::Ice, Theme::Lightning] {
+        for theme in Theme::ALL {
             for status in [Status::Idle, Status::Running] {
                 for magic in Magic::ALL {
                     let params = SpiritParams { theme, status, size: Size::S, tick: 3, seed: 1, warning: false, magic };

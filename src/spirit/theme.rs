@@ -8,12 +8,12 @@ pub enum Theme {
     #[default]
     Fire,
     Water,
-    Ice,
+    Poison,
     Lightning,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 4] = [Theme::Fire, Theme::Water, Theme::Ice, Theme::Lightning];
+    pub const ALL: [Theme; 4] = [Theme::Fire, Theme::Water, Theme::Poison, Theme::Lightning];
 
     /// Next theme in `ALL` order, wrapping from `Lightning` back to `Fire`.
     pub fn next(self) -> Theme {
@@ -35,7 +35,7 @@ mod tests {
             t = t.next();
             seen.push(t);
         }
-        assert_eq!(seen, [Theme::Fire, Theme::Water, Theme::Ice, Theme::Lightning, Theme::Fire]);
+        assert_eq!(seen, [Theme::Fire, Theme::Water, Theme::Poison, Theme::Lightning, Theme::Fire]);
     }
 
     #[test]
@@ -44,12 +44,14 @@ mod tests {
         struct W {
             t: Theme,
         }
-        for (t, name) in [(Theme::Fire, "fire"), (Theme::Water, "water"), (Theme::Ice, "ice"), (Theme::Lightning, "lightning")] {
+        for (t, name) in [(Theme::Fire, "fire"), (Theme::Water, "water"), (Theme::Poison, "poison"), (Theme::Lightning, "lightning")] {
             assert_eq!(toml::to_string(&W { t }).unwrap().trim(), format!("t = \"{name}\""));
             assert_eq!(toml::from_str::<W>(&format!("t = \"{name}\"")).unwrap().t, t);
         }
         assert!(toml::from_str::<W>("t = \"Fire\"").is_err());
         assert!(toml::from_str::<W>("t = \"bogus\"").is_err());
         assert!(toml::from_str::<W>("t = \"melee\"").is_err(), "melee was removed");
+        assert!(toml::from_str::<W>("t = \"ice\"").is_err(), "ice was replaced by poison");
+        assert!(toml::from_str::<W>("t = \"Poison\"").is_err());
     }
 }
