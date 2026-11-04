@@ -12,14 +12,15 @@
 //! summary the last row shows the next extra, e.g. the branch the PR took the
 //! row from). A larger area gets the card centered across, at its top.
 //!
-//! Large card ([`CardLayout::Large`], `v`): [`LARGE_W`] x [`LARGE_H`] = 28 x
-//! 13 (inner 26 x 11, as wide as the preview's side list): the quarter-area
-//! [`Size::XS`] spirit in a [`LARGE_SCENE_ROWS`]-row band at the top left
-//! with its magic to the right, then name, status badge (+ elapsed / last
-//! activity, the model family word on the right), branch, PR, and the
-//! summary on two lines; unused rows stay blank.
+//! Large card ([`CardLayout::Large`], `v`): at least [`LARGE_W`] x
+//! [`LARGE_H`] = 32 x 14 (inner 30 x 12, as wide as the preview's side
+//! list): the quarter-area [`Size::XS`] spirit in a [`LARGE_SCENE_ROWS`]-row
+//! band at the top left with its magic to the right, then name, status badge
+//! (+ elapsed / last activity, the model family word on the right), branch,
+//! PR, and the summary on up to three lines; unused rows stay blank. In the
+//! grid a large card fills its cell (see [`crate::ui::grid::card_rect`]).
 //!
-//! The preview list stretches the card across its column instead
+//! The preview list and the large grid stretch the card across its rect
 //! ([`render_wide_card`]): same height, the body stays on the left and the
 //! extra columns go to the text rows and the magic's room on the right.
 //!
@@ -56,13 +57,14 @@ pub const CARD_W: u16 = INNER_W + 2;
 pub const CARD_H: u16 = SCENE_ROWS + INFO_ROWS + 2;
 const _: () = assert!(SCENE_COLS <= INNER_W, "the largest spirit fits the card");
 
-/// Large card size, borders included: 28 x 13 (inner 26 x 11).
-pub const LARGE_W: u16 = 28;
-pub const LARGE_H: u16 = 13;
+/// Large card size, borders included: 32 x 14 (inner 30 x 12). The grid
+/// stretches it wider to fill its cell; never narrower.
+pub const LARGE_W: u16 = 32;
+pub const LARGE_H: u16 = 14;
 /// Spirit band of the large card: as tall as the XS spirit.
 pub const LARGE_SCENE_ROWS: u16 = spirit::grid_size(Size::XS).1;
 /// Summary lines of the large card.
-const LARGE_SUMMARY_ROWS: usize = 2;
+const LARGE_SUMMARY_ROWS: usize = 3;
 const _: () = assert!(
     spirit::grid_size_for(Size::XS, Magic::Big).0 + SPIRIT_LEFT_PAD <= LARGE_W - 2,
     "big magic fits right of the padded XS body"
@@ -316,7 +318,7 @@ fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<L
 
 /// Info lines of the large card: name, status badge (+ elapsed / last
 /// activity) with the model family word on the right when it fits, branch,
-/// PR chip (or `PR ?`), and the summary on up to two lines. Rows of disabled
+/// PR chip (or `PR ?`), and the summary on up to three lines. Rows of disabled
 /// or unknown extras collapse.
 fn large_text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Line<'static>> {
     let ex = &cfg.extras;
@@ -1142,11 +1144,11 @@ mod tests {
     #[test]
     fn layouts_have_exact_card_sizes() {
         assert_eq!(card_size(CardLayout::Standard), (20, 10));
-        assert_eq!(card_size(CardLayout::Large), (28, 13), "about 1:2, as wide as the preview's side list");
-        assert_eq!((LARGE_W, LARGE_H, LARGE_SCENE_ROWS), (28, 13, 2));
+        assert_eq!(card_size(CardLayout::Large), (32, 14), "about 2.3:1, as wide as the preview's side list");
+        assert_eq!((LARGE_W, LARGE_H, LARGE_SCENE_ROWS), (32, 14, 2));
         assert_eq!(spirit::grid_size(Size::XS).1, LARGE_SCENE_ROWS, "the XS spirit fills the band");
         let s = opus("proj-a", Status::Running);
-        for (layout, (w, h)) in [(CardLayout::Standard, (20u16, 10u16)), (CardLayout::Large, (28, 13))] {
+        for (layout, (w, h)) in [(CardLayout::Standard, (20u16, 10u16)), (CardLayout::Large, (32, 14))] {
             let cfg = Config { card_layout: layout, ..all_extras() };
             let rows = rows(&draw(w, h, |f| render_card(f, f.area(), &s, &cfg, true, 0)));
             let last = usize::from(h) - 1;
@@ -1247,26 +1249,26 @@ mod tests {
     }
 
     #[test]
-    fn large_card_wraps_the_summary_on_two_lines_cjk_aware() {
+    fn large_card_wraps_the_summary_on_three_lines_cjk_aware() {
         let mut s = session("proj-a", Status::Running);
         s.pr = None;
-        s.summary = Some("한글 요약이 아주 길어서 두 줄로 나뉘고 그래도 넘치면 마지막에 잘려야 합니다 정말로".into());
+        s.summary = Some("한글 요약이 아주 길어서 세 줄로 나뉘고 그래도 넘치면 마지막 줄 끝에서 잘려야 합니다 정말로 그렇습니다 끝까지 읽어 보세요".into());
         let rows = large_rows(&s, &large_cfg());
         assert!(rows.iter().all(|r| r.width() == usize::from(LARGE_W)), "borders intact: {rows:?}");
         let info = large_info(&s, &large_cfg());
-        let (l1, l2) = (&info[3], &info[4]);
-        assert!(l1.starts_with("한글 요약이") && !l1.ends_with('…'), "{l1:?}");
-        assert!(l2.ends_with('…') && !l2.is_empty(), "{l2:?}");
-        assert!(l1.width() <= 26 && l2.width() <= 26, "{l1:?} {l2:?}");
-        assert!(info[5].is_empty(), "two lines at most: {info:?}");
-        // words are not split when a space is near the end of the first line
-        s.summary = Some("alpha beta gamma delta epsilon zeta eta theta".into());
+        let (l1, l2, l3) = (&info[3], &info[4], &info[5]);
+        assert!(l1.starts_with("한글 요약이") && !l1.ends_with('…') && !l2.ends_with('…'), "{l1:?} {l2:?}");
+        assert!(l3.ends_with('…') && !l3.is_empty(), "{l3:?}");
+        assert!([l1, l2, l3].iter().all(|l| l.width() <= 30), "{info:?}");
+        assert!(info[6..].iter().all(String::is_empty), "three lines at most, the rest blank: {info:?}");
+        // words are not split when a space is near the end of a line
+        s.summary = Some("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu".into());
         let info = large_info(&s, &large_cfg());
-        assert_eq!((info[3].as_str(), info[4].as_str()), ("alpha beta gamma delta", "epsilon zeta eta theta"));
+        assert_eq!(info[3..6], ["alpha beta gamma delta epsilon", "zeta eta theta iota kappa", "lambda mu"]);
         // a summary that fits takes one line
-        s.summary = Some("가".repeat(13));
+        s.summary = Some("가".repeat(15));
         let info = large_info(&s, &large_cfg());
-        assert_eq!((info[3].as_str(), info[4].as_str()), ("가".repeat(13).as_str(), ""));
+        assert_eq!((info[3].as_str(), info[4].as_str()), ("가".repeat(15).as_str(), ""));
         assert_eq!(summary_lines("", 10, 2), Vec::<String>::new());
         assert_eq!(summary_lines("abc", 0, 2), Vec::<String>::new());
         assert_eq!(summary_lines("가나다라", 3, 2), vec!["가", "나…"], "wide chars never overflow");
@@ -1293,18 +1295,52 @@ mod tests {
     fn large_wide_card_fills_the_side_list_and_never_panics() {
         let s = opus("proj-abcdefghijklmnopqrstuvwxyz", Status::Idle);
         let cfg = large_cfg();
-        for w in [LARGE_W, 30, 34] {
+        for w in [LARGE_W, 36, 40] {
             let rows = rows(&draw(w, LARGE_H + 2, |f| render_wide_card(f, f.area(), &s, &cfg, false, 0)));
             assert_eq!(rows[0].width(), usize::from(w), "{rows:?}");
             assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮') && rows[usize::from(LARGE_H) - 1].starts_with('╰'), "{rows:?}");
             assert!(rows[usize::from(LARGE_H)..].iter().all(|r| r.trim().is_empty()), "exactly LARGE_H tall");
         }
         let u = Session { unread_notification: true, ..s.clone() };
-        for (w, h) in [(0, 0), (1, 1), (5, 2), (27, 13), (28, 12), (28, 13), (400, 13), (0, 30)] {
+        for (w, h) in [(0, 0), (1, 1), (5, 2), (31, 14), (32, 13), (32, 14), (400, 14), (0, 30)] {
             for selected in [false, true] {
                 draw(w, h, |f| render_wide_card(f, f.area(), &u, &cfg, selected, 0));
                 draw(w, h, |f| render_card(f, f.area(), &u, &cfg, selected, u64::MAX));
                 draw(w, h, |f| render_card(f, Rect::new(u16::MAX - 5, u16::MAX - 5, LARGE_W, LARGE_H), &u, &cfg, selected, 0));
+            }
+        }
+    }
+
+    /// A grid cell wider than the large card: the card fills it, the body
+    /// stays on the left, the text rows and the magic get the extra columns,
+    /// and nothing is drawn outside the card.
+    #[test]
+    fn large_card_stretched_to_its_cell_keeps_everything_inside() {
+        let cfg = large_cfg();
+        let mut s = opus("proj-a", Status::Running);
+        s.summary = Some("x".repeat(130));
+        for (cw, ctx) in [(LARGE_W, 80.0), (37, 80.0), (40, 45.0), (37, 10.0)] {
+            s.ctx_percent = Some(ctx);
+            for t in [0, 9, 44] {
+                // the card rect inside a larger frame
+                let rect = Rect::new(3, 2, cw, LARGE_H);
+                let buf = draw(cw + 8, LARGE_H + 5, |f| render_wide_card(f, rect, &s, &cfg, false, t));
+                for y in 0..LARGE_H + 5 {
+                    for x in 0..cw + 8 {
+                        let inside = (3..3 + cw).contains(&x) && (2..2 + LARGE_H).contains(&y);
+                        assert!(inside || buf[(x, y)].symbol() == " ", "w={cw} t={t}: ({x},{y}) outside the card");
+                    }
+                }
+                assert_eq!((buf[(3, 2)].symbol(), buf[(3 + cw - 1, 2 + LARGE_H - 1)].symbol()), ("╭", "╯"));
+                let lit: Vec<(u16, u16)> = (0..LARGE_H + 5).flat_map(|y| (0..cw + 8).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).collect();
+                assert!(!lit.is_empty(), "w={cw} t={t}");
+                assert!(lit.iter().all(|&(x, y)| (3..=2 + LARGE_SCENE_ROWS).contains(&y) && (4..3 + cw - 1).contains(&x)), "w={cw} t={t}: spirit and magic in the band: {lit:?}");
+                assert!(lit.iter().map(|p| p.0).min().unwrap() <= 6, "w={cw}: body on the left");
+                let r = rows(&buf);
+                let row = |i: u16| info(&r[usize::from(2 + 1 + LARGE_SCENE_ROWS + i)].chars().skip(3).take(usize::from(cw)).collect::<String>());
+                assert!(row(1).ends_with("opus") && row(1).width() == usize::from(cw - 2), "w={cw}: model word at the inner right edge: {:?}", row(1));
+                assert_eq!(row(4).width(), usize::from(cw - 2), "w={cw}: the summary uses the extra columns");
+                assert!(row(6).ends_with('…'), "w={cw}: {:?}", row(6));
             }
         }
     }

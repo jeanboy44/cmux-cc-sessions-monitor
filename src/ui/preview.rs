@@ -9,10 +9,11 @@
 //!   LEFT, ONE column of cards stretched to its width (user decision: the card
 //!   grows to the right by the reserved column), preview on the RIGHT. The
 //!   list is `clamp(width/5, 26, 34)` wide for standard cards (preview ≥ 44
-//!   columns) and exactly one large card (28) wide for large ones (preview
-//!   ≥ 42 columns), see [`list_width_bounds`];
+//!   columns) and exactly one large card (32) wide for large ones, see
+//!   [`list_width_bounds`]; large cards need [`side_min_width`] = 72 columns
+//!   so the preview keeps 40 (narrower falls through to the next rule);
 //! - else height ≥ [`STACK_MIN_HEIGHT`]: list on TOP, `clamp(height*2/5, h, h+1)`
-//!   tall for a card height `h` (10 standard, 13 large) = one row of the
+//!   tall for a card height `h` (10 standard, 14 large) = one row of the
 //!   usual card grid (+ a group divider line), preview at the BOTTOM (≥ 13
 //!   rows standard, ≥ 10 large);
 //! - else no panel: the normal grid, and the footer says the terminal is too small.
@@ -38,7 +39,9 @@ pub const SIDE_MIN_HEIGHT: u16 = 8;
 pub const LIST_MIN_WIDTH: u16 = 26;
 pub const LIST_MAX_WIDTH: u16 = 34;
 const _: () = assert!(LIST_MIN_WIDTH >= CARD_W, "a full card fits the side list");
-const _: () = assert!(SIDE_MIN_WIDTH - LARGE_W >= 40, "a large card list leaves the preview 40+ columns");
+/// The side-by-side preview panel keeps at least this many columns.
+pub const SIDE_MIN_PANEL_WIDTH: u16 = 40;
+const _: () = assert!(SIDE_MIN_WIDTH - LIST_MIN_WIDTH >= SIDE_MIN_PANEL_WIDTH, "a standard list leaves the preview 40+ columns");
 /// Side-by-side list width = width / this, clamped to the bounds above.
 pub const LIST_WIDTH_DIVISOR: u16 = 5;
 /// Narrower than [`SIDE_MIN_WIDTH`]: from this height on, list top / preview bottom.
@@ -73,6 +76,13 @@ pub fn list_width_bounds(layout: CardLayout) -> (u16, u16) {
     }
 }
 
+/// Minimum width of the side-by-side layout for cards of `layout`:
+/// [`SIDE_MIN_WIDTH`], or more when the large card list would leave the
+/// preview fewer than [`SIDE_MIN_PANEL_WIDTH`] columns.
+pub fn side_min_width(layout: CardLayout) -> u16 {
+    SIDE_MIN_WIDTH.max(list_width_bounds(layout).0 + SIDE_MIN_PANEL_WIDTH)
+}
+
 /// Stacked strip height bounds for cards of `layout`: one card row, plus one
 /// line for a window group divider when there is room.
 pub fn list_height_bounds(layout: CardLayout) -> (u16, u16) {
@@ -87,7 +97,7 @@ pub fn preview_layout(area: Rect, enabled: bool, layout: CardLayout) -> PreviewL
     if !enabled {
         return full;
     }
-    if area.width >= SIDE_MIN_WIDTH && area.height >= SIDE_MIN_HEIGHT {
+    if area.width >= side_min_width(layout) && area.height >= SIDE_MIN_HEIGHT {
         let (lo, hi) = list_width_bounds(layout);
         let w = (area.width / LIST_WIDTH_DIVISOR).clamp(lo, hi);
         let list = Rect { width: w, ..area };
@@ -249,24 +259,35 @@ mod tests {
         assert_eq!(list_width_bounds(large), (LARGE_W, LARGE_W), "the side list is exactly one large card wide");
         assert_eq!(list_width_bounds(CardLayout::Standard), (LIST_MIN_WIDTH, LIST_MAX_WIDTH));
         assert_eq!(list_height_bounds(large), (LARGE_H, LARGE_H + 1));
-        for w in 70..=400 {
-            let l = preview_layout(r(w, 13), true, large);
-            assert_eq!(l.list.width, 28, "w={w}");
-            assert!(l.one_column && l.panel.unwrap().width >= 42, "w={w}: the preview keeps at least 42 columns");
-            assert_split(l, r(w, 13));
+        assert_eq!((LARGE_W, LARGE_H), (32, 14));
+        assert_eq!(side_min_width(large), 72, "a 32-column list + a 40-column preview");
+        assert_eq!(side_min_width(CardLayout::Standard), SIDE_MIN_WIDTH);
+        for w in 72..=400 {
+            let l = preview_layout(r(w, 14), true, large);
+            assert_eq!(l.list.width, 32, "w={w}");
+            assert!(l.one_column && l.panel.unwrap().width >= 40, "w={w}: the preview keeps at least 40 columns");
+            assert_split(l, r(w, 14));
         }
-        assert_eq!(preview_layout(r(70, 8), true, large).panel, Some(Rect::new(28, 1, 42, 8)));
+        assert_eq!(preview_layout(r(72, 8), true, large).panel, Some(Rect::new(32, 1, 40, 8)));
+        // 70-71 wide: no side layout for large cards; stacked when tall enough, else none
+        for w in [70, 71] {
+            assert_eq!(preview_layout(r(w, 8), true, large).panel, None, "w={w}");
+            let l = preview_layout(r(w, 24), true, large);
+            assert!(!l.one_column && l.list.height == 14 && l.list.width == w, "w={w}: {l:?}");
+            assert_split(l, r(w, 24));
+        }
         // stacked: one row of large cards (+ a divider line)
-        assert_eq!(preview_layout(r(60, 24), true, large).list.height, 13);
-        assert_eq!(preview_layout(r(60, 35), true, large).list.height, 14);
-        assert_eq!(preview_layout(r(60, 100), true, large).list.height, 14);
-        assert_eq!(preview_layout(r(69, u16::MAX - 1), true, large).list.height, 14, "no overflow");
+        assert_eq!(preview_layout(r(60, 24), true, large).list.height, 14);
+        assert_eq!(preview_layout(r(60, 37), true, large).list.height, 14);
+        assert_eq!(preview_layout(r(60, 38), true, large).list.height, 15);
+        assert_eq!(preview_layout(r(60, 100), true, large).list.height, 15);
+        assert_eq!(preview_layout(r(69, u16::MAX - 1), true, large).list.height, 15, "no overflow");
         for h in 24..=200 {
             let l = preview_layout(r(60, h), true, large);
             assert!(l.panel.unwrap().height >= 10 && !l.one_column, "h={h}");
             assert_split(l, r(60, h));
         }
-        for (w, h) in [(69, 23), (70, 7), (0, 0), (1, 1)] {
+        for (w, h) in [(69, 23), (71, 23), (72, 7), (0, 0), (1, 1)] {
             assert_eq!(preview_layout(r(w, h), true, large).panel, None, "{w}x{h}");
         }
         assert_eq!(preview_layout(r(200, 50), false, large), PreviewLayout { list: r(200, 50), panel: None, one_column: false });

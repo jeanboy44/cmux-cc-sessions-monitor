@@ -14,8 +14,9 @@ pub enum CardLayout {
     /// a one-line summary.
     #[default]
     Standard,
-    /// B: 28 x 13 cards, a quarter-area spirit over more text (model word,
-    /// branch and PR rows, a two-line summary).
+    /// B: 32 x 14 cards (stretched to fill the grid row), a quarter-area
+    /// spirit over more text (model word, branch and PR rows, a summary on
+    /// up to three lines).
     Large,
 }
 

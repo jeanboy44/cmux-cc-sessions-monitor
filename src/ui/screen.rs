@@ -11,8 +11,9 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
+use crate::config::CardLayout;
 use crate::ui::card::{card_size, compact_mode, render_card, render_compact, render_wide_card};
-use crate::ui::grid::{card_cols, cell_rect};
+use crate::ui::grid::{card_cols, card_rect};
 use crate::ui::groups::{divider_text, place_rows, row_of, scroll_to_show_rows, Row};
 use crate::ui::hud::{render_hud, StatusCounts};
 use crate::ui::preview::{preview_layout, preview_read_lines, render_preview, PREVIEW_TOO_SMALL};
@@ -102,9 +103,11 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &mut App, one_column: bool, tick: u
             if compact {
                 render_compact(f, Rect { height: 1, ..*row_rect }, s, &app.config, selected, tick);
             } else {
-                let rect = cell_rect(*row_rect, cols, col, 0, card_layout);
+                // standard: the cell (card centred in it); large: the card
+                // fills its cell with 1-column gaps between neighbours
+                let rect = card_rect(*row_rect, cols, col, 0, card_layout);
                 app.spirits_visible |= rect.width >= card_w && rect.height >= card_h;
-                if one_column {
+                if one_column || card_layout == CardLayout::Large {
                     render_wide_card(f, rect, s, &app.config, selected, tick);
                 } else {
                     render_card(f, rect, s, &app.config, selected, tick);
@@ -695,19 +698,59 @@ mod tests {
         app.apply_snapshot(Snapshot { sessions: ten_sessions(), ..Default::default() });
         let buf = draw_buf(120, 40, |f| draw(f, &mut app, 0, Instant::now()));
         let screen = rows(&buf);
-        assert_eq!(app.cols, 4, "120 / 28");
-        // 4 cells of 30 columns, a 28-wide card centred in each; rows of 13
+        assert_eq!(app.cols, 3, "120 / 32");
+        // the cards fill the width: 39 + 1 + 39 + 1 + 40 columns; rows of 14
         let corners: Vec<(u16, u16)> = card_corners(&buf, 120);
-        let want: Vec<(u16, u16)> = [1u16, 14].iter().flat_map(|&y| [1u16, 31, 61, 91].map(|x| (x, y))).collect();
+        let want: Vec<(u16, u16)> = [1u16, 15].iter().flat_map(|&y| [0u16, 40, 80].map(|x| (x, y))).collect();
         assert_eq!(corners, want, "{}", screen.join("\n"));
-        for &(x, y) in &corners {
-            assert_eq!(buf[(x + LARGE_W - 1, y)].symbol(), "╮");
+        for (&(x, y), w) in corners.iter().zip([39u16, 39, 40].iter().cycle()) {
+            assert!(*w >= LARGE_W);
+            assert_eq!(buf[(x + w - 1, y)].symbol(), "╮");
             assert_eq!(buf[(x, y + LARGE_H - 1)].symbol(), "╰");
+            assert_eq!(buf[(x + w - 1, y + LARGE_H - 1)].symbol(), "╯");
         }
+        assert_large_gaps(&buf, &[39, 79], 1..29);
         assert!(screen[1 + 1 + usize::from(LARGE_SCENE_ROWS)].contains("proj-t0"), "{}", screen.join("\n"));
         assert!(has_braille(&screen.join("\n")) && app.spirits_visible);
-        assert!(screen.last().unwrap().contains("▼ more"), "8 of 10 cards fit");
+        assert!(screen.last().unwrap().contains("▼ more"), "6 of 10 cards fit");
         assert_eq!(buf[(1, 1)].fg, style::SELECTED);
+    }
+
+    /// The gap columns between large cards stay blank on rows `ys`.
+    fn assert_large_gaps(buf: &ratatui::buffer::Buffer, gaps: &[u16], ys: std::ops::Range<u16>) {
+        for &x in gaps {
+            for y in ys.clone() {
+                assert_eq!(buf[(x, y)].symbol(), " ", "gap column {x} row {y}: {}", rows(buf).join("\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn large_cards_fill_the_width_with_one_column_gaps_at_111() {
+        use crate::ui::card::{LARGE_H, LARGE_SCENE_ROWS};
+        let mut app = with_layout(twenty_sessions(), CardLayout::Large);
+        let buf = draw_buf(111, 40, |f| draw(f, &mut app, 0, Instant::now()));
+        assert_eq!(app.cols, 3);
+        // 36 + 1 + 36 + 1 + 37 = 111
+        let corners = card_corners(&buf, 111);
+        assert_eq!(corners, [1u16, 15].iter().flat_map(|&y| [0u16, 37, 74].map(|x| (x, y))).collect::<Vec<_>>(), "{}", rows(&buf).join("\n"));
+        for &(x, y) in &corners {
+            let w = if x == 74 { 37 } else { 36 };
+            assert_eq!(buf[(x + w - 1, y)].symbol(), "╮", "({x},{y})");
+            assert_eq!(buf[(x + w - 1, y + LARGE_H - 1)].symbol(), "╯", "({x},{y})");
+        }
+        assert_eq!(buf[(110, 1)].symbol(), "╮", "the last card reaches the right edge");
+        assert_large_gaps(&buf, &[36, 73], 1..29);
+        // the spirit and its magic stay inside each card's band
+        for y in 1..29u16 {
+            for x in 0..111u16 {
+                if buf[(x, y)].symbol().chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)) {
+                    let band = (y - 1) % LARGE_H;
+                    assert!((1..=LARGE_SCENE_ROWS).contains(&band), "braille at ({x},{y}) outside the band");
+                    assert!(![0u16, 35, 36, 37, 72, 73, 74, 110].contains(&x), "braille on a border/gap ({x},{y})");
+                }
+            }
+        }
     }
 
     #[test]
@@ -764,19 +807,20 @@ mod tests {
         let screen = rows(&buf);
         assert_eq!(app.grid_rect, Rect::new(0, 1, LARGE_W, 38), "the side list is one large card wide");
         assert_eq!(app.cols, 1);
-        assert_eq!(card_corners(&buf, LARGE_W), vec![(0, 1), (0, 14)], "two 13-row cards fit 38 rows: {}", screen.join("\n"));
-        assert!(screen[1].chars().nth(27) == Some('╮') && screen[1].chars().nth(28) == Some('╭'), "{}", screen[1]);
+        assert_eq!(card_corners(&buf, LARGE_W), vec![(0, 1), (0, 15)], "two 14-row cards fit 38 rows: {}", screen.join("\n"));
+        assert!(screen[1].chars().nth(31) == Some('╮') && screen[1].chars().nth(32) == Some('╭'), "{}", screen[1]);
         assert!(screen[1].contains("미리보기 · proj-t0"), "{}", screen[1]);
         assert_eq!(app.preview_target().map(|t| t.lines), Some(36));
         // stacked (narrow but tall): one row of large cards on top
         app.selected = 5;
         let screen = render(&mut app, 60, 32, 0);
-        // middle 60x30: strip clamp(30*2/5, 13, 14) = 13 rows, preview 17 below
+        // middle 60x30: strip clamp(30*2/5, 14, 15) = 14 rows, preview 16 below
         assert_eq!(app.grid_rect, Rect::new(0, 1, 60, LARGE_H));
         assert_eq!(app.cols, crate::ui::grid::card_cols(60, CardLayout::Large));
-        let strip = screen[1..14].join("\n");
+        let strip = screen[1..15].join("\n");
         assert!(strip.contains("proj-t5") && has_braille(&strip), "{strip}");
-        assert!(screen[14].starts_with('╭') && screen[14].contains("미리보기 · proj-t5"), "{}", screen[14]);
+        assert!(screen[1].starts_with('╭') && screen[1].chars().nth(59) == Some('╮'), "one card fills the strip: {}", screen[1]);
+        assert!(screen[15].starts_with('╭') && screen[15].contains("미리보기 · proj-t5"), "{}", screen[15]);
         // v flips the list between the layouts while the preview is on
         app.config.card_layout = CardLayout::Standard;
         render(&mut app, 120, 40, 0);
@@ -788,8 +832,8 @@ mod tests {
         let mut app = with_layout(App::new(Config::default()), CardLayout::Large);
         app.set_sessions(ten_sessions());
         app.selected = 9;
-        // middle 40x12 (< 13 rows) and 27x20 (< 28 columns): one-line cards
-        for (w, h) in [(40, 14), (27, 22)] {
+        // middle 40x13 (< 14 rows) and 31x20 (< 32 columns): one-line cards
+        for (w, h) in [(40, 15), (31, 22)] {
             let screen = render(&mut app, w, h, 0);
             let text = screen.join("\n");
             assert!(!text.contains('╭') && !has_braille(&text), "{w}x{h}: {text}");
@@ -797,9 +841,9 @@ mod tests {
             assert!(!app.spirits_visible);
         }
         // exactly one large card fits
-        let screen = render(&mut app, 28, 15, 0).join("\n");
+        let screen = render(&mut app, 32, 16, 0).join("\n");
         assert!(screen.contains('╭') && has_braille(&screen), "{screen}");
-        for (w, h) in [(0, 0), (1, 1), (5, 2), (27, 15), (28, 14), (200, 3), (3, 60)] {
+        for (w, h) in [(0, 0), (1, 1), (5, 2), (31, 16), (32, 15), (111, 16), (200, 3), (3, 60)] {
             for preview in [false, true] {
                 app.preview = preview;
                 assert_eq!(render(&mut app, w, h, u64::MAX).len(), h as usize);
@@ -831,7 +875,7 @@ mod tests {
                 .collect()
         };
         for layout in [CardLayout::Standard, CardLayout::Large] {
-            for preview in [false, true] {
+            for (preview, w) in [(false, 120u16), (false, 111), (true, 120)] {
                 let mut cfg = Config::default();
                 cfg.card_layout = layout;
                 cfg.extras.pr = true;
@@ -842,8 +886,8 @@ mod tests {
                     let (cache, _) = app.preview_shared();
                     cache.put("t0", crate::preview::PreviewEntry { screen: Ok("$ cargo test\n   Compiling demo v0.1.0\n    Finished test\ntest result: ok. 12 passed\n\n❯ ".into()), fetched_at: Instant::now() });
                 }
-                println!("--- {layout:?}, preview {preview}, 120x40 ---");
-                for r in render(&mut app, 120, 40, 44) {
+                println!("--- {layout:?}, preview {preview}, {w}x40 ---");
+                for r in render(&mut app, w, 40, 44) {
                     println!("{}", r.trim_end());
                 }
             }

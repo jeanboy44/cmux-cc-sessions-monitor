@@ -30,7 +30,7 @@ Then run `cmux-magigent` in a cmux pane. Requires a Rust toolchain (1.89 or newe
 |---|---|
 | `h` `j` `k` `l` / arrows | Move between cards (rows wrap) |
 | `Enter` / `Space` | Focus the selected session's cmux workspace and pane |
-| `v` | Switch the card layout: standard (20x10) or large (28x13); saved as `card_layout` |
+| `v` | Switch the card layout: standard (20x10) or large (32x14, stretched to fill the row); saved as `card_layout` |
 | `p` | Toggle preview (a column of cards of the current layout plus the session's screen) |
 | `i` | Open settings |
 | `q` / `Ctrl-C` | Quit |
@@ -50,7 +50,7 @@ The config file is `~/.config/cmux-magigent/config.toml` (if it does not exist y
 | `pr_poll_seconds` | `45` | PR lookup interval |
 | `guess_worktree` | `true` | Guess the worktree of sessions started in the main repository |
 | `done_retention_minutes` | `10` | How long finished sessions stay on screen |
-| `card_layout` | `"standard"` | `"standard"`: 20x10 cards (spirit, name, badge, branch or PR, one-line summary); `"large"`: 28x13 cards with a small spirit and more text (model, branch, PR, two-line summary). Any other value loads as `"standard"`. Also switched with `v` and in settings |
+| `card_layout` | `"standard"` | `"standard"`: 20x10 cards (spirit, name, badge, branch or PR, one-line summary); `"large"`: 32x14 cards (stretched to fill the row) with a small spirit and more text (model, branch, PR, summary on up to three lines). Any other value loads as `"standard"`. Also switched with `v` and in settings |
 | `[extras]` | `branch`, `elapsed`, `summary` on; `last_activity`, `pr` off | Extra info shown on cards |
 
 ## Context usage setup
