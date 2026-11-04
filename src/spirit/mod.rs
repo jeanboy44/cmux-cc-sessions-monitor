@@ -600,10 +600,12 @@ mod tests {
         for &(theme, [(s_cells, s_reach), (n_cells, n_reach), (b_cells, b_reach)]) in &spreads {
             // a running lightning body's own spikes already reach col 8 (measured
             // with no bolt at all), so small magic can only end 2 columns short
-            let gap = if theme == Theme::Lightning { 2 } else { 3 };
+            // (the lightning bolt strikes far out at every level, so its small
+            // cast ends only one column short and keeps more cells)
+            let (gap, small_cells) = if theme == Theme::Lightning { (1, 8) } else { (3, 6) };
             assert!(s_reach + gap <= n_reach, "{theme:?}: small reach {s_reach} vs normal {n_reach}");
             assert!(b_reach >= n_reach + 4, "{theme:?}: big reach {b_reach} vs normal {n_reach}");
-            assert!(s_cells * 10 <= n_cells * 6, "{theme:?}: small cells {s_cells} vs normal {n_cells}");
+            assert!(s_cells * 10 <= n_cells * small_cells, "{theme:?}: small cells {s_cells} vs normal {n_cells}");
             assert!(b_cells * 10 >= n_cells * 15, "{theme:?}: big cells {b_cells} vs normal {n_cells}");
         }
     }
@@ -907,6 +909,42 @@ mod tests {
             assert!(shapes.len() >= 3, "{seed}: each cast strikes a new zig-zag");
         }
         particles::NO_AMBIENT.with(|c| c.set(false));
+    }
+
+    /// Mean column of the lightning bolt's lowest-row strike (braille cells in
+    /// the bottom row right of the body) at each cast tick, over several seeds.
+    fn bolt_strike_mean(magic: Magic) -> f32 {
+        particles::NO_AMBIENT.with(|c| c.set(true));
+        let body_right = (body_center_x(Size::S) + 3.0).ceil() as u16;
+        let (mut sum, mut n) = (0.0f32, 0u32);
+        for seed in [4, 11, 23, 37, 58, 91] {
+            for t in (1..400).filter(|&t| state::casts_at(seed, t)) {
+                let g = render(&SpiritParams { magic, ..params(Theme::Lightning, Status::Running, Size::S, t, seed) });
+                let row = g.rows - 1;
+                let cols: Vec<u16> = (body_right..g.cols).filter(|&c| is_braille(cell(&g, c, row).ch)).collect();
+                if !cols.is_empty() {
+                    sum += cols.iter().map(|&c| f32::from(c)).sum::<f32>() / cols.len() as f32;
+                    n += 1;
+                }
+            }
+        }
+        particles::NO_AMBIENT.with(|c| c.set(false));
+        sum / n.max(1) as f32
+    }
+
+    #[test]
+    fn lightning_small_and_normal_strike_far_from_the_body() {
+        let [s, n, b] = Magic::ALL.map(bolt_strike_mean);
+        println!("bolt strike mean col: S {s:.2} N {n:.2} B {b:.2}");
+        // distance from the mouth (body's right edge), in columns
+        let g = Size::S.geom();
+        let mouth = (g.rcx + (BASE_R - 0.5) * g.ppu) / 2.0;
+        let (ds, dn, db) = (s - mouth, n - mouth, b - mouth);
+        println!("distance from mouth: S {ds:.2} N {dn:.2} B {db:.2} ({:.0}% / {:.0}%)", ds / db * 100.0, dn / db * 100.0);
+        assert!(s <= n && n <= b, "strike order {s} {n} {b}");
+        // the 11-column small/normal grid ends at col 10, so the strike (and its clipped sparks) tops out near 50%
+        assert!(dn >= 0.47 * db, "normal strike {n} too close vs big {b}");
+        assert!(ds >= 0.33 * db, "small strike {s} too close vs big {b}");
     }
 
     /// Every element x state as ANSI text. Run with

@@ -54,10 +54,11 @@ struct Area {
 }
 
 impl Area {
-    fn new(cv: &Canvas, m: Magic, cy: f32) -> Self {
+    fn new(cv: &Canvas, m: Magic, elem: Theme, cy: f32) -> Self {
         let g = cv.g;
         let ox = g.rcx + (BASE_R - 0.5) * g.ppu;
         let end = match m {
+            Magic::Small if elem == Theme::Lightning => ox + 7.0,
             Magic::Small => ox + 3.5,
             _ => g.w as f32,
         };
@@ -77,7 +78,7 @@ pub(super) fn draw(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
         return;
     }
     let Some((since_cast, since_start)) = stream(ctx.seed, ctx.t) else { return };
-    let a = Area::new(cv, ctx.magic, cy);
+    let a = Area::new(cv, ctx.magic, ctx.elem, cy);
     match ctx.elem {
         Theme::Fire => breath(cv, ctx, &a, since_cast, since_start),
         Theme::Water => vortex(cv, ctx, &a, since_cast),
@@ -249,8 +250,8 @@ fn fog(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_start: u64) {
 /// spark burst where it strikes; every cast strikes a new path.
 fn bolt(cv: &mut Canvas, ctx: &Ctx, a: &Area, since_cast: u64) {
     let (dur, dx, amp, burst, wide): (u64, f32, f32, i32, bool) = match ctx.magic {
-        Magic::Small => (3, 2.3, 0.8, 1, false),
-        Magic::Normal => (5, 6.0, 2.2, 2, false),
+        Magic::Small => (3, 5.5, 0.8, 1, false),
+        Magic::Normal => (5, 7.5, 2.2, 2, false),
         Magic::Big => (7, 13.0, 3.4, 3, true),
     };
     if since_cast >= dur {
