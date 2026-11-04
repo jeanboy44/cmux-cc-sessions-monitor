@@ -93,6 +93,8 @@ pub const SUBAGENT_GLYPH: &str = "◇";
 /// Marker of running tool calls (`⚙3` on the badge row, `⚙ Bash · …` on the
 /// large card). One cell wide (text presentation).
 pub const TOOL_GLYPH: &str = "⚙";
+/// Marks the name of a session in a remote (`cmux mosh` / `cmux ssh`) tab.
+pub const REMOTE_GLYPH: &str = "⇄";
 const _: () = assert!(
     spirit::grid_size_for(Size::S, Magic::Big).0 + SPIRIT_LEFT_PAD <= LARGE_W - 2,
     "big magic fits right of the padded S body"
@@ -300,7 +302,8 @@ pub fn render_compact(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, sele
         let tool = if tools > 0 { format!(" {TOOL_GLYPH}{tools}") } else { String::new() };
         sub + &tool
     });
-    let name_w = s.name.width();
+    let shown = shown_name(s);
+    let name_w = shown.width();
     // Keep at least a few name columns before adding the badge and elapsed.
     let need = name_w.min(6) + 1;
     let tag_w = tag.width();
@@ -315,7 +318,7 @@ pub fn render_compact(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, sele
         (need + tag_w <= avail, false, false)
     };
     let tail_w = if show_tag { 1 + tag_w } else { 0 } + if show_el { el_w } else { 0 } + if show_mk { mk_w } else { 0 };
-    let name = truncate_to_width(&s.name, avail - tail_w);
+    let name = truncate_to_width(&shown, avail - tail_w);
     let name_style = Style::new().fg(color).add_modifier(Modifier::BOLD);
     spans.push(Span::styled(name, name_style));
     if show_tag {
@@ -513,8 +516,17 @@ fn dim() -> Style {
     Style::new().fg(style::TEXT_DIM)
 }
 
+/// The session name, marked on a remote session.
+fn shown_name(s: &Session) -> String {
+    if s.remote {
+        format!("{REMOTE_GLYPH} {}", s.name)
+    } else {
+        s.name.clone()
+    }
+}
+
 fn name_line(s: &Session, width: usize) -> Line<'static> {
-    Line::styled(truncate_to_width(&s.name, width), Style::new().fg(style::TEXT).add_modifier(Modifier::BOLD))
+    Line::styled(truncate_to_width(&shown_name(s), width), Style::new().fg(style::TEXT).add_modifier(Modifier::BOLD))
 }
 
 /// Badge row: whole tokens only, then the subagent `marker` at the end. When
@@ -662,6 +674,7 @@ mod tests {
             model: None,
             unread_notification: false,
             subagents: Vec::new(),
+            remote: false,
             tools: Default::default(),
         }
     }
@@ -691,6 +704,23 @@ mod tests {
     /// Text of an info row: border stripped.
     fn info(row: &str) -> String {
         row.chars().skip(1).collect::<String>().trim_end().trim_end_matches('│').trim_end().to_string()
+    }
+
+    #[test]
+    fn remote_card_marks_its_name() {
+        let s = Session { remote: true, ..session("my task", Status::Idle) };
+        assert_eq!(name_line(&s, 18).to_string(), format!("{REMOTE_GLYPH} my task"));
+        assert_eq!(name_line(&session("my task", Status::Idle), 18).to_string(), "my task");
+    }
+
+    #[test]
+    fn compact_card_marks_a_remote_name() {
+        let s = Session { remote: true, ..session("my task", Status::Idle) };
+        let backend = ratatui::backend::TestBackend::new(40, 1);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| render_compact(f, f.area(), &s, &Config::default(), false, 0)).unwrap();
+        let row: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(row.contains(&format!("{REMOTE_GLYPH} my task")), "{row}");
     }
 
     #[test]

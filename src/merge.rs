@@ -95,8 +95,10 @@ fn build(c: Option<&ClaudeSessionRecord>, h: Option<&HookRecord>, x: &CmuxSessio
         .flatten()
         .find(|p| !p.as_os_str().is_empty())
         .unwrap_or_default();
-    let name = c
-        .and_then(|c| c.name.clone())
+    let name = x
+        .title
+        .clone()
+        .or_else(|| c.and_then(|c| c.name.clone()))
         .filter(|n| !n.is_empty())
         .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| x.session_id.clone());
@@ -110,7 +112,10 @@ fn build(c: Option<&ClaudeSessionRecord>, h: Option<&HookRecord>, x: &CmuxSessio
         cwd,
         workspace_id: x.workspace_id.clone(),
         surface_id: x.surface_id.clone(),
-        started_at: c.and_then(|c| c.started_at_ms).map(|ms| UNIX_EPOCH + Duration::from_millis(ms)),
+        started_at: c
+            .and_then(|c| c.started_at_ms)
+            .map(|ms| UNIX_EPOCH + Duration::from_millis(ms))
+            .or_else(|| h.and_then(|h| h.started_at.as_deref()).and_then(parse_time)),
         updated_at: claude_updated.max(hook_updated),
         ended_at: None,
         summary: h.and_then(|h| h.last_body.as_deref()).and_then(first_line),
@@ -124,6 +129,7 @@ fn build(c: Option<&ClaudeSessionRecord>, h: Option<&HookRecord>, x: &CmuxSessio
         model: None,
         unread_notification: false,
         subagents: Vec::new(),
+        remote: x.title.is_some(),
         tools: Default::default(),
     }
 }
@@ -298,6 +304,7 @@ mod tests {
             hook_event_name: None,
             last_body: None,
             transcript_path: None,
+            started_at: None,
             updated_at: None,
         }
     }
@@ -310,6 +317,7 @@ mod tests {
             cwd: PathBuf::from("/home/user/proj"),
             pid_exists: alive,
             updated: None,
+            title: None,
         }
     }
 
@@ -590,7 +598,7 @@ mod tests {
     }
 
     fn open(ids: &[&str]) -> TreeLayout {
-        TreeLayout { surfaces: ids.iter().map(|s| (s.to_string(), String::new())).collect(), window_order: Vec::new() }
+        TreeLayout { surfaces: ids.iter().map(|s| (s.to_string(), String::new())).collect(), ..Default::default() }
     }
 
     #[test]

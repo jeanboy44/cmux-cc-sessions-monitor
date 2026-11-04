@@ -55,6 +55,16 @@ Claude Code가 돌고 있는 탭(cmux surface)을 닫으면 `claude` 프로세�
 
 탭이 아직 있는지는 `cmux tree --all --id-format uuids`가 유일하게 믿을 만한 출처다. 출력은 window / workspace / pane / surface 계층이고 surface 줄은 `│   └── surface <UUID> [terminal] "<제목>" [selected] tty=ttys004` 형태다(UUID는 대문자, `[browser]` surface도 있다). 모니터는 매 갱신마다 이 목록을 읽어, 탭이 없어진 세션은 완료(DONE) 타일로 남기지 않고 바로 지운다. tree 호출이 실패하거나 surface가 하나도 없는 이상한 출력이면 "알 수 없음"으로 보고 이 이유로는 아무것도 지우지 않는다.
 
+## 원격 탭 (mosh/ssh)
+
+`cmux mosh` 탭의 Claude는 다른 머신에서 돈다. `~/.claude/sessions`, transcript, `cmux sessions list`에는 나타나지 않는다. 로컬에 있는 것은 세 가지다.
+
+- `cmux tree`: 탭과 제목(`[mosh] …`). JSON 출력에도 원격 여부 필드는 없어 제목 접두어로 구분한다. `[ssh]` 접두어는 실제 탭으로 확인하지 못한 가정이다.
+- `cmux read-screen`: mosh 탭에서도 동작한다.
+- `~/.cmuxterm/relay-hook-state/<앱>/<workspace>/claude-hook-sessions.json`: cmux가 전달한 훅 기록. `agentLifecycle`, `hookEventName`, `lastBody`, `startedAt`, `updatedAt`, `surfaceId`는 있고 `pid`, `cwd`, `transcriptPath`는 없다.
+
+relay 기록은 불완전하다. Claude가 떠 있는 탭인데 기록이 없는 경우가 있고, Claude가 끝나 Yazi로 바뀐 탭의 기록이 남기도 하며, 같은 세션 ID가 여러 워크스페이스 폴더에 있기도 한다. 그래서 세션 생존은 화면으로 판정하고, 카드 ID도 세션 ID가 아니라 탭으로 정한다(`remote-<surface>`). 판정: 입력창(`─` 줄 다음 `❯` 줄), 그 위 스피너(`· Zigzagging… (43s`), 대화 상자(`Do you want to proceed?`, `Esc to cancel`, `Enter to select`).
+
 ## 관찰하지 못한 것
 
 단일 실행(1회)이라 아래는 확인하지 못했다. Task 4 구현 시 가정으로만 두고 실제 사용 중 확인이 필요하다.

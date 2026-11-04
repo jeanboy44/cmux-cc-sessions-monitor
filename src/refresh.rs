@@ -23,6 +23,7 @@ use crate::source::claude_sessions::read_claude_sessions;
 use crate::source::context::{default_ctx_dirs, read_ctx_latest, resolve_ctx, safe_id, CtxCalibration, TranscriptCache};
 use crate::source::cmux::{Cmux, CmuxCli, CmuxSessionRef, SCREEN_LINES};
 use crate::source::hook_sessions::read_hook_sessions;
+use crate::source::remote::{default_relay_dir, read_relay_hooks, remote_sessions, scan_tabs, RemoteTab};
 use crate::source::subagents::{self, SubagentCache};
 use crate::source::tools::ToolCache;
 use crate::status::{resolve_status, settle_with_transcript};
@@ -54,6 +55,8 @@ pub struct Snapshot {
     /// The window holding the monitor's own surface, if known.
     pub current_window: Option<String>,
     pub(crate) cmux_refs: Vec<CmuxSessionRef>,
+    /// Remote tabs by surface id, with what their screens last showed.
+    pub(crate) remote_tabs: HashMap<String, RemoteTab>,
     pub(crate) seq: u64,
     /// Context usage read from transcripts, reused while a file is unchanged.
     pub(crate) transcripts: TranscriptCache,
@@ -85,6 +88,7 @@ impl Snapshot {
     pub fn branch_targets(&self) -> Vec<BranchTarget> {
         self.sessions
             .iter()
+            .filter(|s| !s.remote)
             .map(|s| BranchTarget {
                 id: s.id.clone(),
                 cwd: s.cwd.clone(),
@@ -105,6 +109,8 @@ pub struct RefreshDeps<'a> {
     pub ctx_dirs: Vec<PathBuf>,
     /// Claude transcripts (`<encoded cwd>/<session_id>.jsonl`).
     pub projects_dir: PathBuf,
+    /// cmux's hook records of remote tabs (see [`crate::source::remote`]).
+    pub relay_dir: PathBuf,
     pub cmux: &'a dyn Cmux,
     pub config: Config,
     pub pr_cache: Option<&'a PrCache>,
@@ -149,7 +155,7 @@ pub fn default_hook_path() -> PathBuf {
 /// whose cmux tab no longer exists (per `cmux tree`) are dropped at once.
 pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
     let claude = read_claude_sessions(&deps.claude_dir);
-    let hooks = read_hook_sessions(&deps.hook_path);
+    let mut hooks = read_hook_sessions(&deps.hook_path);
     let (cmux_refs, message) = match deps.cmux.sessions() {
         Ok(refs) => (refs, None),
         Err(_) => (prev.cmux_refs.clone(), Some(CMUX_UNAVAILABLE.to_string())),
@@ -157,9 +163,20 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
     // The list keeps closed tabs (stale `active_surface=yes`); the tree is
     // the only live view. A failing tree is "unknown": nothing is dropped.
     let tree = deps.cmux.tree().ok();
+    // Remote tabs join as ordinary sources; an unknown tree keeps them as they were.
+    let remote_tabs = match &tree {
+        Some(t) => scan_tabs(t, &prev.remote_tabs, deps.cmux, deps.now),
+        None => prev.remote_tabs.clone(),
+    };
+    let mut all_refs = cmux_refs.clone();
+    if !remote_tabs.is_empty() {
+        let (refs, records) = remote_sessions(&remote_tabs, &read_relay_hooks(&deps.relay_dir));
+        all_refs.extend(refs);
+        hooks.extend(records);
+    }
     let retention = Duration::from_secs(deps.config.done_retention_minutes.saturating_mul(60));
     let mut sessions =
-        merge_sessions(&claude, &hooks, &cmux_refs, deps.now, retention, &prev.sessions, tree.as_ref());
+        merge_sessions(&claude, &hooks, &all_refs, deps.now, retention, &prev.sessions, tree.as_ref());
     // Window of every tab, from the same tree call. Unknown tree = no window
     // info at all (one ungrouped list), never a stale mix from `prev`.
     for s in sessions.iter_mut() {
@@ -178,7 +195,7 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
 
     // Last-resort screen rule for live sessions the files could not classify.
     let alive: HashMap<&str, bool> =
-        select_refs(&cmux_refs).into_iter().map(|r| (r.session_id.as_str(), r.pid_exists)).collect();
+        select_refs(&all_refs).into_iter().map(|r| (r.session_id.as_str(), r.pid_exists)).collect();
     let mut reads = 0;
     for s in sessions.iter_mut() {
         if s.status != Status::Unknown || !alive.get(s.id.as_str()).copied().unwrap_or(false) {
@@ -287,6 +304,7 @@ pub fn build_snapshot(deps: &RefreshDeps, prev: &Snapshot) -> Snapshot {
         window_order,
         current_window,
         cmux_refs,
+        remote_tabs,
         seq,
         transcripts,
         ctx_calibration,
@@ -319,6 +337,7 @@ pub fn spawn_refresh(
                     hook_path: default_hook_path(),
                     ctx_dirs: default_ctx_dirs(),
                     projects_dir: default_projects_dir(),
+                    relay_dir: default_relay_dir(),
                     cmux: &cmux,
                     config: cfg,
                     pr_cache: pr.as_ref().map(|(c, _)| c.as_ref()),
@@ -395,6 +414,7 @@ mod tests {
             cwd: PathBuf::from("/home/user/proj"),
             pid_exists: alive,
             updated: None,
+            title: None,
         }
     }
 
@@ -424,6 +444,7 @@ mod tests {
             hook_path: dir.join("hooks.json"),
             ctx_dirs: vec![dir.join("ctx")],
             projects_dir: dir.join("projects"),
+            relay_dir: dir.join("relay"),
             cmux,
             config: Config::default(),
             pr_cache: None,
@@ -449,6 +470,97 @@ mod tests {
             }
         }
         t
+    }
+
+    const RS: &str = "00000000-0000-0000-0000-000000000001";
+    const CLAUDE_SCREEN: &str = "reply\n────────────────────\n❯ \n────────────────────\n  auto mode on";
+
+    fn remote_tree() -> crate::source::cmux::TreeLayout {
+        crate::source::cmux::parse_tree(&format!(
+            "window AAAAAAAA-0000-0000-0000-000000000001\nworkspace BBBBBBBB-0000-0000-0000-000000000001 \"w\"\nsurface {RS} [terminal] \"[mosh] my task\"\n"
+        ))
+    }
+
+    fn remote_cmux() -> FakeCmux {
+        let mut cmux = FakeCmux::new(vec![]);
+        cmux.tree_result = Ok(remote_tree());
+        cmux.screens.insert(RS.into(), Ok(CLAUDE_SCREEN.into()));
+        cmux
+    }
+
+    fn write_relay(dir: &Path, body: &str) {
+        let d = dir.join("relay").join("app").join("WS");
+        std::fs::create_dir_all(&d).unwrap();
+        let json = format!(
+            r#"{{"sessions":{{"x":{{"sessionId":"x","surfaceId":"{RS}","agentLifecycle":"idle","hookEventName":"Stop","lastBody":"{body}","startedAt":1700000000.5}}}}}}"#
+        );
+        std::fs::write(d.join("claude-hook-sessions.json"), json).unwrap();
+    }
+
+    #[test]
+    fn remote_tab_with_claude_is_a_card_with_tab_title_and_window() {
+        let dir = setup();
+        write_relay(dir.path(), "finished the work");
+        let cmux = remote_cmux();
+        let snap = build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
+        assert_eq!(snap.sessions.len(), 1);
+        let s = &snap.sessions[0];
+        assert!(s.remote);
+        assert_eq!(s.name, "my task");
+        assert_eq!(s.status, Status::Idle);
+        assert_eq!(s.summary.as_deref(), Some("finished the work"));
+        assert_eq!(s.surface_id, RS);
+        assert_eq!(s.workspace_id, "BBBBBBBB-0000-0000-0000-000000000001");
+        assert_eq!(s.window_id.as_deref(), Some("AAAAAAAA-0000-0000-0000-000000000001"));
+        assert!(s.started_at.is_some());
+    }
+
+    #[test]
+    fn remote_tab_without_claude_is_no_card() {
+        let dir = setup();
+        write_relay(dir.path(), "old");
+        let mut cmux = remote_cmux();
+        cmux.screens.insert(RS.into(), Ok("$ ".into()));
+        let snap = build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
+        assert!(snap.sessions.is_empty());
+    }
+
+    #[test]
+    fn remote_session_survives_a_failing_tree() {
+        let dir = setup();
+        let mut cmux = remote_cmux();
+        let snap = build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
+        cmux.tree_result = Err("down".into());
+        let next = build_snapshot(&deps(dir.path(), &cmux), &snap);
+        assert_eq!(next.sessions.len(), 1);
+        assert_eq!(next.sessions[0].status, Status::Idle);
+    }
+
+    #[test]
+    fn remote_claude_exit_leaves_a_done_card_until_retention() {
+        let dir = setup();
+        let mut cmux = remote_cmux();
+        let mut d = deps(dir.path(), &cmux);
+        let start = d.now;
+        let first = build_snapshot(&d, &Snapshot::default());
+        cmux.screens.insert(RS.into(), Ok("$ ".into()));
+        d = deps(dir.path(), &cmux);
+        d.now = start + Duration::from_secs(6);
+        let second = build_snapshot(&d, &first);
+        d = deps(dir.path(), &cmux);
+        d.now = start + Duration::from_secs(12);
+        let third = build_snapshot(&d, &second);
+        assert_eq!(third.sessions.len(), 1);
+        assert_eq!(third.sessions[0].status, Status::Done);
+    }
+
+    #[test]
+    fn remote_session_is_not_a_branch_target() {
+        let dir = setup();
+        let cmux = remote_cmux();
+        let snap = build_snapshot(&deps(dir.path(), &cmux), &Snapshot::default());
+        assert_eq!(snap.sessions.len(), 1);
+        assert!(snap.branch_targets().is_empty());
     }
 
     #[test]

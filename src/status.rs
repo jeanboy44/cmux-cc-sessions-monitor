@@ -164,6 +164,7 @@ mod tests {
             hook_event_name: event.map(String::from),
             last_body: None,
             transcript_path: None,
+            started_at: None,
             updated_at: None,
         }
     }

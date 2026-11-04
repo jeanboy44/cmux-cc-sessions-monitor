@@ -20,6 +20,9 @@ pub struct CmuxSessionRef {
     pub pid_exists: bool,
     /// Raw `updated=` value (ISO-8601), used to pick among duplicate refs.
     pub updated: Option<String>,
+    /// Set for a remote tab's session (see [`crate::source::remote`]): the
+    /// card name, as no cwd or session name is known.
+    pub title: Option<String>,
 }
 
 fn is_kv(tok: &str) -> bool {
@@ -66,6 +69,7 @@ fn parse_line(line: &str) -> Option<CmuxSessionRef> {
         cwd: PathBuf::from(get("cwd").unwrap_or_default()),
         pid_exists: get("pid_exists").as_deref() == Some("yes"),
         updated: get("updated").filter(|v| !v.is_empty()),
+        title: None,
     })
 }
 
@@ -79,6 +83,16 @@ pub struct TreeLayout {
     /// Surface id → window id (empty when no `window` line came before it).
     pub surfaces: HashMap<String, String>,
     pub window_order: Vec<String>,
+    /// Surface id → workspace and title of its tab, for terminal tabs.
+    pub tabs: HashMap<String, TreeTab>,
+}
+
+/// Where a terminal tab sits and what it is called, from `cmux tree`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeTab {
+    /// Uppercase id; empty when no `workspace` line came before the tab.
+    pub workspace_id: String,
+    pub title: String,
 }
 
 impl TreeLayout {
@@ -98,6 +112,7 @@ impl TreeLayout {
 pub fn parse_tree(output: &str) -> TreeLayout {
     let mut out = TreeLayout::default();
     let mut window = String::new();
+    let mut workspace = String::new();
     for line in output.lines() {
         match tree_item(line) {
             Some(("window", id)) => {
@@ -106,7 +121,11 @@ pub fn parse_tree(output: &str) -> TreeLayout {
                 }
                 window = id;
             }
+            Some(("workspace", id)) => workspace = id,
             Some(("surface", id)) => {
+                if let Some(title) = terminal_title(line) {
+                    out.tabs.insert(id.clone(), TreeTab { workspace_id: workspace.clone(), title });
+                }
                 out.surfaces.insert(id, window.clone());
             }
             _ => {}
@@ -128,12 +147,20 @@ fn tree_item(line: &str) -> Option<(&'static str, String)> {
     let mut toks = rest.split_whitespace();
     let kind = match toks.next()? {
         "window" => "window",
+        "workspace" => "workspace",
         "surface" => "surface",
         _ => return None,
     };
     let id = toks.next()?;
     let ok = id.len() >= 8 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     ok.then(|| (kind, id.to_ascii_uppercase()))
+}
+
+/// The title of a `surface <id> [terminal] "title" …` line. It may hold
+/// quotes itself, and nothing after it does.
+fn terminal_title(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once("[terminal] \"")?;
+    Some(rest.rsplit_once('"').map_or("", |(title, _)| title).to_string())
 }
 
 /// One entry of `cmux list-notifications`.
@@ -383,7 +410,7 @@ impl FakeCmux {
     pub fn new(sessions: Vec<CmuxSessionRef>) -> Self {
         let surfaces = TreeLayout {
             surfaces: sessions.iter().map(|r| (r.surface_id.to_ascii_uppercase(), String::new())).collect(),
-            window_order: Vec::new(),
+            ..Default::default()
         };
         Self {
             sessions_result: Ok(sessions),
@@ -452,6 +479,22 @@ mod tests {
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
+    }
+
+    #[test]
+    fn parse_tree_gives_workspace_and_title_of_terminal_tabs() {
+        let t = parse_tree(concat!(
+            "window aaaaaaaa-0000-0000-0000-000000000001\n",
+            "├── workspace bbbbbbbb-0000-0000-0000-000000000001 \"[mosh] ws\" [selected]\n",
+            "│   └── pane bbbbbbbb-0000-0000-0000-000000000001 [focused]\n",
+            "│       ├── surface 00000000-0000-0000-0000-000000000001 [terminal] \"[mosh] say \"hi\" 계통수\" [selected] tty=ttys001\n",
+            "│       └── surface 00000000-0000-0000-0000-000000000002 [browser] \"docs\"\n",
+        ));
+        let tab = &t.tabs["00000000-0000-0000-0000-000000000001"];
+        assert_eq!(tab.workspace_id, "BBBBBBBB-0000-0000-0000-000000000001");
+        assert_eq!(tab.title, "[mosh] say \"hi\" 계통수");
+        assert!(!t.tabs.contains_key("00000000-0000-0000-0000-000000000002"));
+        assert!(t.has_surface("00000000-0000-0000-0000-000000000002"));
     }
 
     #[test]

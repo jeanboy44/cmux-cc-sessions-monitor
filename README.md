@@ -16,6 +16,7 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 - `Enter` (or `Space`) jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
 - Cards are grouped by cmux window. An optional PR chip shows the session's own pull request, taken from the PR meta your hook writes (see Limitations below), not looked up from the branch, so two sessions on the same branch can show different PRs.
 - Running Claude Code subagents show on the card: a `◇×N` marker on the standard card's badge row, one `◇ kind · description` row each on the large card, and one square bead each (at most five) in a row along the bottom of the spirit's animation area, growing right from the body, in the colour of the subagent model's element (see [Subagents](#subagents)).
+- Sessions in remote tabs (`cmux mosh`, `cmux ssh`) get a card too, marked `⇄` (see [Remote sessions](#remote-sessions)).
 - Running tool calls show on the card: a `⚙N` marker after the subagent marker (foreground calls plus background Bash / Monitor tasks), and on the large card one `⚙ Bash · cargo test…  12s` row for the tool running now (see [Running tools](#running-tools)).
 
 ## Install
@@ -55,6 +56,12 @@ The config file is `~/.config/cmux-magigent/config.toml` (if it does not exist y
 | `card_layout` | `"standard"` | `"standard"`: 20x10 cards (spirit, name, badge, branch or PR, one-line summary); `"large"`: 32x14 cards (stretched to fill the row) with a bigger spirit and more text (model, branch, PR, summary on up to three lines). Any other value loads as `"standard"`. Also switched with `v` and in settings |
 | `subagent_active_seconds` | `30` | A subagent counts as running while its transcript was written within this many seconds (see [Subagents](#subagents)) |
 | `[extras]` | `branch`, `elapsed`, `summary` on; `last_activity`, `pr` off | Extra info shown on cards |
+
+## Remote sessions
+
+Tabs whose title starts with `[mosh]` or `[ssh]` are checked for Claude Code: their sessions run on the other machine, so the monitor sees only what cmux has here. It reads each such tab's screen about every 5 seconds (at most 3 per refresh) and uses the hook records cmux relays to `~/.cmuxterm/relay-hook-state/`.
+
+A remote card has the status badge, the elapsed time and last summary (when the relay has them), notifications, jumping and the preview. It is named after the tab. There is no model, context usage, branch, PR, subagent or tool information, so the spirit uses the `theme` element and the normal motion. When the tab stops showing Claude Code for two reads in a row, the card turns DONE and leaves like any other finished session.
 
 ## Context usage setup
 

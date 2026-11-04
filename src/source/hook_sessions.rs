@@ -17,6 +17,7 @@ pub struct HookRecord {
     pub hook_event_name: Option<String>,
     pub last_body: Option<String>,
     pub transcript_path: Option<PathBuf>,
+    pub started_at: Option<String>,
     pub updated_at: Option<String>,
 }
 
@@ -51,6 +52,8 @@ struct Raw {
     #[serde(default, deserialize_with = "lenient")]
     transcript_path: Option<PathBuf>,
     #[serde(default, deserialize_with = "string_or_number")]
+    started_at: Option<String>,
+    #[serde(default, deserialize_with = "string_or_number")]
     updated_at: Option<String>,
 }
 
@@ -66,6 +69,7 @@ impl Raw {
             hook_event_name: self.hook_event_name,
             last_body: self.last_body,
             transcript_path: self.transcript_path,
+            started_at: self.started_at,
             updated_at: self.updated_at,
         })
     }

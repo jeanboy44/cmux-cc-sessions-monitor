@@ -65,6 +65,9 @@ pub struct Session {
     /// The newest Claude Code subagents of the session (see
     /// [`crate::source::subagents`]); filled by every refresh round.
     pub subagents: Vec<SubagentInfo>,
+    /// Runs in a remote (`cmux mosh` / `cmux ssh`) tab: only what
+    /// [`crate::source::remote`] can see is known.
+    pub remote: bool,
     /// Tool calls running now, foreground and background (see
     /// [`crate::source::tools`]); filled by every refresh round, empty for
     /// finished sessions.
