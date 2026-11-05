@@ -1,38 +1,32 @@
-//! Session cards: an element spirit (braille, see [`crate::spirit`]) on top
-//! and info lines below, in a thin rounded border.
+//! Session cards: an element spirit (braille, see [`crate::spirit`]) in a
+//! fixed area on the left and info lines on the right, in a thin rounded
+//! border (user decision: wide cards, as the cast magic took too much room).
 //!
-//! Full card: always [`CARD_W`] x [`CARD_H`] = 20 x 10 cells (borders
-//! included; inner 18 x 8; user decision: narrowed from 24 because it looked
-//! wide, then one row taller for the summary): a spirit band of
-//! [`SCENE_ROWS`] rows with the small [`Size::XS`] spirit (user decision: a
-//! small card gets the small spirit; its body sits on the left and the
-//! magic it casts, scaled by context usage, fills the right) and
-//! [`INFO_ROWS`] text rows: name, status badge (+
-//! elapsed / last activity), one extra (the PR chip, else the branch), then
-//! the one-line summary (rows of disabled or unknown extras collapse; with no
-//! summary the last row shows the next extra, e.g. the branch the PR took the
-//! row from). A larger area gets the card centered across, at its top.
+//! Full card: always [`CARD_W`] x [`CARD_H`] = 29 x 9 cells (borders
+//! included): the small [`Size::XS`] spirit in [`SPIRIT_W`] columns and
+//! [`INFO_ROWS`] text rows: name, status badge (+ elapsed / last activity),
+//! one extra (the PR chip, else the branch), then the summary on the free
+//! rows (rows of disabled or unknown extras collapse; other extras follow
+//! when the summary leaves room). A larger area gets the card centered
+//! across, at its top.
 //!
 //! Large card ([`CardLayout::Large`], `v`): at least [`LARGE_W`] x
-//! [`LARGE_H`] = 32 x 14 (inner 30 x 12, as wide as the preview's side
-//! list): the bigger [`Size::S`] spirit in a [`LARGE_SCENE_ROWS`]-row band at
-//! the top left with its magic in the wide area to the right, then name,
-//! status badge
-//! (+ elapsed / last activity, the model family word on the right), branch,
-//! PR, and the summary on up to three lines; unused rows stay blank. In the
-//! grid a large card fills its cell (see [`crate::ui::grid::card_rect`]).
+//! [`LARGE_H`] = 46 x 10: the bigger [`Size::S`] spirit in the top left of
+//! [`LARGE_SPIRIT_W`] columns and, right of it, name, status badge (+ elapsed
+//! / last activity, the model family word on the right), branch, PR, and the
+//! summary on up to three lines; unused rows stay blank. In the grid a large
+//! card fills its cell (see [`crate::ui::grid::card_rect`]).
 //!
 //! The preview list and the large grid stretch the card across its rect
-//! ([`render_wide_card`]): same height, the body stays on the left and the
-//! extra columns go to the text rows and the magic's room on the right.
+//! ([`render_wide_card`]): same height, the spirit area stays and the extra
+//! columns go to the text.
 //!
 //! Running Claude Code subagents (see [`crate::source::subagents`]): a
 //! [`SUBAGENT_GLYPH`]`×N` marker at the end of the standard card's badge row,
 //! `◇N` on compact cards, one `◇ kind · description` row each (at most three,
 //! then `+N`) in the large card's leftover rows, and one square bead (one
-//! braille cell, an empty cell between two) each in a row along the bottom
-//! of the spirit band, from the body's lower right, in the element of the
-//! subagent's model (see `spirit::subdots`).
+//! braille cell) each in a grid under the spirit, in the element of
+//! the subagent's model (see `spirit::subdots`).
 //!
 //! Running tool calls (see [`crate::source::tools`]): a [`TOOL_GLYPH`]`N`
 //! marker after the subagent marker on standard and compact cards (N =
@@ -59,29 +53,36 @@ use crate::config::{CardLayout, Config};
 use crate::model::{model_family, PrState, Session, Status, SubagentInfo};
 use crate::source::subagents::running_count;
 use crate::spirit::theme::Theme;
-use crate::spirit::{self, max_grid_size, Magic, Size, SpiritParams, SubagentDot, MAX_DOTS};
+use crate::spirit::{self, Size, SpiritParams, SubagentDot, MAX_DOTS};
 use crate::ui::scene::draw_grid;
 use crate::ui::style::{self, fmt_duration, truncate_to_width};
 
-/// Spirit band size in cells: room for the largest spirit.
-pub const SCENE_COLS: u16 = max_grid_size().0;
-pub const SCENE_ROWS: u16 = max_grid_size().1;
-const _: () = assert!(spirit::grid_size(Size::XS).1 == SCENE_ROWS, "the XS spirit fills the standard band");
-/// Text rows below the spirit band.
-pub const INFO_ROWS: u16 = 4;
-/// Inner width of a card.
-const INNER_W: u16 = 18;
-/// Full card size, borders included: 20 x 10.
-pub const CARD_W: u16 = INNER_W + 2;
-pub const CARD_H: u16 = SCENE_ROWS + INFO_ROWS + 2;
-const _: () = assert!(SCENE_COLS <= INNER_W, "the largest spirit fits the card");
+/// Spirit rows of a card: the spirits are four rows tall.
+pub const SCENE_ROWS: u16 = spirit::grid_size(Size::XS).1;
+/// Text rows right of the spirit.
+pub const INFO_ROWS: u16 = 7;
+/// Columns of the spirit area: left pad, grid (the beads under it are as wide), one free column.
+pub const SPIRIT_W: u16 = 10;
+pub const LARGE_SPIRIT_W: u16 = 13;
+/// Text columns of a card.
+const INFO_W: u16 = 16;
+/// Free columns between the text and the right border. Together with the
+/// half cell a border line keeps on each side, this matches the look of the
+/// rows above and below; smaller than the gap between cards, so a card reads
+/// as one block.
+const CARD_PAD_X: u16 = 1;
+/// Full card size, borders included: 29 x 9. A terminal cell is about twice
+/// as tall as wide, so this is a golden rectangle on screen (1.61 : 1).
+pub const CARD_W: u16 = SPIRIT_W + INFO_W + CARD_PAD_X + 2;
+pub const CARD_H: u16 = INFO_ROWS + 2;
+const _: () = assert!(SCENE_ROWS <= INFO_ROWS, "the spirit fits the card");
+const _: () = assert!(spirit::grid_size(Size::XS).0 + SPIRIT_LEFT_PAD < SPIRIT_W, "XS spirit");
+const _: () = assert!(spirit::grid_size(Size::S).0 + SPIRIT_LEFT_PAD < LARGE_SPIRIT_W, "S spirit");
 
-/// Large card size, borders included: 32 x 14 (inner 30 x 12). The grid
-/// stretches it wider to fill its cell; never narrower.
-pub const LARGE_W: u16 = 32;
-pub const LARGE_H: u16 = 14;
-/// Spirit band of the large card: as tall as the S spirit.
-pub const LARGE_SCENE_ROWS: u16 = spirit::grid_size(Size::S).1;
+/// Large card size, borders included: 46 x 10. The grid stretches it wider
+/// to fill its cell; never narrower.
+pub const LARGE_W: u16 = 46;
+pub const LARGE_H: u16 = 10;
 /// Summary lines of the large card.
 const LARGE_SUMMARY_ROWS: usize = 3;
 /// Running-subagent rows of the large card at most (then `+N`).
@@ -95,11 +96,7 @@ pub const SUBAGENT_GLYPH: &str = "◇";
 pub const TOOL_GLYPH: &str = "⚙";
 /// Marks the name of a session in a remote (`cmux mosh` / `cmux ssh`) tab.
 pub const REMOTE_GLYPH: &str = "⇄";
-const _: () = assert!(
-    spirit::grid_size_for(Size::S, Magic::Big).0 + SPIRIT_LEFT_PAD <= LARGE_W - 2,
-    "big magic fits right of the padded S body"
-);
-const _: () = assert!(LARGE_SCENE_ROWS + 7 <= LARGE_H - 2, "band, name, badge, branch, PR and three summary lines");
+const _: () = assert!(7 < LARGE_H - 2, "name, badge, branch, PR and three summary lines");
 
 /// The spirit size a card layout draws (user decision: the standard card
 /// gets the small spirit, the large card the bigger one).
@@ -165,22 +162,16 @@ pub fn reset_spirit_renders() {
     SPIRIT_RENDERS.with(|c| c.set(0));
 }
 
-/// Free columns between the card border and the spirit grid.
+/// Free columns between the card border and the spirit's grid.
 const SPIRIT_LEFT_PAD: u16 = 1;
-const _: () = assert!(
-    spirit::grid_size_for(Size::XS, Magic::Big).0 + SPIRIT_LEFT_PAD <= INNER_W,
-    "big magic fits right of the padded body"
-);
 
 /// Renders the spirit for `params` at the top left of `band` (after
 /// [`SPIRIT_LEFT_PAD`]) and returns the rect it was drawn into (clipped to
-/// the band). User decision: the body sits on the left so the cast magic,
-/// which shows the context usage, has the rest of the card to the right
-/// (this replaced the centred body of the first spirit cards).
-fn draw_spirit(buf: &mut Buffer, band: Rect, params: &SpiritParams, dots: &[SubagentDot]) -> Rect {
+/// the band).
+fn draw_spirit(buf: &mut Buffer, band: Rect, params: &SpiritParams) -> Rect {
     #[cfg(test)]
     SPIRIT_RENDERS.with(|c| c.set(c.get() + 1));
-    let grid = spirit::render_dots(params, dots);
+    let grid = spirit::render(params);
     let pad = if band.width > SPIRIT_LEFT_PAD { SPIRIT_LEFT_PAD } else { 0 };
     let x = band.x + pad;
     let (cols, rows) = (grid.cols.min(band.right().saturating_sub(x)), grid.rows.min(band.height));
@@ -189,9 +180,20 @@ fn draw_spirit(buf: &mut Buffer, band: Rect, params: &SpiritParams, dots: &[Suba
     at
 }
 
+/// Draws the subagent beads under the spirit `band`, in the free rows of `inner`.
+fn draw_beads(buf: &mut Buffer, inner: Rect, band: Rect, params: &SpiritParams, dots: &[SubagentDot]) {
+    let rows = inner.bottom().saturating_sub(band.bottom());
+    if rows == 0 || dots.is_empty() {
+        return;
+    }
+    let at = Rect::new(band.x + SPIRIT_LEFT_PAD, band.bottom(), band.width.saturating_sub(SPIRIT_LEFT_PAD), rows);
+    draw_grid(buf, at, &spirit::render_beads(params, dots, rows));
+}
+
 /// Draws one session card with its spirit at animation frame `tick`: a card
 /// of the configured layout ([`card_size`]) centered across the top of
 /// `area`. Too small an area falls back to [`render_compact`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render_card(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: bool, tick: u64) {
     render_full(f, area, s, cfg, selected, tick, false);
 }
@@ -237,25 +239,25 @@ fn render_full(f: &mut Frame, area: Rect, s: &Session, cfg: &Config, selected: b
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
 
-    let (size, scene_rows) = match layout {
-        CardLayout::Standard => (spirit_size(layout), SCENE_ROWS),
-        CardLayout::Large => (spirit_size(layout), LARGE_SCENE_ROWS),
+    let spirit_w = match layout {
+        CardLayout::Standard => SPIRIT_W,
+        CardLayout::Large => LARGE_SPIRIT_W,
     };
-    let band = Rect { height: scene_rows.min(inner.height), ..inner };
+    let band = Rect { width: spirit_w.min(inner.width), height: SCENE_ROWS.min(inner.height), ..inner };
     let params = SpiritParams {
         theme: theme_for(s, cfg),
         status: s.status,
-        size,
+        size: spirit_size(layout),
         tick,
         seed: seed_for(s),
         warning: spirit::warning(s.ctx_percent),
-        magic: spirit::magic_for(s.ctx_percent),
         stage: spirit::stage_for(s.ctx_percent),
-        cols: band.width.saturating_sub(SPIRIT_LEFT_PAD),
     };
-    draw_spirit(f.buffer_mut(), band, &params, &subagent_dots(s, cfg));
+    draw_spirit(f.buffer_mut(), band, &params);
+    draw_beads(f.buffer_mut(), inner, band, &params, &subagent_dots(s, cfg));
 
-    let text_area = Rect::new(inner.x, inner.y + band.height, inner.width, inner.height - band.height);
+    let text_w = (inner.width - band.width).saturating_sub(CARD_PAD_X);
+    let text_area = Rect::new(inner.x + band.width, inner.y, text_w, inner.height);
     let (width, now) = (usize::from(text_area.width), SystemTime::now());
     let mut lines = match layout {
         CardLayout::Standard => text_lines(s, cfg, width, now),
@@ -367,10 +369,9 @@ fn pr_label(state: PrState) -> &'static str {
 /// Info lines in priority order (callers cut the tail to their row budget):
 /// name, status badge (+ elapsed / last activity), the first enabled extra
 /// (PR chip, else branch with `~` when guessed, else `PR ?` when the lookup
-/// failed), the one-line summary, then the remaining extras. A full card
-/// keeps four rows: the summary is always the fourth when there is one, and
-/// with no summary the next extra (e.g. the branch the PR took the row from)
-/// takes its place.
+/// failed), the summary on the rows left of [`INFO_ROWS`], then the
+/// remaining extras when it leaves room. With no summary the next extra
+/// (e.g. the branch the PR took the row from) takes its place.
 fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<Line<'static>> {
     let running = running_count(&s.subagents);
     let sub = (running > 0).then(|| format!(" {SUBAGENT_GLYPH}×{running}"));
@@ -383,11 +384,13 @@ fn text_lines(s: &Session, cfg: &Config, width: usize, now: SystemTime) -> Vec<L
     }
     let mut lines = vec![name_line(s, width), Line::from(badge)];
     let mut extras = extra_lines(s, cfg, width);
-    let summary = s.summary.as_ref().filter(|_| cfg.extras.summary).map(|sum| Line::styled(truncate_to_width(sum, width), dim()));
     if !extras.is_empty() {
         lines.push(extras.remove(0));
     }
-    lines.extend(summary);
+    if let Some(sum) = s.summary.as_ref().filter(|_| cfg.extras.summary) {
+        let rows = usize::from(INFO_ROWS) - lines.len();
+        lines.extend(summary_lines(sum, width, rows).into_iter().map(|l| Line::styled(l, dim())));
+    }
     lines.extend(extras);
     lines
 }
@@ -701,9 +704,39 @@ mod tests {
         rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, cfg, selected, 0)))
     }
 
-    /// Text of an info row: border stripped.
+    /// Text of an info row of a card with a `spirit_w` column spirit area:
+    /// border and spirit area stripped.
+    fn info_right_of(row: &str, spirit_w: u16) -> String {
+        row.chars().skip(1 + usize::from(spirit_w)).collect::<String>().trim_end().trim_end_matches('│').trim_end().to_string()
+    }
+
+    /// Text of an info row of a standard card.
     fn info(row: &str) -> String {
-        row.chars().skip(1).collect::<String>().trim_end().trim_end_matches('│').trim_end().to_string()
+        info_right_of(row, SPIRIT_W)
+    }
+
+    /// Columns of the spirit area of `layout`.
+    fn spirit_w(layout: CardLayout) -> u16 {
+        match layout {
+            CardLayout::Standard => SPIRIT_W,
+            CardLayout::Large => LARGE_SPIRIT_W,
+        }
+    }
+
+    /// Cells of a `spirit_w` column spirit area of a card drawn at the origin.
+    fn spirit_cells(spirit_w: u16) -> impl Iterator<Item = (u16, u16)> {
+        (1..=SCENE_ROWS).flat_map(move |y| (1..=spirit_w).map(move |x| (x, y)))
+    }
+
+    /// Cells under the spirit of a card `h` rows tall: the bead area.
+    fn bead_area(spirit_w: u16, h: u16) -> impl Iterator<Item = (u16, u16)> {
+        (1 + SCENE_ROWS..h - 1).flat_map(move |y| (1..=spirit_w).map(move |x| (x, y)))
+    }
+
+    /// The spirit rows of a card, cut to its `spirit_w` column spirit area
+    /// (the text beside them changes with the status).
+    fn spirit_part(rows: &[String], spirit_w: u16) -> Vec<String> {
+        rows[1..=usize::from(SCENE_ROWS)].iter().map(|r| r.chars().skip(1).take(usize::from(spirit_w)).collect()).collect()
     }
 
     #[test]
@@ -724,21 +757,95 @@ mod tests {
     }
 
     #[test]
-    fn card_is_exactly_20x10() {
-        assert_eq!((CARD_W, CARD_H), (20, 10), "user decision: narrowed from 24, one summary row added");
-        assert_eq!((SCENE_ROWS, INFO_ROWS), (4, 4), "inner 18x8: spirit band + 4 text rows");
-        assert_eq!((SCENE_COLS, SCENE_ROWS), max_grid_size());
-        for size in Size::ALL {
+    fn standard_card_has_the_text_right_of_the_spirit() {
+        assert_eq!((CARD_W, CARD_H), (29, 9));
+        let rows = card(&session("my task", Status::Running), &all_extras(), false);
+        let right = |r: &String| r.chars().skip(1 + usize::from(SPIRIT_W)).collect::<String>();
+        assert_eq!(rows.len(), usize::from(CARD_H));
+        assert!(right(&rows[1]).starts_with("my task"), "{rows:?}");
+        assert!(right(&rows[2]).contains("RUN"), "{rows:?}");
+        assert!(right(&rows[4]).contains("fixing the"), "{rows:?}");
+    }
+
+    #[test]
+    fn large_card_is_wide_with_the_text_right_of_the_spirit() {
+        assert_eq!((LARGE_W, LARGE_H), (46, 10));
+        let mut cfg = all_extras();
+        cfg.card_layout = CardLayout::Large;
+        let s = session("my task", Status::Running);
+        let rows = rows(&draw(LARGE_W, LARGE_H, |f| render_card(f, f.area(), &s, &cfg, false, 0)));
+        let right = |r: &String| r.chars().skip(1 + usize::from(LARGE_SPIRIT_W)).collect::<String>();
+        assert!(right(&rows[1]).starts_with("my task"), "{rows:?}");
+        assert!(right(&rows[2]).contains("RUN"), "{rows:?}");
+    }
+
+    #[test]
+    fn text_keeps_a_one_column_padding_from_the_right_border() {
+        for layout in [CardLayout::Standard, CardLayout::Large] {
+            let mut cfg = all_extras();
+            cfg.card_layout = layout;
+            let (w, h) = card_size(layout);
+            let s = session(&"x".repeat(80), Status::Idle);
+            let row = &rows(&draw(w, h, |f| render_wide_card(f, f.area(), &s, &cfg, false, 0)))[1];
+            let cols: Vec<char> = row.chars().collect();
+            assert_eq!(cols[usize::from(w) - 2], ' ', "{layout:?}: {row}");
+            assert_eq!(cols[usize::from(w) - 3], '…', "{layout:?}: {row}");
+        }
+    }
+
+    #[test]
+    fn the_card_is_a_golden_rectangle_on_screen() {
+        // a terminal cell is about twice as tall as wide
+        let ratio = f32::from(CARD_W) / f32::from(CARD_H * 2);
+        assert!((ratio - 1.618).abs() < 0.02, "{CARD_W}x{CARD_H}: {ratio}");
+    }
+
+    #[test]
+    fn the_summary_wraps_over_the_free_rows() {
+        let mut s = session("proj-a", Status::Running);
+        s.summary = Some("fixing the parser and the failing test of the card layout again and again and again".into());
+        let rows = rows(&wide(&s, &Config::default(), CARD_W, false, 0));
+        let info_rows: Vec<String> = rows[1..usize::from(CARD_H) - 1].iter().map(|r| info(r)).collect();
+        assert!(info_rows[3].starts_with("fixing"), "{info_rows:?}");
+        assert!(info_rows[4..].iter().all(|l| !l.trim().is_empty()), "{info_rows:?}");
+        assert_eq!(info_rows.len(), usize::from(INFO_ROWS));
+    }
+
+    #[test]
+    fn spirits_keep_a_free_column_from_the_left_border() {
+        for theme in Theme::ALL {
+            for layout in [CardLayout::Standard, CardLayout::Large] {
+                for status in [Status::Running, Status::NeedsInput, Status::Idle, Status::Done] {
+                    for tick in (0..240).step_by(7) {
+                        let area = Rect::new(1, 1, spirit_w(layout), SCENE_ROWS);
+                        let (size, seed) = (spirit_size(layout), 3);
+                        let params = SpiritParams { theme, status, size, tick, seed, warning: false, stage: Default::default() };
+                        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 6));
+                        draw_spirit(&mut buf, area, &params);
+                        for y in area.y..area.bottom() {
+                            assert_eq!(buf[(1, y)].symbol(), " ", "{theme:?} {layout:?} {status:?} t={tick}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn card_is_exactly_its_golden_size() {
+        assert_eq!((SCENE_ROWS, INFO_ROWS), (4, 7), "inner 27x7: spirit area + 7 text rows");
+        for size in [Size::XS, Size::S] {
             let (w, h) = spirit::grid_size(size);
-            assert!(w <= CARD_W - 2 && h == SCENE_ROWS, "{size:?} fits the band: {w}x{h}");
+            assert!(w <= CARD_W - 2 && h == SCENE_ROWS, "{size:?} fits the card rows: {w}x{h}");
         }
         let s = session("proj-a", Status::Running);
         let rows = card(&s, &all_extras(), true);
-        assert_eq!(rows.len(), 10);
+        let last = usize::from(CARD_H) - 1;
+        assert_eq!(rows.len(), usize::from(CARD_H));
         assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮'), "{rows:?}");
-        assert!(rows[9].starts_with('╰') && rows[9].ends_with('╯'), "{rows:?}");
-        assert!(rows[1..9].iter().all(|r| r.starts_with('│') && r.ends_with('│')), "{rows:?}");
-        // a larger area still gets a 20x10 card (centered across, at the top); nothing else drawn
+        assert!(rows[last].starts_with('╰') && rows[last].ends_with('╯'), "{rows:?}");
+        assert!(rows[1..last].iter().all(|r| r.starts_with('│') && r.ends_with('│')), "{rows:?}");
+        // a larger area still gets a CARD_W x CARD_H card (centered across, at the top); nothing else drawn
         let (w, h) = (40u16, 15u16);
         let buf = draw(w, h, |f| render_card(f, f.area(), &s, &all_extras(), false, 0));
         let x0 = (w - CARD_W) / 2;
@@ -753,20 +860,21 @@ mod tests {
     }
 
     #[test]
-    fn card_contains_spirit_and_four_info_lines() {
+    fn card_contains_spirit_and_info_lines() {
         let s = session("proj-a", Status::Running);
         let rows = rows(&draw(80, 24, |f| render_card(f, Rect::new(0, 0, CARD_W, CARD_H), &s, &Config::default(), false, 0)));
         let text = rows.join("\n");
         let last = CARD_H as usize - 1;
         assert!(rows[0].starts_with('╭') && rows[last].starts_with('╰'), "thin rounded border: {text}");
         let scene_rows: Vec<usize> = (1..last).filter(|&y| rows[y].chars().any(is_braille)).collect();
-        assert!(!scene_rows.is_empty() && scene_rows.iter().all(|&y| y <= SCENE_ROWS as usize), "spirit in the 4-row band: {text}");
-        let info_rows: Vec<String> = (1 + SCENE_ROWS as usize..last).map(|y| info(&rows[y])).collect();
-        assert_eq!(info_rows.len(), 4);
+        assert!(!scene_rows.is_empty() && scene_rows.iter().all(|&y| y <= SCENE_ROWS as usize), "spirit in its 4 rows: {text}");
+        assert!(rows.iter().all(|r| r.chars().skip(1 + usize::from(SPIRIT_W)).all(|c| !is_braille(c))), "spirit left of the text: {text}");
+        let info_rows: Vec<String> = (1..last).map(|y| info(&rows[y])).collect();
+        assert_eq!(info_rows.len(), usize::from(INFO_ROWS));
         assert_eq!(info_rows[0], "proj-a", "{text}");
         assert!(info_rows[1].contains("RUN") && info_rows[1].contains("3h"), "{text}");
         assert_eq!(info_rows[2], "⎇ feat/login", "{text}");
-        assert_eq!(info_rows[3], "fixing the parser", "the one-line summary: {text}");
+        assert_eq!(info_rows[3..5], ["fixing the", "parser"], "the summary wraps: {text}");
         assert!(!text.contains("#42"), "PR off: {text}");
         // nothing outside the card rect
         assert!(rows[last + 1..].iter().all(|r| r.trim().is_empty()));
@@ -774,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn spirit_is_centered_and_paints_no_background() {
+    fn spirit_sits_left_and_paints_no_background() {
         let s = session("proj-a", Status::Idle);
         let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, 0));
         let w = CARD_W;
@@ -782,34 +890,29 @@ mod tests {
             (1..=SCENE_ROWS).flat_map(|y| (1..w - 1).map(move |x| (x, y))).filter(|&(x, y)| buf[(x, y)].symbol().chars().any(is_braille)).map(|(x, _)| x).collect();
         assert!(!lit.is_empty());
         let (lo, hi) = (*lit.iter().min().unwrap(), *lit.iter().max().unwrap());
-        assert!(lo > 1 && hi < w - 2, "spirit inside the band: {lo}..{hi}");
+        assert!(lo > 1 && hi < SPIRIT_W, "spirit inside its area, a free column before the text: {lo}..{hi}");
         assert!(lo <= 3, "body on the left (user decision): {lo}..{hi}");
-        for y in 1..=SCENE_ROWS {
-            for x in 1..w - 1 {
-                assert_eq!(buf[(x, y)].bg, ratatui::style::Color::Reset, "({x},{y})");
-            }
+        for p in spirit_cells(SPIRIT_W) {
+            assert_eq!(buf[p].bg, ratatui::style::Color::Reset, "{p:?}");
         }
     }
 
     #[test]
     fn every_spirit_grid_sits_left_inside_the_band() {
-        // user decision: the body sits on the left so the magic has room on the right
-        let band = Rect::new(1, 1, CARD_W - 2, SCENE_ROWS);
-        for size in [Size::XS, Size::S, Size::M, Size::L] {
-            for magic in Magic::ALL {
-                for tick in [0, 30, 61] {
-                    let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick, seed: 1, warning: false, magic, stage: Default::default(), cols: 0 };
-                    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
-                    let at = draw_spirit(&mut buf, band, &params, &[]);
-                    let (w, h) = spirit::grid_size_for(size, magic);
-                    assert!(at.width <= w && at.height == h, "{size:?} {magic:?}");
-                    assert!(at.x >= band.x && at.right() <= band.right(), "{size:?} {magic:?}: grid inside the band (clipped)");
-                    assert!(at.x <= band.x + SPIRIT_LEFT_PAD, "{size:?} {magic:?}: grid at the left");
-                    for y in 0..CARD_H {
-                        for x in 0..CARD_W {
-                            if !at.contains((x, y).into()) {
-                                assert_eq!(buf[(x, y)].symbol(), " ", "{size:?} {magic:?}: ({x},{y}) outside the spirit rect");
-                            }
+        let band = Rect::new(1, 1, LARGE_SPIRIT_W, SCENE_ROWS);
+        for size in [Size::XS, Size::S] {
+            for tick in [0, 30, 61] {
+                let params = SpiritParams { theme: Theme::Water, status: Status::Running, size, tick, seed: 1, warning: false, stage: Default::default() };
+                let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
+                let at = draw_spirit(&mut buf, band, &params);
+                let (w, h) = spirit::grid_size(size);
+                assert!(at.width <= w && at.height == h, "{size:?} ");
+                assert!(at.x >= band.x && at.right() <= band.right(), "{size:?} grid inside the band (clipped)");
+                assert!(at.x <= band.x + SPIRIT_LEFT_PAD, "{size:?} grid at the left");
+                for y in 0..CARD_H {
+                    for x in 0..CARD_W {
+                        if !at.contains((x, y).into()) {
+                            assert_eq!(buf[(x, y)].symbol(), " ", "{size:?} ({x},{y}) outside the spirit rect");
                         }
                     }
                 }
@@ -817,65 +920,62 @@ mod tests {
         }
         // a band too narrow for the pad still draws inside it
         let narrow = Rect::new(1, 1, 5, SCENE_ROWS);
-        let params = SpiritParams { theme: Theme::Fire, status: Status::Running, size: Size::S, tick: 30, seed: 1, warning: false, magic: Magic::Big, stage: Default::default(), cols: 0 };
+        let params = SpiritParams { theme: Theme::Fire, status: Status::Running, size: Size::S, tick: 30, seed: 1, warning: false, stage: Default::default() };
         let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
-        let at = draw_spirit(&mut buf, narrow, &params, &[]);
+        let at = draw_spirit(&mut buf, narrow, &params);
         assert!(at.x >= narrow.x && at.right() <= narrow.right());
     }
 
     #[test]
-    fn spirit_body_sits_left_in_the_inner_area() {
-        let band = Rect::new(1, 1, CARD_W - 2, SCENE_ROWS);
+    fn spirit_body_sits_left_in_the_spirit_area() {
+        let band = Rect::new(1, 1, SPIRIT_W, SCENE_ROWS);
         for theme in Theme::ALL {
             for status in [Status::Idle, Status::Running] {
-                for magic in Magic::ALL {
-                    let size = spirit_size(CardLayout::Standard);
-                    let params = SpiritParams { theme, status, size, tick: 3, seed: 1, warning: false, magic, stage: Default::default(), cols: 0 };
-                    let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
-                    draw_spirit(&mut buf, band, &params, &[]);
-                    let lo = (0..CARD_W)
-                        .find(|&x| (0..CARD_H).any(|y| buf[(x, y)].symbol().chars().any(is_braille)))
-                        .expect("painted");
-                    // about one free column between the border and the body
-                    assert!((band.x + 1..=band.x + 2).contains(&lo), "{theme:?} {status:?} {magic:?}: body left edge at {lo}");
-                    let body_c = band.x as f32 + SPIRIT_LEFT_PAD as f32 + spirit::body_center_x(size);
-                    assert!(body_c < band.x as f32 + band.width as f32 / 2.0 - 3.0, "body left of centre: {body_c}");
-                }
+                let size = spirit_size(CardLayout::Standard);
+                let params = SpiritParams { theme, status, size, tick: 3, seed: 1, warning: false, stage: Default::default() };
+                let mut buf = Buffer::empty(Rect::new(0, 0, CARD_W, CARD_H));
+                let at = draw_spirit(&mut buf, band, &params);
+                assert_eq!((at.x, at.width), (band.x + SPIRIT_LEFT_PAD, spirit::grid_size(size).0), "{theme:?} {status:?}: at the left pad, not clipped");
+                let lo = (0..CARD_W)
+                    .find(|&x| (0..CARD_H).any(|y| buf[(x, y)].symbol().chars().any(is_braille)))
+                    .expect("painted");
+                // first or second column of the grid: the round body starts in
+                // the second, decorations and bursts reach the first
+                assert!((band.x + 1..=band.x + 2).contains(&lo), "{theme:?} {status:?} left edge at {lo}");
+                let body_c = band.x as f32 + SPIRIT_LEFT_PAD as f32 + spirit::body_center_x(size);
+                assert!(body_c < band.x as f32 + band.width as f32 / 2.0, "body left of centre: {body_c}");
             }
         }
     }
 
-    /// Columns of the spirit band that hold a braille glyph at `tick`.
+    /// Columns of the spirit area that hold a braille glyph at `tick`.
     fn lit_cols(s: &Session, tick: u64) -> std::collections::BTreeSet<u16> {
         let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, &Config::default(), false, tick));
-        (1..=SCENE_ROWS)
-            .flat_map(|y| (1..CARD_W - 1).map(move |x| (x, y)))
-            .filter(|&p| buf[p].symbol().chars().any(is_braille))
-            .map(|(x, _)| x)
-            .collect()
+        spirit_cells(SPIRIT_W).filter(|&p| buf[p].symbol().chars().any(is_braille)).map(|(x, _)| x).collect()
     }
 
     #[test]
-    fn context_usage_scales_the_magic_not_the_body() {
+    fn context_usage_does_not_move_or_grow_the_body() {
         let with = |st: Status, pct: Option<f32>| -> Session {
             let mut s = session("proj-a", st);
             s.ctx_percent = pct;
             s
         };
-        // Idle casts nothing: the spirit covers the same columns at every ctx level
+        // Idle: the spirit covers the same columns at every ctx level
         // (the ctx stage changes how it moves, not where it sits)
         let idle: Vec<_> = [None, Some(10.0), Some(50.0), Some(80.0)].into_iter().map(|p| lit_cols(&with(Status::Idle, p), 0)).collect();
         assert!(idle.windows(2).all(|w| w[0] == w[1]), "body unchanged: {idle:?}");
-        // Running: the magic reaches farther as ctx grows; unknown ctx = normal magic
+        // Running: it reaches just as far at every ctx level
         let reach = |pct: Option<f32>| -> u16 { (0..120).filter_map(|t| lit_cols(&with(Status::Running, pct), t).last().copied()).max().unwrap() };
         let (none, low, mid, high) = (reach(None), reach(Some(10.0)), reach(Some(30.0)), reach(Some(80.0)));
-        assert_eq!(none, mid, "unknown ctx casts normal magic");
-        assert!(low < mid && mid < high, "magic grows with ctx: {low} {mid} {high}");
-        // every level stays inside the inner area
+        assert!(none == low && low == mid && mid == high, "same reach: {none} {low} {mid} {high}");
+        // every level stays inside the spirit area: nothing lit on the text columns
         for pct in [10.0, 30.0, 50.0, 80.0, 95.0] {
             for t in 0..120 {
-                let cols = lit_cols(&with(Status::Running, Some(pct)), t);
-                assert!(cols.iter().all(|&x| (1..CARD_W - 1).contains(&x)), "{pct} {t}: {cols:?}");
+                let s = with(Status::Running, Some(pct));
+                let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, t));
+                let mut lit = (0..CARD_H).flat_map(|y| (0..CARD_W).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille));
+                assert!(lit.all(|(x, y)| (1..SPIRIT_W).contains(&x) && (1..=SCENE_ROWS).contains(&y)), "{pct} {t}");
             }
         }
     }
@@ -886,10 +986,10 @@ mod tests {
             let mut s = session("proj-a", Status::Idle);
             s.ctx_percent = Some(pct);
             let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, tick));
-            (1..=SCENE_ROWS).flat_map(|y| (1..CARD_W - 1).map(move |x| (x, y))).map(|p| buf[p].fg).collect()
+            spirit_cells(SPIRIT_W).map(|p| buf[p].fg).collect()
         };
         let half = spirit::WARN_HALF_PERIOD;
-        // same size step (L), ticks in the on and off phases of the flicker
+        // same ctx stage (struggling), ticks in the on and off phases of the flicker
         assert_ne!(fgs(95.0, 0), fgs(80.0, 0), "warning tints the on phase");
         assert_eq!(fgs(95.0, half), fgs(80.0, half), "off phase looks normal");
         assert_ne!(fgs(95.0, 0), fgs(95.0, half), "flicker differs between ticks");
@@ -910,7 +1010,7 @@ mod tests {
     fn status_changes_spirit_cues() {
         let band = |st: Status, tick: u64| -> Vec<String> {
             let s = session("proj-a", st);
-            rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, tick)))[1..=SCENE_ROWS as usize].to_vec()
+            spirit_part(&rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, tick))), SPIRIT_W)
         };
         for tick in [0, 7, 30] {
             assert_ne!(band(Status::Running, tick), band(Status::Idle, tick), "tick {tick}");
@@ -923,10 +1023,10 @@ mod tests {
     #[test]
     fn card_spirit_uses_the_card_theme_and_animates() {
         let s = session("proj-a", Status::Running);
-        let scene = |cfg: &Config, tick: u64| -> Vec<String> { rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, cfg, false, tick)))[1..=SCENE_ROWS as usize].to_vec() };
+        let scene = |cfg: &Config, tick: u64| -> Vec<String> { spirit_part(&rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, cfg, false, tick))), SPIRIT_W) };
         let fg = |cfg: &Config| -> Vec<ratatui::style::Color> {
             let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, cfg, false, 3));
-            (1..=SCENE_ROWS).flat_map(|y| (1..CARD_W - 1).map(move |x| (x, y))).map(|p| buf[p].fg).collect()
+            spirit_cells(SPIRIT_W).map(|p| buf[p].fg).collect()
         };
         let mut water = Config::default();
         water.theme = Theme::Water;
@@ -943,7 +1043,7 @@ mod tests {
         };
         let fg = |s: &Session, cfg: &Config| -> Vec<Color> {
             let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, cfg, false, 3));
-            (1..=SCENE_ROWS).flat_map(|y| (1..CARD_W - 1).map(move |x| (x, y))).map(|p| buf[p].fg).collect()
+            spirit_cells(SPIRIT_W).map(|p| buf[p].fg).collect()
         };
         let cfg = Config::default();
         let (opus, haiku) = (with_model(Some("claude-opus-4-5")), with_model(Some("claude-haiku-5-5")));
@@ -968,8 +1068,8 @@ mod tests {
             let mut s = session("proj-a", Status::Done);
             s.id = id.into();
             assert_eq!(seed_for(&s), seed_for(&s.clone()), "stable");
-            // DONE bounce: the spirit band changes over a bounce period
-            let band = |t: u64| -> Vec<String> { rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, t)))[1..=SCENE_ROWS as usize].to_vec() };
+            // DONE bounce: the spirit area changes over a bounce period
+            let band = |t: u64| -> Vec<String> { spirit_part(&rows(&draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, t))), SPIRIT_W) };
             let frames: std::collections::BTreeSet<Vec<String>> = (0..30).map(band).collect();
             assert!(frames.len() > 3, "{id} (seed {}): {} distinct frames", seed_for(&s), frames.len());
         }
@@ -980,21 +1080,21 @@ mod tests {
     #[test]
     fn info_rows_keep_pr_over_branch_then_the_summary_and_hide_disabled_extras() {
         let mut s = session("proj-a", Status::Running);
+        // the info rows in use
         let four = |s: &Session, cfg: &Config| -> Vec<String> {
-            let first = 1 + SCENE_ROWS as usize;
-            card(s, cfg, false)[first..first + 4].iter().map(|r| info(r)).collect()
+            card(s, cfg, false)[1..=usize::from(INFO_ROWS)].iter().map(|r| info(r)).filter(|r| !r.is_empty()).collect()
         };
-        assert_eq!(four(&s, &all_extras()), vec!["proj-a", " RUN  3h ·2m ago", "#42 approved", "fixing the parser"], "PR first, then the summary");
+        assert_eq!(four(&s, &all_extras()), vec!["proj-a", " RUN  3h ·2m ago", "#42 approved", "fixing the", "parser", "⎇ feat/login"], "PR first, then the summary, then the other extras");
         let mut cfg = all_extras();
         cfg.extras.pr = false;
-        assert_eq!(four(&s, &cfg)[2..], ["⎇ feat/login", "fixing the parser"], "then the branch");
+        assert_eq!(four(&s, &cfg)[2..], ["⎇ feat/login", "fixing the", "parser"], "then the branch");
         s.branch = None;
-        assert_eq!(four(&s, &cfg)[2..], ["fixing the parser", ""], "neither: the summary moves up");
+        assert_eq!(four(&s, &cfg)[2..], ["fixing the", "parser"], "neither: the summary moves up");
         s.branch = Some("feat/login".into());
         // no summary: the next best text (the branch the PR took the row from)
         s.summary = None;
         assert_eq!(four(&s, &all_extras())[2..], ["#42 approved", "⎇ feat/login"]);
-        assert_eq!(four(&s, &cfg)[2..], ["⎇ feat/login", ""], "else blank");
+        assert_eq!(four(&s, &cfg)[2..], ["⎇ feat/login"], "else blank");
         s.summary = Some("fixing the parser".into());
         let mut no_sum = all_extras();
         no_sum.extras.summary = false;
@@ -1030,7 +1130,8 @@ mod tests {
         s.pr = None;
         s.pr_unavailable = true;
         let with_branch = card(&s, &all_extras(), false).join("\n");
-        assert!(with_branch.contains("feat/login") && !with_branch.contains("PR ?"), "a known branch beats an unknown PR: {with_branch}");
+        let at = |needle: &str| with_branch.find(needle).expect(&with_branch);
+        assert!(at("feat/login") < at("fixing") && at("fixing") < at("PR ?"), "a known branch beats an unknown PR: {with_branch}");
         s.branch = None;
         let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &all_extras(), false, 0));
         let text = rows(&buf);
@@ -1059,19 +1160,20 @@ mod tests {
     }
 
     #[test]
-    fn summary_row_is_cut_to_the_inner_width_cjk_aware() {
+    fn summary_row_is_cut_to_the_text_width_cjk_aware() {
         let mut s = session("proj-a", Status::Running);
-        s.summary = Some("한글 요약이 아주 길어서 카드 안에서 잘려야 합니다".into());
+        s.summary = Some("한글 요약이 아주 길어서 카드 안에서 잘려야 합니다 ".repeat(4));
         let rows = card(&s, &Config::default(), false);
-        let row = &rows[usize::from(SCENE_ROWS) + 4];
+        assert!(info(&rows[4]).starts_with("한글 요약이"), "{rows:?}");
+        let row = &rows[usize::from(INFO_ROWS)];
         assert!(row.starts_with('│') && row.ends_with('│'), "border intact: {row:?}");
         assert_eq!(row.width(), usize::from(CARD_W), "{row:?}");
         let text = info(row);
-        assert!(text.starts_with("한글 요약이") && text.ends_with('…'), "{text:?}");
-        assert!(text.width() <= usize::from(CARD_W - 2), "{text:?}");
+        assert!(text.ends_with('…'), "{text:?}");
+        assert!(text.width() <= usize::from(INFO_W), "{text:?}");
         // a summary that fits is shown whole
         s.summary = Some("짧은 요약".into());
-        assert_eq!(info(&card(&s, &Config::default(), false)[usize::from(SCENE_ROWS) + 4]), "짧은 요약");
+        assert_eq!(info(&card(&s, &Config::default(), false)[4]), "짧은 요약");
     }
 
     #[test]
@@ -1088,7 +1190,7 @@ mod tests {
         let s = session("프로젝트-아주-아주-아주-아주-아주-긴-이름-입니다-정말로-정말", Status::Running);
         for w in CARD_W..CARD_W + 6 {
             let rows = rows(&draw(w, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, 0)));
-            let row = rows[1 + SCENE_ROWS as usize].trim();
+            let row = rows[1].trim();
             assert!(row.contains("프로젝트") && row.contains('…'), "{row}");
             assert!(row.starts_with('│') && row.ends_with('│'), "border intact: {row:?}");
             assert_eq!(row.width(), usize::from(CARD_W), "{row:?}");
@@ -1104,7 +1206,7 @@ mod tests {
             let corner = &buf[(0, 0)];
             assert_eq!((corner.symbol(), corner.fg), ("╭", style::SELECTED), "{st:?}");
             assert!(corner.modifier.contains(Modifier::BOLD), "{st:?}");
-            assert_eq!(buf[(CARD_W - 1, 5)].fg, style::SELECTED, "{st:?}: right border");
+            assert_eq!(buf[(CARD_W - 1, CARD_H / 2)].fg, style::SELECTED, "{st:?}: right border");
             let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, 0));
             assert_ne!(buf[(0, 0)].fg, style::SELECTED, "{st:?}: unselected border differs");
             assert!(!buf[(0, 0)].modifier.contains(Modifier::BOLD), "{st:?}");
@@ -1132,7 +1234,7 @@ mod tests {
             let unread = Session { unread_notification: true, ..plain.clone() };
             let at = |s: &Session, t: u64| draw(CARD_W, CARD_H, |f| render_card(f, f.area(), s, &Config::default(), false, t));
             let lit = at(&unread, on);
-            for (x, y, sym) in [(0, 0, "┏"), (CARD_W - 1, 5, "┃"), (5, CARD_H - 1, "━")] {
+            for (x, y, sym) in [(0, 0, "┏"), (CARD_W - 1, CARD_H / 2, "┃"), (5, CARD_H - 1, "━")] {
                 let c = &lit[(x, y)];
                 assert_eq!((c.symbol(), c.fg), (sym, style::NOTIFY_BLUE), "{st:?} on-phase at ({x},{y})");
                 assert!(c.modifier.contains(Modifier::BOLD) && !c.modifier.contains(Modifier::DIM), "{st:?}");
@@ -1140,7 +1242,7 @@ mod tests {
             // off phase: exactly the normal border (thin, status colour, Done dimmed)
             let dark = at(&unread, off);
             let normal = at(&plain, off);
-            for (x, y) in [(0, 0), (CARD_W - 1, 5), (5, CARD_H - 1)] {
+            for (x, y) in [(0, 0), (CARD_W - 1, CARD_H / 2), (5, CARD_H - 1)] {
                 let (d, n) = (&dark[(x, y)], &normal[(x, y)]);
                 assert_eq!((d.symbol(), d.fg, d.modifier), (n.symbol(), n.fg, n.modifier), "{st:?} off-phase");
             }
@@ -1191,8 +1293,7 @@ mod tests {
         let s = session("proj-a", Status::Done);
         let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &Config::default(), false, 0));
         assert!(buf[(0, 0)].modifier.contains(Modifier::DIM));
-        let y = 1 + SCENE_ROWS;
-        assert!(buf[(2, y)].modifier.contains(Modifier::DIM), "name row");
+        assert!(buf[(1 + SPIRIT_W, 1)].modifier.contains(Modifier::DIM), "name row");
     }
 
     #[test]
@@ -1252,7 +1353,7 @@ mod tests {
     #[test]
     fn wide_card_stretches_to_the_area_width_body_left_text_wider() {
         let s = session("proj-a", Status::Running);
-        for w in [CARD_W, CARD_W + 1, 26, 30, 34] {
+        for w in [CARD_W, CARD_W + 1, CARD_W + 4, CARD_W + 10] {
             let buf = wide(&s, &all_extras(), w, false, 0);
             let rows = rows(&buf);
             let last = usize::from(CARD_H) - 1;
@@ -1261,52 +1362,53 @@ mod tests {
             assert!(rows[1..last].iter().all(|r| r.starts_with('│') && r.ends_with('│')), "w={w}: {rows:?}");
             assert_eq!(rows[0].width(), usize::from(w), "card width == area width");
             assert!(rows[last + 1..].iter().all(|r| r.trim().is_empty()), "exactly CARD_H rows tall");
-            // spirit in the band, body on the left
+            // the spirit stays in its area, body on the left
             let lit: Vec<u16> = (1..=SCENE_ROWS)
                 .flat_map(|y| (1..w - 1).map(move |x| (x, y)))
                 .filter(|&p| buf[p].symbol().chars().any(is_braille))
                 .map(|(x, _)| x)
                 .collect();
-            assert!(!lit.is_empty() && *lit.iter().min().unwrap() <= 3, "w={w}: {lit:?}");
-            let info_rows: Vec<String> = (1 + SCENE_ROWS as usize..last).map(|y| info(&rows[y])).collect();
-            assert_eq!(info_rows, vec!["proj-a", " RUN  3h ·2m ago", "#42 approved", "fixing the parser"], "w={w}");
+            assert!(!lit.is_empty() && *lit.iter().min().unwrap() <= 3 && *lit.iter().max().unwrap() < SPIRIT_W, "w={w}: {lit:?}");
+            let info_rows: Vec<String> = (1..last).map(|y| info(&rows[y])).collect();
+            assert_eq!(info_rows[..3], ["proj-a", " RUN  3h ·2m ago", "#42 approved"], "w={w}");
+            assert!(info_rows[3..].join(" ").contains("fixing the parser"), "w={w}: {info_rows:?}");
         }
-        // text truncation follows the wider inner width
-        let long = session("proj-abcdefghijklmnopqrstu", Status::Running); // 25 columns
-        let name_row = |w: u16| info(&rows(&wide(&long, &Config::default(), w, false, 0))[1 + SCENE_ROWS as usize]);
-        assert!(name_row(CARD_W).ends_with('…'), "{}", name_row(CARD_W));
-        assert_eq!(name_row(30), "proj-abcdefghijklmnopqrstu", "inner 28 holds the whole name");
-        assert!(name_row(26).ends_with('…') && name_row(26).width() == 24, "{}", name_row(26));
+        // text truncation follows the wider text area
+        let long = session("proj-abcdefghijklmnopqrstu", Status::Running); // 26 columns
+        let name_row = |w: u16| info(&rows(&wide(&long, &Config::default(), w, false, 0))[1]);
+        assert!(name_row(CARD_W).ends_with('…') && name_row(CARD_W).width() == usize::from(INFO_W), "{}", name_row(CARD_W));
+        assert_eq!(name_row(CARD_W + 10), "proj-abcdefghijklmnopqrstu", "26 text columns hold the whole name");
+        assert!(name_row(CARD_W + 9).ends_with('…') && name_row(CARD_W + 9).width() == 25, "{}", name_row(CARD_W + 9));
     }
 
     #[test]
     fn wide_card_keeps_selection_unread_blink_and_done_dim() {
         let (on, off) = blink_ticks();
-        let w = 30;
+        let w = CARD_W + 4;
         let s = session("proj-a", Status::Running);
         let buf = wide(&s, &Config::default(), w, true, 0);
         assert_eq!((buf[(0, 0)].symbol(), buf[(0, 0)].fg), ("╭", style::SELECTED));
-        assert_eq!(buf[(w - 1, 5)].fg, style::SELECTED, "right border at the stretched edge");
+        assert_eq!(buf[(w - 1, CARD_H / 2)].fg, style::SELECTED, "right border at the stretched edge");
         let unread = Session { unread_notification: true, ..s.clone() };
         let lit = wide(&unread, &Config::default(), w, false, on);
         assert_eq!((lit[(w - 1, 0)].symbol(), lit[(w - 1, 0)].fg), ("┓", style::NOTIFY_BLUE));
         assert_eq!(wide(&unread, &Config::default(), w, false, off)[(w - 1, 0)].symbol(), "╮");
         let done = session("proj-a", Status::Done);
         let buf = wide(&done, &Config::default(), w, false, 0);
-        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM) && buf[(2, 1 + SCENE_ROWS)].modifier.contains(Modifier::DIM));
+        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM) && buf[(1 + SPIRIT_W, 1)].modifier.contains(Modifier::DIM));
     }
 
     #[test]
     fn wide_card_falls_back_to_compact_and_never_panics() {
         let s = Session { unread_notification: true, ..session("프로젝트-아주-긴-이름", Status::Idle) };
-        for (w, h) in [(CARD_W - 1, CARD_H), (CARD_W, CARD_H - 1), (34, 8)] {
+        for (w, h) in [(CARD_W - 1, CARD_H), (CARD_W, CARD_H - 1), (CARD_W - 2, CARD_H + 2)] {
             let rows = rows(&draw(w, h, |f| render_wide_card(f, f.area(), &s, &Config::default(), false, 0)));
             assert!(rows[0].contains("프로젝") && !rows.join("").contains('╭'), "{w}x{h}: {rows:?}");
         }
-        for (w, h) in [(0, 0), (1, 1), (5, 2), (0, 30), (80, 0), (21, 9), (25, 9), (400, 9)] {
+        for (w, h) in [(0, 0), (1, 1), (5, 2), (0, 30), (80, 0), (CARD_W + 1, CARD_H), (CARD_W + 5, CARD_H), (400, CARD_H)] {
             for selected in [false, true] {
                 draw(w, h, |f| render_wide_card(f, f.area(), &s, &Config::default(), selected, 0));
-                draw(w, h, |f| render_wide_card(f, Rect::new(u16::MAX - 5, u16::MAX - 5, 30, CARD_H), &s, &Config::default(), selected, 0));
+                draw(w, h, |f| render_wide_card(f, Rect::new(u16::MAX - 5, u16::MAX - 5, CARD_W, CARD_H), &s, &Config::default(), selected, 0));
             }
         }
     }
@@ -1340,21 +1442,24 @@ mod tests {
         rows(&draw(LARGE_W, LARGE_H, |f| render_card(f, f.area(), s, cfg, false, 0)))
     }
 
-    /// The text rows of a large card (inside the border, below the spirit band).
+    /// Text columns of a large card that is not stretched.
+    const LARGE_INFO_W: u16 = LARGE_W - 2 - LARGE_SPIRIT_W - CARD_PAD_X;
+
+    /// The text rows of a large card (inside the border, right of the spirit area).
     fn large_info(s: &Session, cfg: &Config) -> Vec<String> {
         let rows = large_rows(s, cfg);
-        rows[1 + usize::from(LARGE_SCENE_ROWS)..usize::from(LARGE_H) - 1].iter().map(|r| info(r)).collect()
+        rows[1..usize::from(LARGE_H) - 1].iter().map(|r| info_right_of(r, LARGE_SPIRIT_W)).collect()
     }
 
     #[test]
     fn layouts_have_exact_card_sizes() {
-        assert_eq!(card_size(CardLayout::Standard), (20, 10));
-        assert_eq!(card_size(CardLayout::Large), (32, 14), "about 2.3:1, as wide as the preview's side list");
-        assert_eq!((LARGE_W, LARGE_H, LARGE_SCENE_ROWS), (32, 14, 4));
-        assert_eq!(spirit::grid_size(Size::S).1, LARGE_SCENE_ROWS, "the S spirit fills the large band");
-        assert_eq!(spirit::grid_size(Size::XS).1, SCENE_ROWS, "the XS spirit fills the standard band");
+        assert_eq!(card_size(CardLayout::Standard), (29, 9));
+        assert_eq!(card_size(CardLayout::Large), (46, 10), "as wide as the preview's side list");
+        assert_eq!((LARGE_W, LARGE_H, SCENE_ROWS), (46, 10, 4));
+        assert_eq!(spirit::grid_size(Size::S).1, SCENE_ROWS, "the S spirit is SCENE_ROWS tall");
+        assert_eq!(spirit::grid_size(Size::XS).1, SCENE_ROWS, "the XS spirit is SCENE_ROWS tall");
         let s = opus("proj-a", Status::Running);
-        for (layout, (w, h)) in [(CardLayout::Standard, (20u16, 10u16)), (CardLayout::Large, (32, 14))] {
+        for (layout, (w, h)) in [(CardLayout::Standard, (CARD_W, CARD_H)), (CardLayout::Large, (LARGE_W, LARGE_H))] {
             let cfg = Config { card_layout: layout, ..all_extras() };
             let rows = rows(&draw(w, h, |f| render_card(f, f.area(), &s, &cfg, true, 0)));
             let last = usize::from(h) - 1;
@@ -1381,8 +1486,9 @@ mod tests {
         }
     }
 
-    /// The spirit band of a card drawn into `buf` at (x0, y0) matches the
-    /// spirit of `size` rendered for the session, cell for cell.
+    /// The spirit grid drawn into `buf` with its top left inner cell at
+    /// (x0, y0) matches the spirit of `size` rendered for the session, cell
+    /// for cell.
     fn band_shows(buf: &Buffer, x0: u16, y0: u16, cols: u16, s: &Session, cfg: &Config, size: Size, tick: u64) -> bool {
         let p = SpiritParams {
             theme: theme_for(s, cfg),
@@ -1391,15 +1497,13 @@ mod tests {
             tick,
             seed: seed_for(s),
             warning: spirit::warning(s.ctx_percent),
-            magic: spirit::magic_for(s.ctx_percent),
             stage: spirit::stage_for(s.ctx_percent),
-            cols,
         };
         let g = spirit::render(&p);
         (0..g.rows).all(|r| {
             (0..g.cols.min(cols)).all(|c| {
                 let want = g.cells[usize::from(r) * usize::from(g.cols) + usize::from(c)].ch;
-                buf[(x0 + 1 + SPIRIT_LEFT_PAD + c, y0 + 1 + r)].symbol() == want.to_string()
+                buf[(x0 + c, y0 + r)].symbol() == want.to_string()
             })
         })
     }
@@ -1417,10 +1521,11 @@ mod tests {
                         let cfg = Config { card_layout: layout, ..all_extras() };
                         let w = w + stretch;
                         let buf = draw(w, h, |f| render_wide_card(f, f.area(), &s, &cfg, false, tick));
-                        let cols = w - 2 - SPIRIT_LEFT_PAD;
+                        // where this layout draws its spirit grid, inside the border
+                        let (x0, cols) = (1 + SPIRIT_LEFT_PAD, spirit_w(layout) - SPIRIT_LEFT_PAD);
                         let other = if layout == CardLayout::Standard { Size::S } else { Size::XS };
-                        assert!(band_shows(&buf, 0, 0, cols, &s, &cfg, spirit_size(layout), tick), "{layout:?} +{stretch} {status:?} {pct:?} {tick}");
-                        assert!(!band_shows(&buf, 0, 0, cols, &s, &cfg, other, tick), "{layout:?} {status:?}: not the {other:?} spirit");
+                        assert!(cols >= spirit::grid_size(spirit_size(layout)).0 && band_shows(&buf, x0, 1, cols, &s, &cfg, spirit_size(layout), tick), "{layout:?} +{stretch} {status:?} {pct:?} {tick}");
+                        assert!(!band_shows(&buf, x0, 1, cols, &s, &cfg, other, tick), "{layout:?} {status:?}: not the {other:?} spirit");
                     }
                 }
             }
@@ -1428,10 +1533,10 @@ mod tests {
     }
 
     #[test]
-    fn standard_cards_keep_the_small_sprite_and_its_magic_inside() {
+    fn standard_cards_keep_the_small_sprite_inside_its_area() {
         // centred standard cards and the stretched ones of the preview column
         let cfg = all_extras();
-        for (cw, pct) in [(CARD_W, 80.0), (CARD_W, 30.0), (CARD_W, 10.0), (26, 80.0), (34, 60.0), (40, 30.0)] {
+        for (cw, pct) in [(CARD_W, 80.0), (CARD_W, 30.0), (CARD_W, 10.0), (CARD_W + 2, 80.0), (CARD_W + 4, 60.0), (CARD_W + 10, 30.0)] {
             for theme in Theme::ALL {
                 let cfg = Config { theme, ..cfg.clone() };
                 let s = Session { ctx_percent: Some(pct), ..session("proj-a", Status::Running) };
@@ -1447,9 +1552,9 @@ mod tests {
                         }
                         let lit: Vec<(u16, u16)> = (0..CARD_H + 5).flat_map(|y| (0..cw + 8).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).collect();
                         assert!(!lit.is_empty(), "w={cw} t={t}");
-                        // the card's left and right border columns
-                        let (l, r) = if stretch { (3, 3 + cw - 1) } else { (3 + (cw - CARD_W) / 2, 3 + (cw - CARD_W) / 2 + CARD_W - 1) };
-                        assert!(lit.iter().all(|&(x, y)| (3..=2 + SCENE_ROWS).contains(&y) && (l + 1..r).contains(&x)), "{theme:?} w={cw} t={t}: spirit and magic in the band: {lit:?}");
+                        // the card's left border column
+                        let l = if stretch { 3 } else { 3 + (cw - CARD_W) / 2 };
+                        assert!(lit.iter().all(|&(x, y)| (3..=2 + SCENE_ROWS).contains(&y) && (l + 1..=l + SPIRIT_W).contains(&x)), "{theme:?} w={cw} t={t}: spirit in its area: {lit:?}");
                         assert!(lit.iter().map(|p| p.0).min().unwrap() <= l + 4, "w={cw}: body on the left");
                     }
                 }
@@ -1462,7 +1567,7 @@ mod tests {
     }
 
     #[test]
-    fn large_card_spirit_is_s_in_a_four_row_band_body_left() {
+    fn large_card_spirit_is_s_in_the_top_left_body_left() {
         for theme in Theme::ALL {
             let mut cfg = large_cfg();
             cfg.theme = theme;
@@ -1472,7 +1577,7 @@ mod tests {
                     let buf = draw(LARGE_W, LARGE_H, |f| render_card(f, f.area(), &s, &cfg, false, tick));
                     let lit: Vec<(u16, u16)> = (0..LARGE_H).flat_map(|y| (0..LARGE_W).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).collect();
                     assert!(!lit.is_empty(), "{theme:?} {status:?} {tick}");
-                    assert!(lit.iter().all(|&(x, y)| (1..=LARGE_SCENE_ROWS).contains(&y) && (1..LARGE_W - 1).contains(&x)), "{theme:?} {status:?} {tick}: spirit in the band: {lit:?}");
+                    assert!(lit.iter().all(|&(x, y)| (1..=SCENE_ROWS).contains(&y) && (1..=LARGE_SPIRIT_W).contains(&x)), "{theme:?} {status:?} {tick}: spirit in its area: {lit:?}");
                     let lo = lit.iter().map(|p| p.0).min().unwrap();
                     assert!(lo <= 3, "{theme:?} {status:?}: body on the left ({lo})");
                     for (x, y) in lit {
@@ -1481,29 +1586,29 @@ mod tests {
                 }
             }
         }
-        // the magic grows with ctx in the area right of the body (cells
-        // painted from column 9 on, summed over a few casts)
+        // the ctx stage livens the spirit: its particles paint more cells
+        // right of the body (from column 9 on, summed over a few bursts)
         let painted = |pct: f32| -> usize {
             let s = Session { ctx_percent: Some(pct), ..session("proj-a", Status::Running) };
             (0..120)
                 .map(|t| {
                     let buf = draw(LARGE_W, LARGE_H, |f| render_card(f, f.area(), &s, &large_cfg(), false, t));
-                    (1..=LARGE_SCENE_ROWS).flat_map(|y| (9..LARGE_W - 1).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).count()
+                    spirit_cells(LARGE_SPIRIT_W).filter(|&p| p.0 >= 9 && buf[p].symbol().chars().any(is_braille)).count()
                 })
                 .sum()
         };
         let (low, mid, high) = (painted(10.0), painted(30.0), painted(80.0));
-        assert!(low < mid && mid < high, "fire breath grows: {low} {mid} {high}");
+        assert!(low < mid && mid < high, "particles grow with the stage: {low} {mid} {high}");
     }
 
     #[test]
     fn large_card_text_rows_name_badge_model_branch_pr_summary() {
         let s = opus("proj-a", Status::Running);
         let rows = large_info(&s, &large_cfg());
-        assert_eq!(rows.len(), usize::from(LARGE_H - 2 - LARGE_SCENE_ROWS));
+        assert_eq!(rows.len(), usize::from(LARGE_H - 2));
         assert_eq!(rows[0], "proj-a");
         assert!(rows[1].starts_with(" RUN  3h ·2m ago") && rows[1].ends_with("opus"), "model word on the right: {:?}", rows[1]);
-        assert_eq!(rows[1].width(), usize::from(LARGE_W - 2), "right-aligned to the inner edge: {:?}", rows[1]);
+        assert_eq!(rows[1].width(), usize::from(LARGE_INFO_W), "right-aligned to the inner edge: {:?}", rows[1]);
         assert_eq!(rows[2..6], ["⎇ feat/login", "#42 approved", "fixing the parser", ""]);
         assert!(rows[6..].iter().all(String::is_empty), "the rest is blank: {rows:?}");
         // PR off: the summary moves up; no model: no word
@@ -1541,7 +1646,7 @@ mod tests {
         let (l1, l2, l3) = (&info[3], &info[4], &info[5]);
         assert!(l1.starts_with("한글 요약이") && !l1.ends_with('…') && !l2.ends_with('…'), "{l1:?} {l2:?}");
         assert!(l3.ends_with('…') && !l3.is_empty(), "{l3:?}");
-        assert!([l1, l2, l3].iter().all(|l| l.width() <= 30), "{info:?}");
+        assert!([l1, l2, l3].iter().all(|l| l.width() <= usize::from(LARGE_INFO_W)), "{info:?}");
         assert!(info[6..].iter().all(String::is_empty), "three lines at most, the rest blank: {info:?}");
         // words are not split when a space is near the end of a line
         s.summary = Some("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu".into());
@@ -1570,21 +1675,21 @@ mod tests {
         assert_eq!(at(&unread, false, off)[(0, 0)].symbol(), "╭");
         let done = session("proj-a", Status::Done);
         let buf = at(&done, false, 0);
-        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM) && buf[(2, 1 + LARGE_SCENE_ROWS)].modifier.contains(Modifier::DIM));
+        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM) && buf[(1 + LARGE_SPIRIT_W, 1)].modifier.contains(Modifier::DIM));
     }
 
     #[test]
     fn large_wide_card_fills_the_side_list_and_never_panics() {
         let s = opus("proj-abcdefghijklmnopqrstuvwxyz", Status::Idle);
         let cfg = large_cfg();
-        for w in [LARGE_W, 36, 40] {
+        for w in [LARGE_W, LARGE_W + 4, LARGE_W + 8] {
             let rows = rows(&draw(w, LARGE_H + 2, |f| render_wide_card(f, f.area(), &s, &cfg, false, 0)));
             assert_eq!(rows[0].width(), usize::from(w), "{rows:?}");
             assert!(rows[0].starts_with('╭') && rows[0].ends_with('╮') && rows[usize::from(LARGE_H) - 1].starts_with('╰'), "{rows:?}");
             assert!(rows[usize::from(LARGE_H)..].iter().all(|r| r.trim().is_empty()), "exactly LARGE_H tall");
         }
         let u = Session { unread_notification: true, ..s.clone() };
-        for (w, h) in [(0, 0), (1, 1), (5, 2), (31, 14), (32, 13), (32, 14), (400, 14), (0, 30)] {
+        for (w, h) in [(0, 0), (1, 1), (5, 2), (LARGE_W - 1, LARGE_H), (LARGE_W, LARGE_H - 1), (LARGE_W, LARGE_H), (400, LARGE_H), (0, 30)] {
             for selected in [false, true] {
                 draw(w, h, |f| render_wide_card(f, f.area(), &u, &cfg, selected, 0));
                 draw(w, h, |f| render_card(f, f.area(), &u, &cfg, selected, u64::MAX));
@@ -1594,14 +1699,14 @@ mod tests {
     }
 
     /// A grid cell wider than the large card: the card fills it, the body
-    /// stays on the left, the text rows and the magic get the extra columns,
-    /// and nothing is drawn outside the card.
+    /// stays on the left, the text rows get the extra columns, and nothing
+    /// is drawn outside the card.
     #[test]
     fn large_card_stretched_to_its_cell_keeps_everything_inside() {
         let cfg = large_cfg();
         let mut s = opus("proj-a", Status::Running);
         s.summary = Some("x".repeat(130));
-        for (cw, ctx) in [(LARGE_W, 80.0), (37, 80.0), (40, 45.0), (37, 10.0)] {
+        for (cw, ctx) in [(LARGE_W, 80.0), (LARGE_W + 1, 80.0), (LARGE_W + 4, 45.0), (LARGE_W + 1, 10.0)] {
             s.ctx_percent = Some(ctx);
             for t in [0, 9, 44] {
                 // the card rect inside a larger frame
@@ -1616,12 +1721,13 @@ mod tests {
                 assert_eq!((buf[(3, 2)].symbol(), buf[(3 + cw - 1, 2 + LARGE_H - 1)].symbol()), ("╭", "╯"));
                 let lit: Vec<(u16, u16)> = (0..LARGE_H + 5).flat_map(|y| (0..cw + 8).map(move |x| (x, y))).filter(|&p| buf[p].symbol().chars().any(is_braille)).collect();
                 assert!(!lit.is_empty(), "w={cw} t={t}");
-                assert!(lit.iter().all(|&(x, y)| (3..=2 + LARGE_SCENE_ROWS).contains(&y) && (4..3 + cw - 1).contains(&x)), "w={cw} t={t}: spirit and magic in the band: {lit:?}");
+                assert!(lit.iter().all(|&(x, y)| (3..=2 + SCENE_ROWS).contains(&y) && (4..=3 + LARGE_SPIRIT_W).contains(&x)), "w={cw} t={t}: spirit in its area: {lit:?}");
                 assert!(lit.iter().map(|p| p.0).min().unwrap() <= 6, "w={cw}: body on the left");
                 let r = rows(&buf);
-                let row = |i: u16| info(&r[usize::from(2 + 1 + LARGE_SCENE_ROWS + i)].chars().skip(3).take(usize::from(cw)).collect::<String>());
-                assert!(row(1).ends_with("opus") && row(1).width() == usize::from(cw - 2), "w={cw}: model word at the inner right edge: {:?}", row(1));
-                assert_eq!(row(4).width(), usize::from(cw - 2), "w={cw}: the summary uses the extra columns");
+                let row = |i: u16| info_right_of(&r[usize::from(2 + 1 + i)].chars().skip(3).take(usize::from(cw)).collect::<String>(), LARGE_SPIRIT_W);
+                let text_w = usize::from(cw - 2 - LARGE_SPIRIT_W - CARD_PAD_X);
+                assert!(row(1).ends_with("opus") && row(1).width() == text_w, "w={cw}: model word at the inner right edge: {:?}", row(1));
+                assert_eq!(row(4).width(), text_w, "w={cw}: the summary uses the extra columns");
                 assert!(row(6).ends_with('…'), "w={cw}: {:?}", row(6));
             }
         }
@@ -1645,10 +1751,10 @@ mod tests {
     #[test]
     fn standard_card_badge_shows_the_subagent_marker_only_while_running() {
         assert_eq!(SUBAGENT_GLYPH, "◇");
-        let badge = |s: &Session, cfg: &Config| info(&card(s, cfg, false)[1 + SCENE_ROWS as usize + 1]);
+        let badge = |s: &Session, cfg: &Config| info(&card(s, cfg, false)[2]);
         let two = with_subs(session("proj-a", Status::Running), 2, 1);
         assert_eq!(badge(&two, &Config::default()), " RUN  3h ◇×2");
-        // last activity makes room for the marker first
+        // the marker takes the place of last activity
         assert_eq!(badge(&two, &all_extras()), " RUN  3h ◇×2");
         let none = with_subs(session("proj-a", Status::Running), 0, 3);
         assert_eq!(badge(&none, &Config::default()), " RUN  3h");
@@ -1657,14 +1763,16 @@ mod tests {
         let rows = card(&two, &Config::default(), false);
         assert_eq!(rows.len(), usize::from(CARD_H));
         assert!(rows.iter().all(|r| r.width() == usize::from(CARD_W)), "{rows:?}");
-        assert_eq!(info(&rows[1 + SCENE_ROWS as usize + 3]), "fixing the parser");
+        assert_eq!(info(&rows[4]), "fixing the");
         // a Done session never shows it (its subagents are not running)
         let mut done = with_subs(session("proj-a", Status::Done), 0, 2);
         done.ended_at = done.started_at;
         assert!(!card(&done, &Config::default(), false).join("").contains('◇'));
-        // narrow badge rows keep whole tokens only
+        // narrow badge rows keep whole tokens only; last activity makes room for the marker first
         let now = SystemTime::now();
         let flat = |w: usize| -> String { text_lines(&two, &all_extras(), w, now)[1].spans.iter().map(|sp| sp.content.as_ref()).collect() };
+        assert_eq!(flat(20), " RUN  3h ·2m ago ◇×2");
+        assert_eq!(flat(19), " RUN  3h ◇×2");
         assert_eq!(flat(12), " RUN  3h ◇×2");
         assert_eq!(flat(11), " RUN  3h");
         assert_eq!(flat(9), " RUN  3h");
@@ -1697,24 +1805,28 @@ mod tests {
     #[test]
     fn standard_card_badge_shows_the_tool_marker_after_the_subagents() {
         assert_eq!(TOOL_GLYPH.width(), 1, "one cell, like the subagent glyph");
-        let badge = |s: &Session, cfg: &Config| info(&card(s, cfg, false)[1 + SCENE_ROWS as usize + 1]);
+        let badge = |s: &Session, cfg: &Config| info(&card(s, cfg, false)[2]);
         let one = with_tool(session("proj-a", Status::Running), "Bash", "cargo test", 12, 0, 0);
         assert_eq!(badge(&one, &Config::default()), " RUN  3h ⚙1");
         let bg = with_tool(session("proj-a", Status::Running), "", "", 0, 0, 2);
         assert_eq!(badge(&bg, &Config::default()), " RUN  3h ⚙2");
         let both = with_tool(with_subs(session("proj-a", Status::Running), 2, 0), "Read", "a.rs", 3, 1, 1);
         assert_eq!(badge(&both, &Config::default()), " RUN  3h ◇×2 ⚙3");
-        // last activity makes room first
+        // the markers take the place of last activity
         assert_eq!(badge(&both, &all_extras()), " RUN  3h ◇×2 ⚙3");
         // the other rows and the geometry are unchanged
         let rows = card(&both, &all_extras(), false);
         assert!(rows.iter().all(|r| r.width() == usize::from(CARD_W)), "{rows:?}");
         let no_tools = Session { tools: ToolActivity::default(), ..both.clone() };
-        assert_eq!(rows[..1 + SCENE_ROWS as usize + 1], card(&no_tools, &all_extras(), false)[..1 + SCENE_ROWS as usize + 1], "band and name");
-        assert_eq!(info(&rows[1 + SCENE_ROWS as usize + 3]), "fixing the parser");
-        // too narrow for both markers: the subagent marker stays
+        let plain = card(&no_tools, &all_extras(), false);
+        assert_eq!(spirit_part(&rows, SPIRIT_W), spirit_part(&plain, SPIRIT_W), "spirit");
+        assert_eq!(rows[..2], plain[..2], "top border and name");
+        assert_eq!(info(&rows[5]), "parser", "the summary after the PR row");
+        // last activity makes room first; too narrow for both markers: the subagent marker stays
         let now = SystemTime::now();
         let flat = |w: usize| -> String { text_lines(&both, &all_extras(), w, now)[1].spans.iter().map(|sp| sp.content.as_ref()).collect() };
+        assert_eq!(flat(23), " RUN  3h ·2m ago ◇×2 ⚙3");
+        assert_eq!(flat(22), " RUN  3h ◇×2 ⚙3");
         assert_eq!(flat(15), " RUN  3h ◇×2 ⚙3");
         assert_eq!(flat(14), " RUN  3h ◇×2");
         assert_eq!(flat(9), " RUN  3h");
@@ -1739,7 +1851,7 @@ mod tests {
     #[test]
     fn large_card_shows_one_tool_row_after_the_summary() {
         let cfg = large_cfg();
-        let inner = usize::from(LARGE_W - 2);
+        let inner = usize::from(LARGE_INFO_W);
         let base = large_info(&opus("proj-a", Status::Running), &cfg);
         let s = with_tool(opus("proj-a", Status::Running), "Bash", "cargo test -q", 12, 0, 0);
         let rows = large_info(&s, &cfg);
@@ -1786,7 +1898,7 @@ mod tests {
         assert!(rows.iter().all(|r| r.width() == usize::from(LARGE_W)), "borders intact: {rows:?}");
         let row = &large_info(&s, &cfg)[5];
         assert!(row.starts_with("⚙ Bash · 한글") && row.contains('…') && row.ends_with(" 1m bg×3"), "{row:?}");
-        assert_eq!(row.width(), usize::from(LARGE_W - 2));
+        assert_eq!(row.width(), usize::from(LARGE_INFO_W));
         // very narrow text area: the right part goes, the left is cut
         let now = SystemTime::now();
         let line = |w: usize| -> String {
@@ -1806,7 +1918,7 @@ mod tests {
         assert_eq!(rows[..5].to_vec(), large_info(&opus("proj-a", Status::Running), &cfg)[..5].to_vec(), "priority rows intact");
         assert!(rows[5].starts_with("◇ Explore · task 0") && rows[5].ends_with("sonnet"), "{:?}", rows[5]);
         assert!(rows[6].starts_with("◇ Explore · task 1") && rows[6].ends_with("opus"), "{:?}", rows[6]);
-        assert_eq!(rows[5].width(), usize::from(LARGE_W - 2));
+        assert_eq!(rows[5].width(), usize::from(LARGE_INFO_W));
         assert_eq!(rows[7], "", "the stale one is not listed");
         // no badge marker on the large card: the rows say it
         assert!(!rows[1].contains('◇'));
@@ -1839,13 +1951,13 @@ mod tests {
         assert!(rows.iter().all(|r| r.width() == usize::from(LARGE_W)), "borders intact: {rows:?}");
         let row = &large_info(&s, &cfg)[5];
         assert!(row.starts_with("◇ Explore · 한글") && row.contains('…') && row.ends_with("haiku"), "{row:?}");
-        assert_eq!(row.width(), usize::from(LARGE_W - 2));
+        assert_eq!(row.width(), usize::from(LARGE_INFO_W));
         // a stretched card and a bigger area: nothing drawn outside the card
         let five = with_subs(opus("proj-a", Status::Running), 5, 0);
-        let rect = Rect::new(3, 2, 40, LARGE_H);
-        let buf = draw(48, LARGE_H + 5, |f| render_wide_card(f, rect, &five, &cfg, false, 0));
+        let rect = Rect::new(3, 2, LARGE_W + 4, LARGE_H);
+        let buf = draw(LARGE_W + 12, LARGE_H + 5, |f| render_wide_card(f, rect, &five, &cfg, false, 0));
         for y in 0..LARGE_H + 5 {
-            for x in 0..48 {
+            for x in 0..LARGE_W + 12 {
                 assert!(rect.contains((x, y).into()) || buf[(x, y)].symbol() == " ", "({x},{y})");
             }
         }
@@ -1855,28 +1967,51 @@ mod tests {
                 assert!(l.width() <= w, "{w}: {l:?}");
             }
         }
-        for (w, h) in [(0, 0), (1, 1), (31, 14), (32, 13), (5, 2)] {
+        for (w, h) in [(0, 0), (1, 1), (LARGE_W - 1, LARGE_H), (LARGE_W, LARGE_H - 1), (5, 2)] {
             draw(w, h, |f| render_card(f, f.area(), &five, &cfg, true, 0));
             draw(w, h, |f| render_card(f, f.area(), &five, &Config::default(), true, 0));
         }
     }
 
     #[test]
-    fn running_subagents_add_coloured_dots_inside_the_spirit_band() {
+    fn subagent_beads_fill_a_grid_under_the_spirit() {
+        for (layout, (w, h), rows) in [(CardLayout::Standard, (CARD_W, CARD_H), 3u16), (CardLayout::Large, (LARGE_W, LARGE_H), 4)] {
+            let cfg = Config { card_layout: layout, ..all_extras() };
+            let plain = session("proj-a", Status::Running);
+            let spots = |n: u16| -> Vec<(u16, u16)> { (0..n).map(|i| (2 + (i % 4) * 2, 1 + SCENE_ROWS + i / 4)).collect() };
+            for n in [1u16, 4, 6, 4 * rows, 4 * rows + 1] {
+                let busy = with_subs(plain.clone(), usize::from(n), usize::from(n));
+                let buf = draw(w, h, |f| render_card(f, f.area(), &busy, &cfg, false, 3));
+                let clean = draw(w, h, |f| render_card(f, f.area(), &plain, &cfg, false, 3));
+                let got: Vec<(u16, u16)> = bead_area(spirit_w(layout), h).filter(|&p| buf[p].symbol() == "⠶").collect();
+                assert_eq!(got, spots(n.min(4 * rows)), "{layout:?} n={n}");
+                let changed: Vec<(u16, u16)> = bead_area(spirit_w(layout), h).filter(|&p| buf[p] != clean[p]).collect();
+                assert_eq!(changed, got, "{layout:?} n={n}: only the beads change");
+                for p in spirit_cells(spirit_w(layout)) {
+                    assert_eq!(buf[p], clean[p], "{layout:?} n={n}: the spirit is left alone at {p:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn running_subagents_add_beads_and_leave_the_spirit_and_border_alone() {
         // sonnet = lightning, opus = fire, haiku = poison, fable = water (defaults)
         let cfg_for = |layout| Config { card_layout: layout, ..all_extras() };
-        for (layout, (w, h), band_rows) in [(CardLayout::Standard, (CARD_W, CARD_H), SCENE_ROWS), (CardLayout::Large, (LARGE_W, LARGE_H), LARGE_SCENE_ROWS)] {
+        for (layout, (w, h)) in [(CardLayout::Standard, (CARD_W, CARD_H)), (CardLayout::Large, (LARGE_W, LARGE_H))] {
             let cfg = cfg_for(layout);
+            let area_w = spirit_w(layout);
             for status in [Status::Idle, Status::NeedsInput, Status::Running] {
                 for t in [0, 17, 44] {
                     let plain = session("proj-a", status);
                     let busy = with_subs(plain.clone(), 5, 2);
                     let (a, b) = (draw(w, h, |f| render_card(f, f.area(), &plain, &cfg, false, t)), draw(w, h, |f| render_card(f, f.area(), &busy, &cfg, false, t)));
-                    let diff: Vec<(u16, u16)> = (1..=band_rows).flat_map(|y| (1..w - 1).map(move |x| (x, y))).filter(|&p| a[p] != b[p]).collect();
-                    let beads: Vec<u16> = diff.iter().filter(|&&p| matches!(b[p].symbol(), "⠶" | "⣤")).map(|p| p.0).collect();
-                    assert_eq!(beads.len(), MAX_DOTS, "{layout:?} {status:?} t={t}: five beads for five running: {diff:?}");
-                    assert!(beads.windows(2).all(|w| w[1] == w[0] + 2 && b[(w[0] + 1, band_rows)].symbol() == " "), "{layout:?}: {beads:?}");
-                    assert!(!diff.is_empty() && diff.iter().all(|&(_, y)| y == band_rows), "{layout:?} {status:?}: bottom band row: {diff:?}");
+                    assert!(spirit_cells(area_w).all(|p| a[p] == b[p]), "{layout:?} {status:?} t={t}: the spirit does not change");
+                    let beads: Vec<(u16, u16)> = bead_area(area_w, h).filter(|&p| a[p] != b[p]).collect();
+                    let y = SCENE_ROWS + 1;
+                    assert_eq!(beads, vec![(2, y), (4, y), (6, y), (8, y), (2, y + 1)], "{layout:?} {status:?} t={t}: five beads for five running");
+                    assert!(beads.iter().all(|&p| b[p].symbol() == "⠶"), "{layout:?} {status:?} t={t}");
+                    assert!(beads.iter().all(|p| p.0 + 1 < area_w), "{layout:?}: a free column before the text: {beads:?}");
                     // the border is untouched
                     for x in 0..w {
                         assert_eq!(a[(x, 0)], b[(x, 0)]);
@@ -1894,15 +2029,17 @@ mod tests {
             assert_eq!(draw(w, h, |f| render_card(f, f.area(), &stale, &cfg, false, 3)), draw(w, h, |f| render_card(f, f.area(), &plain, &cfg, false, 3)));
             let done = with_subs(session("proj-a", Status::Done), 2, 0);
             let done_plain = session("proj-a", Status::Done);
-            let band = |s: &Session| rows(&draw(w, h, |f| render_card(f, f.area(), s, &cfg, false, 3)))[1..=usize::from(band_rows)].to_vec();
+            let band = |s: &Session| spirit_part(&rows(&draw(w, h, |f| render_card(f, f.area(), s, &cfg, false, 3))), area_w);
             assert_eq!(band(&done), band(&done_plain), "{layout:?}: no dots when done");
+            let (a, b) = (draw(w, h, |f| render_card(f, f.area(), &done, &cfg, false, 3)), draw(w, h, |f| render_card(f, f.area(), &done_plain, &cfg, false, 3)));
+            assert!(bead_area(area_w, h).all(|p| a[p] == b[p]), "{layout:?}: no beads when done");
         }
         // the dot colour is the subagent model's element
         let cfg = Config::default();
         let s = Session { subagents: vec![sub("w", "Explore", "x", Some("fable"), true)], ..session("proj-a", Status::Idle) };
         let buf = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &s, &cfg, false, 0));
         let plain = draw(CARD_W, CARD_H, |f| render_card(f, f.area(), &session("proj-a", Status::Idle), &cfg, false, 0));
-        let cell = (1..CARD_W - 1).map(|x| (x, SCENE_ROWS)).find(|&p| buf[p] != plain[p]).expect("a dot");
+        let cell = bead_area(SPIRIT_W, CARD_H).find(|&p| buf[p] != plain[p]).expect("a dot");
         let Color::Rgb(r, g, b) = buf[cell].fg else { panic!("rgb") };
         assert!(b > r && b > g, "fable = water = blue: {:?}", buf[cell].fg);
         // unknown model: the parent's element (fire by default)
@@ -1919,13 +2056,13 @@ mod tests {
         cfg
     }
 
-    /// Cells of the bottom band row that differ from the card without subagents.
-    fn dot_cells(s: &Session, cfg: &Config, t: u64) -> Vec<(u16, Color)> {
+    /// Cells under the spirit that differ from the card without subagents
+    /// (the beads), top row first.
+    fn dot_cells(s: &Session, cfg: &Config, t: u64) -> Vec<((u16, u16), Color)> {
         let (w, h) = card_size(cfg.card_layout);
-        let band_rows = if cfg.card_layout == CardLayout::Large { LARGE_SCENE_ROWS } else { SCENE_ROWS };
         let with = draw(w, h, |f| render_card(f, f.area(), s, cfg, false, t));
         let plain = draw(w, h, |f| render_card(f, f.area(), &Session { subagents: Vec::new(), ..s.clone() }, cfg, false, t));
-        (1..w - 1).filter(|&x| with[(x, band_rows)] != plain[(x, band_rows)] && with[(x, band_rows)].symbol() != " ").map(|x| (x, with[(x, band_rows)].fg)).collect()
+        bead_area(spirit_w(cfg.card_layout), h).filter(|&p| with[p] != plain[p] && with[p].symbol() != " ").map(|p| (p, with[p].fg)).collect()
     }
 
     #[test]
@@ -1939,15 +2076,15 @@ mod tests {
                         s.subagents = vec![sub("a", "general-purpose", "x", Some("sonnet"), true), sub("b", "Explore", "y", Some("sonnet"), true)];
                         let cells = dot_cells(&s, &cfg, t);
                         assert_eq!(cells.len(), 2, "{layout:?} {parent_model} {status:?} t={t}: two beads: {cells:?}");
-                        for (x, fg) in &cells {
+                        for (p, fg) in &cells {
                             let Color::Rgb(r, g, b) = *fg else { panic!("rgb") };
-                            assert!(r > g && g > b, "{layout:?} {parent_model} {status:?} t={t}: sonnet = fire at x={x}: {fg:?}");
+                            assert!(r > g && g > b, "{layout:?} {parent_model} {status:?} t={t}: sonnet = fire at {p:?}: {fg:?}");
                         }
                         // a subagent on opus is water here: blue
                         s.subagents = vec![sub("c", "Plan", "z", Some("opus"), true)];
-                        for (x, fg) in dot_cells(&s, &cfg, t) {
+                        for (p, fg) in dot_cells(&s, &cfg, t) {
                             let Color::Rgb(r, g, b) = fg else { panic!("rgb") };
-                            assert!(b > r && b > g, "{layout:?} {parent_model} t={t}: opus = water at x={x}: {fg:?}");
+                            assert!(b > r && b > g, "{layout:?} {parent_model} t={t}: opus = water at {p:?}: {fg:?}");
                         }
                     }
                 }
@@ -1959,7 +2096,6 @@ mod tests {
     fn two_running_subagents_draw_two_separate_beads_unlike_the_body() {
         for layout in [CardLayout::Standard, CardLayout::Large] {
             let cfg = user_cfg(layout);
-            let band_rows = if layout == CardLayout::Large { LARGE_SCENE_ROWS } else { SCENE_ROWS };
             let (w, h) = card_size(layout);
             for t in [0, 9, 33] {
                 // parent on opus (water body), subagents on sonnet (fire) and haiku (poison)
@@ -1967,21 +2103,20 @@ mod tests {
                 s.subagents = vec![sub("a", "Explore", "x", Some("sonnet"), true), sub("b", "Explore", "y", Some("haiku"), true)];
                 let buf = draw(w, h, |f| render_card(f, f.area(), &s, &cfg, false, t));
                 let cells = dot_cells(&s, &cfg, t);
-                let xs: Vec<u16> = cells.iter().map(|c| c.0).collect();
-                assert_eq!(xs.len(), 2, "{layout:?} t={t}: two beads, one cell each: {xs:?}");
-                assert_eq!(xs[1], xs[0] + 2, "{layout:?}: {xs:?}");
-                assert_eq!(buf[(xs[0] + 1, band_rows)].symbol(), " ", "{layout:?}: an empty column between the beads");
-                // body colours: every lit band cell left of the first bead
-                let body: Vec<Color> = (1..=band_rows).flat_map(|y| (1..xs[0]).map(move |x| (x, y))).filter(|&p| buf[p].symbol() != " ").map(|p| buf[p].fg).collect();
+                let at: Vec<(u16, u16)> = cells.iter().map(|c| c.0).collect();
+                assert_eq!(at.len(), 2, "{layout:?} t={t}: two beads, one cell each: {at:?}");
+                assert_eq!(at, vec![(2, SCENE_ROWS + 1), (4, SCENE_ROWS + 1)], "{layout:?}: a free column between them");
+                assert!(at.iter().all(|&p| buf[p].symbol() == "⠶"), "{layout:?}: the free sub-pixel rows of a bead keep them apart");
+                let body: Vec<Color> = spirit_cells(spirit_w(layout)).filter(|&p| buf[p].symbol() != " ").map(|p| buf[p].fg).collect();
                 assert!(!body.is_empty());
-                for (x, fg) in &cells {
-                    assert!(!body.contains(fg), "{layout:?}: bead at {x} differs from the body: {fg:?}");
+                for (p, fg) in &cells {
+                    assert!(!body.contains(fg), "{layout:?}: bead at {p:?} differs from the body: {fg:?}");
                 }
             }
         }
     }
 
-    /// Look of the standard and large cards with 1, 2, 4 and 5 running
+    /// Look of the standard and large cards with 1, 2, 5 and 12 running
     /// subagents (sonnet = fire, opus = water, haiku/fable = poison), as
     /// plain text and with ANSI colours, plus the colour of each bead.
     /// Run with `cargo test dump_subagent_cards -- --ignored --nocapture`.
@@ -1992,10 +2127,9 @@ mod tests {
         for layout in [CardLayout::Standard, CardLayout::Large] {
             let cfg = user_cfg(layout);
             let (w, h) = card_size(layout);
-            let band = if layout == CardLayout::Large { LARGE_SCENE_ROWS } else { SCENE_ROWS };
-            for n in [1, 2, 4, 5] {
+            for n in [1, 2, 5, 12] {
                 let mut s = Session { model: Some("claude-opus-4-5".into()), ctx_percent: Some(35.0), ..session("ui refactoring", Status::Running) };
-                s.subagents = (0..n).map(|i| sub(&format!("a{i}"), "Explore", &format!("task {i}"), Some(fams[i]), true)).collect();
+                s.subagents = (0..n).map(|i| sub(&format!("a{i}"), "Explore", &format!("task {i}"), Some(fams[i % fams.len()]), true)).collect();
                 let buf = draw(w, h, |f| render_card(f, f.area(), &s, &cfg, false, 30));
                 println!("{layout:?}, {n} running:");
                 for r in rows(&buf) {
@@ -2003,14 +2137,17 @@ mod tests {
                 }
                 for y in 0..h {
                     let line: String = (0..w)
-                        .map(|x| match buf[(x, y)].fg {
-                            Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m{}\x1b[0m", buf[(x, y)].symbol()),
-                            _ => buf[(x, y)].symbol().to_string(),
+                        .map(|x| {
+                            let c = &buf[(x, y)];
+                            let fg = if let Color::Rgb(r, g, b) = c.fg { format!("\x1b[38;2;{r};{g};{b}m") } else { String::new() };
+                            let bg = if let Color::Rgb(r, g, b) = c.bg { format!("\x1b[48;2;{r};{g};{b}m") } else { String::new() };
+                            let dim = if c.modifier.contains(Modifier::DIM) { "\x1b[2m" } else { "" };
+                            format!("{dim}{fg}{bg}{}\x1b[0m", c.symbol())
                         })
                         .collect();
                     println!("{line}");
                 }
-                let beads: Vec<String> = (1..w - 1).filter(|&x| matches!(buf[(x, band)].symbol(), "⠶" | "⣤")).map(|x| format!("x={x} {:?}", buf[(x, band)].fg)).collect();
+                let beads: Vec<String> = bead_area(spirit_w(layout), h).filter(|&p| buf[p].symbol() == "⠶").map(|p| format!("{p:?} {:?}", buf[p].fg)).collect();
                 println!("beads: {beads:?}\n");
             }
         }

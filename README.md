@@ -8,14 +8,15 @@ A cmux extension that shows every Claude Code session running in cmux as a small
 
 ## Features
 
-- One 20x10 card per session: a small ghost-like spirit drawn with braille dots in 24-bit colour, the session name, a status badge with elapsed time, the git branch (or PR) and a one-line summary. `v` switches to a large card, at least 32x14 and stretched to fill its grid cell, with a bigger spirit, a wide area for its magic and more text: the model family, branch and PR on their own rows, and the summary on up to three lines.
+- One 29x9 card per session, a golden rectangle on screen: a small ghost-like spirit drawn with braille dots in 24-bit colour on the left, and on the right the session name, a status badge with elapsed time, the git branch (or PR) and a summary on up to four lines. `v` switches to a large card, at least 46x10 and stretched to fill its grid cell, with a bigger spirit and more text: the model family, branch and PR on their own rows, and the summary on up to three lines.
+- Cards sit on a fluid grid, 2 columns apart side by side and 1 row apart stacked (the same distance on screen, as a terminal cell is about twice as tall as wide). Standard cards keep their size and sit at the left, large cards share the spare width evenly, and a group heading sits directly on its cards.
 - Each spirit stands for a Claude model: fable is water, opus is fire, sonnet is lightning, haiku is poison (green). You can change the element per model in settings, and unknown models use the `theme` element (default fire).
-- The spirit's state is its animation: running (the body churns and casts its magic to the right: fire breath from the mouth, and a water vortex, poison fog or lightning bolts centred in the room right of the body), needs input (a bobbing `?`), idle (dim slow bob and `z`), done (sparkles), unknown (gray).
-- Context usage sets how hard the spirit works (relaxed, lively, struggling; see [Context usage setup](#context-usage-setup)) and, while running, the size of the magic: small under 30%, normal from 30%, big from 70%, and a red warning flicker above 90%.
+- The spirit's state is its animation: running (the body churns fast and leans in short bursts), needs input (a bobbing `?`), idle (dim slow bob and `z`), done (sparkles), unknown (gray).
+- Context usage sets how hard the spirit works (relaxed, lively, struggling; see [Context usage setup](#context-usage-setup)), with a red warning flicker above 90%.
 - The card border blinks blue while the session has unread cmux notifications, for example when it finished.
 - `Enter` (or `Space`) jumps to the session's cmux workspace and pane. `p` shows a live preview of the selected session's terminal.
 - Cards are grouped by cmux window. An optional PR chip shows the session's own pull request, taken from the PR meta your hook writes (see Limitations below), not looked up from the branch, so two sessions on the same branch can show different PRs.
-- Running Claude Code subagents show on the card: a `◇×N` marker on the standard card's badge row, one `◇ kind · description` row each on the large card, and one square bead each (at most five) in a row along the bottom of the spirit's animation area, growing right from the body, in the colour of the subagent model's element (see [Subagents](#subagents)).
+- Running Claude Code subagents show on the card: a `◇×N` marker on the standard card's badge row, one `◇ kind · description` row each on the large card, and one square bead each in a grid under the spirit.
 - Sessions in remote tabs (`cmux mosh`, `cmux ssh`) get a card too, marked `⇄` (see [Remote sessions](#remote-sessions)).
 - Running tool calls show on the card: a `⚙N` marker after the subagent marker (foreground calls plus background Bash / Monitor tasks), and on the large card one `⚙ Bash · cargo test…  12s` row for the tool running now (see [Running tools](#running-tools)).
 
@@ -33,7 +34,7 @@ Then run `cmux-magigent` in a cmux pane. Requires a Rust toolchain (1.89 or newe
 |---|---|
 | `h` `j` `k` `l` / arrows | Move between cards (rows wrap) |
 | `Enter` / `Space` | Focus the selected session's cmux workspace and pane |
-| `v` | Switch the card layout: standard (20x10) or large (32x14, stretched to fill the row); saved as `card_layout` |
+| `v` | Switch the card layout: standard (29x9) or large (46x10, stretched to fill the row); saved as `card_layout` |
 | `p` | Toggle preview (a column of cards of the current layout plus the session's screen) |
 | `i` | Open settings |
 | `q` / `Ctrl-C` | Quit |
@@ -53,7 +54,7 @@ The config file is `~/.config/cmux-magigent/config.toml` (if it does not exist y
 | `pr_poll_seconds` | `45` | PR lookup interval |
 | `guess_worktree` | `true` | Guess the worktree of sessions started in the main repository |
 | `done_retention_minutes` | `10` | How long finished sessions stay on screen |
-| `card_layout` | `"standard"` | `"standard"`: 20x10 cards (spirit, name, badge, branch or PR, one-line summary); `"large"`: 32x14 cards (stretched to fill the row) with a bigger spirit and more text (model, branch, PR, summary on up to three lines). Any other value loads as `"standard"`. Also switched with `v` and in settings |
+| `card_layout` | `"standard"` | `"standard"`: 29x9 cards (spirit, name, badge, branch or PR, summary on up to four lines); `"large"`: 46x10 cards (stretched to fill the row) with a bigger spirit and more text (model, branch, PR, summary on up to three lines). Any other value loads as `"standard"`. Also switched with `v` and in settings |
 | `subagent_active_seconds` | `30` | A subagent counts as running while its transcript was written within this many seconds (see [Subagents](#subagents)) |
 | `[extras]` | `branch`, `elapsed`, `summary` on; `last_activity`, `pr` off | Extra info shown on cards |
 
@@ -81,15 +82,13 @@ The file is written only once Claude Code reports a percentage, so no 0% is reco
 
 The old `~/.cache/cmux-cc-monitor/ctx/` is still read too (the freshest valid file wins), so a statusline script that already writes there keeps working. A file older than `ctx_fresh_seconds` is still used: once the transcript has grown since the file was last fresh, its value is scaled by that growth. Without any file, cmux-magigent falls back to the last usage recorded in the session transcript divided by the context window, which is inferred (200k, or 1M once more than 200k tokens are used) unless `context_limit_tokens` sets it.
 
-The usage drives three stages, on the same thresholds as the magic size:
+The usage drives three stages:
 
-- Relaxed (under 30%): the spirit barely moves, with a slow, tiny bob, calm churn, fewer ambient bits, and a gentler cast pose on only some casts.
+- Relaxed (under 30%): the spirit barely moves, with a slow, tiny bob, calm churn, fewer ambient bits, and a gentler burst pose on only some bursts.
 - Lively (30% to 70%, or unknown): the normal motion.
-- Struggling (70% and up): the body trembles and pants with a faster bob and a slight squash and stretch, pale sweat drops slide down its side, casts wind up longer and recoil harder, and an idle spirit slumps with heavy, slow breaths. Above 90% the body also flickers red.
+- Struggling (70% and up): the body trembles and pants with a faster bob and a slight squash and stretch, pale sweat drops slide down its side, bursts wind up longer and recoil harder, and an idle spirit slumps with heavy, slow breaths. Above 90% the body also flickers red.
 
-The water vortex, poison fog and lightning bolts are centred in the magic area, the columns from just right of the body to the card's inner right edge (a stretched card, in the grid or the preview column, gives them its full width); the fire breath leaves the mouth, and at big magic it roars to the card's inner right edge. At normal magic the water vortex turns very slowly (about one turn every 8 s) and four thin lightning bolts strike at random spots a tick or two apart; at big magic one thick bolt strikes in the centre among three thin ones, and the poison fog of each cast settles into a skull that lingers for about half a second before it fades.
-
-The card size picks the spirit size: the standard card (and the standard cards of the preview column) draws a small spirit, a round body of about 5x3 cells in a 7x4 grid, and the large card draws the bigger 11x4 spirit, whose magic gets an area of about 22 columns to its right. The small spirit has the same state cues, element looks, pose and stages; its eyes are two single white dots in proportion to its body, and its magic is drawn simpler and bolder so it reads at that size: a short bright flame, a solid disc with a clear highlight, dense round puffs (Big poison still settles into the skull, which fits the standard card), and the same bolts as the bigger spirit.
+The card size picks the spirit size: the standard card (and the standard cards of the preview column) draws a small spirit, a round body of about 5x3 cells in a 7x4 grid, and the large card draws the bigger 11x4 spirit. The small spirit has the same state cues, element looks, pose and stages; its eyes are two single white dots in proportion to its body.
 
 ## Subagents
 
@@ -100,7 +99,7 @@ A subagent counts as running when its meta does not say `finished: true` (honour
 - Standard card: `◇×N` at the end of the badge row (last activity makes room for it first). Nothing when none is running.
 - Large card: below the summary, one row per running subagent, newest first, `◇ kind · description` with the model family on the right; at most three rows, the last ending in `+N` when more are running. The name, badge, branch, PR and summary rows always come first.
 - One-line cards: `◇N` after the elapsed time.
-- Spirit: one square bead per running subagent (at most five, as many as fit; the text counts the rest) in one row along the bottom of the animation area, starting one empty cell right of the body and growing to the right. Each bead is exactly one braille cell (a 2×2 block of dots, `⠶`) with one empty cell between two beads, so N beads always read as N. Its colour is the element of the model the subagent actually runs on (`pickedEffortModel` from the meta, else the requested `model`, through the same `model_themes` mapping as the spirit; an unknown model takes the spirit's own element). The beads bob one sub-pixel behind the spirit, pulse while it runs, are dim while it is idle and are gone once it is done.
+- Spirit: one square bead per running subagent in a grid under the spirit, four across, filled left to right and top to bottom: three rows on the standard card, four on the large card (the text counts the rest). Each bead is exactly one braille cell (a 2×2 block of dots, `⠶`), so N beads always read as N. Its colour is the element of the model the subagent actually runs on (`pickedEffortModel` from the meta, else the requested `model`, through the same `model_themes` mapping as the spirit; an unknown model takes the spirit's own element). The beads stay still and show the state in a soft shimmer: each twinkles on its own while the spirit runs, all pulse together when it needs input, they breathe slowly and dimly while it is idle, and they are gone once it is done.
 
 ## Running tools
 

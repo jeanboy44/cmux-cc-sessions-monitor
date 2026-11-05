@@ -1090,7 +1090,7 @@ mod tests {
         assert!(app.spirits_visible);
         assert_eq!(app.frame_timeout(), FRAME);
         // no spirit on screen (compact cards on a low terminal, no sessions): a slower idle redraw
-        draw_at(&mut app, 150, 10);
+        draw_at(&mut app, 150, 5);
         assert!(!app.spirits_visible);
         assert!(app.frame_timeout() == IDLE_FRAME && IDLE_FRAME > FRAME);
         // the settings cursor blinks: full rate again
@@ -1124,8 +1124,9 @@ mod tests {
         let mut app = app_with(2, 1);
         app.sessions[0].unread_notification = true;
         app.preview = true;
+        app.config.card_layout = crate::config::CardLayout::Large;
         let dot = |app: &mut App, tick: u64| {
-            // middle 150x8: too low for a full card, compact one-line cards beside the preview
+            // middle 150x8: too low for a large card, compact one-line cards beside the preview
             let buf = crate::ui::test_util::draw(150, 10, |f| screen::draw(f, app, tick, Instant::now()));
             let area = buf.area;
             (0..area.height)

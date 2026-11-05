@@ -1,5 +1,5 @@
 //! Elements: palette, outline shape, decorations and ambient particles per
-//! theme. The RUNNING magic cast to the right lives in `magic`.
+//! theme. 
 
 use std::f32::consts::{PI, TAU};
 
@@ -262,7 +262,7 @@ pub(super) fn bubble_spots(cv: &Canvas, ctx: &Ctx, cx: f32, cy: f32) -> Vec<(i32
 /// Draws one bubble at sub-pixel (px, py) as a white overlay snapped to the
 /// braille cell holding that point: a bead and a ring in that cell, a swell
 /// over it and the cell to its right, then sparkles flying 1-2 cells out
-/// sideways and down (never up, toward the eyes; less far toward the magic). Every dot lightens what is
+/// sideways and down (never up, toward the eyes; less far to the right). Every dot lightens what is
 /// under it (the body keeps its dots), so a bubble is never a hole.
 fn draw_bubble(cv: &mut Canvas, px: i32, py: i32, b: &Bubble) {
     let (x0, y0) = (px.div_euclid(2) * 2, py.div_euclid(4) * 4);
@@ -305,7 +305,7 @@ pub(super) fn draw_bubbles(cv: &mut Canvas, ctx: &Ctx, cx: f32, cy: f32) {
 }
 
 /// Element decorations around the body: orbiting droplets and floor ripples
-/// (water). Poison bubbles are drawn later, over the magic (see [`draw_bubbles`]).
+/// (water). Poison bubbles are drawn later (see [`draw_bubbles`]).
 /// `cy`: body centre y in design units (after bobbing and the casting pose).
 pub(super) fn decorate(cv: &mut Canvas, ctx: &Ctx, cy: f32) {
     let (tf, sp) = (ctx.btf, ctx.sp);

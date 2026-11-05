@@ -2,7 +2,7 @@
 //! the card shows through) and keeps ONE white dot as the catchlight. On a
 //! blink the hole shows a thin dash of muted body-tone dots instead (no
 //! white) for 2 frames, every 3-5 s. Every state uses the same eye cells;
-//! while casting, the dot looks one sub-pixel toward the magic (right).
+//! during a burst the dot looks one sub-pixel to the right.
 //!
 //! The small spirit (`Geom::dot_eyes`) has eyes in proportion to its body:
 //! each is a single white dot with a one-dot dark halo (only the body dot

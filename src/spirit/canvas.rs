@@ -119,7 +119,7 @@ impl Canvas {
     /// dot's own brightness, so it never darkens). A dot that is there keeps
     /// its place and body flag; an empty spot gets a new low-priority dot
     /// blended from what its cell shows (or the card). Never erases, and
-    /// leaves cells won by higher-priority dots (magic, sparkles) alone.
+    /// leaves cells won by higher-priority dots (sparkles) alone.
     /// `spawn`: whether a dot may appear in a cell that is empty.
     pub(super) fn whiten_px(&mut self, x: i32, y: i32, tone: f32, m: f32, spawn: bool) {
         let Some(i) = self.idx(x, y) else { return };
@@ -153,11 +153,6 @@ impl Canvas {
                 }
             }
         }
-    }
-
-    /// Rightmost body sub-pixel column over all rows, if any body is drawn.
-    pub(super) fn body_right(&self) -> Option<i32> {
-        (0..self.g.w).rev().find(|&x| (0..self.g.h).any(|y| self.body[y * self.g.w + x])).map(|x| x as i32)
     }
 
     /// Fill the block of real pixels covered by the design unit whose top-left is (x, y).

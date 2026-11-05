@@ -10,12 +10,12 @@ use crate::spirit::theme::Theme;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CardLayout {
-    /// A: 20 x 10 cards, the small 7 x 4 spirit over name, badge, branch/PR
-    /// and a one-line summary.
+    /// A: 29 x 9 cards, the small 7 x 4 spirit left of name, badge, branch/PR
+    /// and a summary on up to four lines.
     #[default]
     Standard,
-    /// B: 32 x 14 cards (stretched to fill the grid row), the bigger 11 x 4
-    /// spirit with a wide magic area over more text (model word, branch and
+    /// B: 46 x 10 cards (stretched to fill the grid row), the bigger 11 x 4
+    /// spirit left of more text (model word, branch and
     /// PR rows, a summary on up to three lines).
     Large,
 }

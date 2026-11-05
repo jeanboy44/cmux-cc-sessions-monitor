@@ -146,7 +146,7 @@ fn timing(stage: Stage) -> (u64, u64) {
 }
 
 /// Where a running spirit is in its cast timeline (the same schedule that
-/// spawns the magic: the magic appears on `Release(0)`).
+/// drives the poison bubble; the release is `Release(0)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CastPhase {
     /// frame 0..3 of the wind-up before a cast
@@ -157,7 +157,7 @@ pub(super) enum CastPhase {
 
 /// Cast phase of a running spirit of `seed` on tick `t`; None at rest.
 /// Casts are at least 12 ticks apart, so phases never overlap. Tick 0 never
-/// casts (the magic and particles start at tick 1).
+/// casts (particles start at tick 1).
 pub(super) fn cast_phase(seed: u32, t: u64) -> Option<CastPhase> {
     cast_phase_at(Stage::Lively, seed, t)
 }
@@ -177,7 +177,7 @@ pub(super) fn cast_phase_at(stage: Stage, seed: u32, t: u64) -> Option<CastPhase
 /// Body pose while casting, in real sub-pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Pose {
-    /// horizontal shift (+ right, toward the magic)
+    /// horizontal shift (+ right)
     pub dx: f32,
     /// vertical shift (+ down)
     pub dy: f32,
@@ -185,7 +185,7 @@ pub(super) struct Pose {
     pub tilt: f32,
     /// outline radius scale
     pub swell: f32,
-    /// the eye dot looks one sub-pixel toward the magic
+    /// the eye dot looks one sub-pixel to the right
     pub facing: bool,
 }
 
@@ -194,7 +194,7 @@ impl Pose {
 }
 
 /// Casting pose of a running spirit: a short wind-up leaning toward the
-/// magic, then a one sub-pixel recoil on release, flavoured per element.
+/// right, then a one sub-pixel recoil on release, flavoured per element.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn pose(elem: Theme, status: Status, seed: u32, t: u64) -> Pose {
     if status != Status::Running {

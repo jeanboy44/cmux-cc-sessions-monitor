@@ -33,7 +33,7 @@ impl Particle {
 
 #[cfg(test)]
 thread_local! {
-    /// Tests measuring the cast magic alone switch ambient particles off.
+    /// Tests measuring the body alone switch ambient particles off.
     pub(super) static NO_AMBIENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

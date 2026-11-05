@@ -120,14 +120,17 @@ pub fn move_selection(rows: &[Row], selected: usize, dir: Dir) -> usize {
 /// First visible row so that `sel_row` is fully shown (or at least first),
 /// including the divider right above it when it starts a group, moving as
 /// little as possible and not scrolling past the end. `heights` are the
-/// rows' heights in terminal rows.
-pub fn scroll_to_show_rows(rows: &[Row], heights: &[u16], scroll: usize, sel_row: usize, area_h: u16) -> usize {
-    let n = heights.len().min(rows.len());
+/// rows' heights in terminal rows, `solid` the same without gutters.
+pub fn scroll_to_show_rows(rows: &[Row], heights: &[u16], solid: &[u16], scroll: usize, sel_row: usize, area_h: u16) -> usize {
+    let n = heights.len().min(rows.len()).min(solid.len());
     if n == 0 {
         return 0;
     }
     let sel = sel_row.min(n - 1);
-    let sum = |a: usize, b: usize| heights[a..b].iter().map(|h| u32::from(*h)).sum::<u32>();
+    // rows a..b on screen: the gutter of the last one may fall off the bottom
+    let sum = |a: usize, b: usize| {
+        heights[a..b - 1].iter().map(|h| u32::from(*h)).sum::<u32>() + u32::from(solid[b - 1])
+    };
     let area = u32::from(area_h);
     let divider_above = |i: usize| i > 0 && matches!(rows[i - 1], Row::Divider { .. });
     let mut s = scroll.min(n - 1);
@@ -148,24 +151,25 @@ pub fn scroll_to_show_rows(rows: &[Row], heights: &[u16], scroll: usize, sel_row
     s
 }
 
-/// Rects of the rows drawn from `scroll` on: rows that fit completely,
-/// and at least the first one (cut at the bottom).
-pub fn place_rows(heights: &[u16], scroll: usize, area: Rect) -> Vec<(usize, Rect)> {
+/// Rects of the rows drawn from `scroll` on: rows whose `solid` part fits
+/// (a gutter past the bottom is dropped), and at least the first one (cut at
+/// the bottom).
+pub fn place_rows(heights: &[u16], solid: &[u16], scroll: usize, area: Rect) -> Vec<(usize, Rect)> {
     let mut out = Vec::new();
     if area.is_empty() {
         return out;
     }
     let bottom = u32::from(area.y) + u32::from(area.height);
     let mut y = u32::from(area.y);
-    for (i, h) in heights.iter().enumerate().skip(scroll) {
+    for (i, (h, solid)) in heights.iter().zip(solid).enumerate().skip(scroll) {
         let h = u32::from(*h);
-        if y + h > bottom {
+        if y + u32::from(*solid) > bottom {
             if out.is_empty() {
                 out.push((i, Rect::new(area.x, y as u16, area.width, (bottom - y) as u16)));
             }
             break;
         }
-        out.push((i, Rect::new(area.x, y as u16, area.width, h as u16)));
+        out.push((i, Rect::new(area.x, y as u16, area.width, h.min(bottom - y) as u16)));
         y += h;
     }
     out
@@ -333,6 +337,30 @@ mod tests {
     }
 
     #[test]
+    fn a_rows_trailing_gap_may_fall_off_the_bottom() {
+        let (h, solid) = ([7, 7, 7, 7, 6], [6; 5]);
+        let area = Rect::new(0, 0, 80, 27);
+        let placed = place_rows(&h, &solid, 0, area);
+        assert_eq!(placed.len(), 4, "the fourth card fits, its gap does not");
+        assert_eq!(placed[3].1, Rect::new(0, 21, 80, 6), "the rect stays inside the area");
+        let short = Rect { height: 26, ..area };
+        assert_eq!(place_rows(&h, &solid, 0, short).len(), 3, "a card that does not fit is not drawn");
+    }
+
+    #[test]
+    fn scrolling_does_not_count_the_gap_of_the_last_shown_row() {
+        let t = || Row::Tiles { start: 0, end: 1 };
+        let d = || Row::Divider { label: "w".into(), count: 1 };
+        let (h, solid) = ([7, 7, 7, 7, 6], [6; 5]);
+        let rows = [t(), t(), t(), t(), t()];
+        assert_eq!(scroll_to_show_rows(&rows, &h, &solid, 0, 3, 27), 0, "four cards fit");
+        assert_eq!(scroll_to_show_rows(&rows, &h, &solid, 0, 4, 27), 1);
+        let rows = [t(), d(), t(), t()];
+        let shown = scroll_to_show_rows(&rows, &[7, 1, 7, 6], &[6, 1, 6, 6], 0, 2, 7);
+        assert_eq!(shown, 1, "the heading stays with its card");
+    }
+
+    #[test]
     fn scroll_keeps_selected_visible_with_dividers() {
         let rows = two_groups(); // D T T D T T
         let h = heights(&rows, 6);
@@ -340,21 +368,21 @@ mod tests {
         for sel in 0..9 {
             let r = row_of(&rows, sel).unwrap();
             for start in 0..rows.len() {
-                let s = scroll_to_show_rows(&rows, &h, start, r, 13);
-                let placed = place_rows(&h, s, Rect::new(0, 0, 80, 13));
+                let s = scroll_to_show_rows(&rows, &h, &h, start, r, 13);
+                let placed = place_rows(&h, &h, s, Rect::new(0, 0, 80, 13));
                 assert!(placed.iter().any(|(i, rect)| *i == r && rect.height == 6), "sel={sel} start={start} s={s}");
             }
         }
         // moving into group 2 scrolls as little as possible and shows its divider
-        let s = scroll_to_show_rows(&rows, &h, 0, 4, 13);
+        let s = scroll_to_show_rows(&rows, &h, &h, 0, 4, 13);
         assert_eq!(s, 2);
-        assert!(place_rows(&h, s, Rect::new(0, 0, 80, 13)).iter().any(|(i, _)| *i == 3));
+        assert!(place_rows(&h, &h, s, Rect::new(0, 0, 80, 13)).iter().any(|(i, _)| *i == 3));
         // a tight area still shows the divider with the group's first row
-        assert_eq!(scroll_to_show_rows(&rows, &h, 0, 4, 7), 3);
+        assert_eq!(scroll_to_show_rows(&rows, &h, &h, 0, 4, 7), 3);
         // a stale scroll past the end is pulled back to fill the area
-        assert_eq!(scroll_to_show_rows(&rows, &h, 5, 5, 13), 3);
+        assert_eq!(scroll_to_show_rows(&rows, &h, &h, 5, 5, 13), 3);
         // everything fits: no scroll
-        assert_eq!(scroll_to_show_rows(&rows, &h, 2, 5, 100), 0);
+        assert_eq!(scroll_to_show_rows(&rows, &h, &h, 2, 5, 100), 0);
     }
 
     #[test]
@@ -362,7 +390,7 @@ mod tests {
         let rows = two_groups();
         let h = heights(&rows, 6);
         let area = Rect::new(2, 1, 90, 40);
-        let placed = place_rows(&h, 0, area);
+        let placed = place_rows(&h, &h, 0, area);
         assert_eq!(placed.len(), rows.len());
         for (i, a) in &placed {
             for (j, b) in &placed {
@@ -376,9 +404,9 @@ mod tests {
         assert_eq!(placed[0].1, Rect::new(2, 1, 90, 1));
         assert_eq!(placed[1].1, Rect::new(2, 2, 90, 6));
         // too small for even one row: the first is cut, nothing more
-        let tiny = place_rows(&h, 1, Rect::new(0, 0, 10, 3));
+        let tiny = place_rows(&h, &h, 1, Rect::new(0, 0, 10, 3));
         assert_eq!(tiny, vec![(1, Rect::new(0, 0, 10, 3))]);
-        assert!(place_rows(&h, 0, Rect::new(0, 0, 10, 0)).is_empty());
-        assert!(place_rows(&[], 0, area).is_empty());
+        assert!(place_rows(&h, &h, 0, Rect::new(0, 0, 10, 0)).is_empty());
+        assert!(place_rows(&[], &[], 0, area).is_empty());
     }
 }
