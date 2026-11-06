@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use crate::app::Mode;
 use crate::model::Status;
 use crate::ui::style;
 
@@ -75,18 +76,35 @@ const HUD_ORDER: [(Status, &str); 5] = [
     (Status::Unknown, "UNK"),
 ];
 
-/// Draws the one-line HUD: `◆ SESSIONS n  ✦ RUN n  ! INPUT n  …  ACT ███░░`.
+/// Draws the one-line TOP Bar / HUD: `Status [s] | Memory [m] │ ◆ SESSIONS n  ✦ RUN n  ! INPUT n  …  ACT ███░░`.
 /// Clips silently on narrow or empty areas.
-pub fn render_hud(f: &mut Frame, area: Rect, counts: &StatusCounts) {
+pub fn render_hud(f: &mut Frame, area: Rect, counts: &StatusCounts, mode: Mode) {
     let area = area.intersection(f.area());
     if area.is_empty() {
         return;
     }
     let base = Style::new().fg(style::HUD_FG).bg(style::HUD_BG);
+
+    let is_memory = mode == Mode::Memory;
+    let status_style = if !is_memory {
+        Style::new().fg(style::BADGE_FG).bg(style::HUD_BADGE).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(style::TEXT_DIM)
+    };
+    let memory_style = if is_memory {
+        Style::new().fg(style::BADGE_FG).bg(style::HUD_BADGE).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(style::TEXT_DIM)
+    };
+
     let mut spans = vec![
+        Span::styled(" Status [s] ", status_style),
+        Span::styled(" | ", Style::new().fg(style::TEXT_DIM)),
+        Span::styled(" Memory [m] ", memory_style),
+        Span::raw(" │ "),
         Span::styled(
-            format!(" ◆ SESSIONS {} ", counts.total()),
-            Style::new().fg(style::BADGE_FG).bg(style::HUD_BADGE).add_modifier(Modifier::BOLD),
+            format!("◆ SESSIONS {} ", counts.total()),
+            Style::new().fg(style::HUD_FG).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
     ];
@@ -147,8 +165,10 @@ mod tests {
     #[test]
     fn hud_shows_counts_per_status() {
         let counts = StatusCounts { running: 2, needs_input: 1, idle: 3, done: 0, unknown: 1 };
-        let buf = draw(100, 1, |f| render_hud(f, f.area(), &counts));
+        let buf = draw(120, 1, |f| render_hud(f, f.area(), &counts, Mode::Tiles));
         let row = &rows(&buf)[0];
+        assert!(row.contains("Status [s]"));
+        assert!(row.contains("Memory [m]"));
         for want in ["SESSIONS 7", "✦ RUN 2", "! INPUT 1", "z IDLE 3", "✓ DONE 0", "? UNK 1"] {
             assert!(row.contains(want), "missing {want:?} in {row:?}");
         }
@@ -158,8 +178,8 @@ mod tests {
     fn hud_badge_keeps_its_yellow_not_the_selection_blue() {
         use crate::ui::style;
         let counts = StatusCounts { running: 1, ..Default::default() };
-        let buf = draw(60, 1, |f| render_hud(f, f.area(), &counts));
-        assert_eq!(buf[(1, 0)].symbol(), "◆");
+        let buf = draw(60, 1, |f| render_hud(f, f.area(), &counts, Mode::Tiles));
+        assert_eq!(buf[(1, 0)].symbol(), "S");
         assert_eq!(buf[(1, 0)].bg, style::HUD_BADGE);
         assert_eq!(style::HUD_BADGE, ratatui::style::Color::Rgb(255, 236, 64));
         assert_ne!(style::HUD_BADGE, style::SELECTED);
@@ -169,9 +189,9 @@ mod tests {
     fn hud_tiny_areas_do_not_panic() {
         let counts = StatusCounts { running: 99, ..Default::default() };
         for (w, h) in [(0, 0), (1, 1), (5, 1), (10, 3)] {
-            draw(w, h, |f| render_hud(f, f.area(), &counts));
+            draw(w, h, |f| render_hud(f, f.area(), &counts, Mode::Tiles));
         }
         // Area outside the frame is ignored.
-        draw(10, 2, |f| render_hud(f, Rect::new(50, 50, 20, 1), &counts));
+        draw(10, 2, |f| render_hud(f, Rect::new(50, 50, 20, 1), &counts, Mode::Tiles));
     }
 }

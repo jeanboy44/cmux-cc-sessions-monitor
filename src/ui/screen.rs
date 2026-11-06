@@ -21,7 +21,7 @@ use crate::ui::style;
 
 pub const EMPTY_MESSAGE: &str = "cmux에서 실행 중인 Claude 세션이 없습니다";
 pub const LOADING_MESSAGE: &str = "세션을 불러오는 중…";
-pub const KEY_HELP: &str = " hjkl/←↓↑→ 이동 · Enter/Space 포커스 · v 카드 · p 미리보기 · i 설정 · q 종료 ";
+pub const KEY_HELP: &str = " hjkl · Enter 포커스 · o 세션기억 · s/m 탭 · p 미리보기 · i 설정 · q 종료 ";
 
 /// Draws the full frame. Updates `app.cols`, `app.scroll`, `app.grid_rect`,
 /// `app.preview_too_small` and the preview's read line count from the layout.
@@ -31,7 +31,7 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
     let [hud, middle, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
     let counts = StatusCounts::from_statuses(app.sessions.iter().map(|s| s.status));
-    render_hud(f, hud, &counts);
+    render_hud(f, hud, &counts, app.mode);
 
     let layout = preview_layout(middle, app.preview, app.config.card_layout);
     let grid = layout.list;
@@ -56,6 +56,9 @@ pub fn draw(f: &mut Frame, app: &mut App, tick: u64, now: Instant) {
 
     if app.mode == Mode::Settings {
         render_settings(f, middle, &app.config, app.settings_cursor, tick, app.pr_tools_note.as_deref());
+    } else if app.mode == Mode::Memory {
+        let tz = crate::storage::Timezone::parse(&app.config.timezone);
+        crate::ui::memory::render_memory_view(f, middle, &app.memory_view, tick, tz);
     }
 }
 
@@ -241,7 +244,7 @@ mod tests {
         assert!(screen[0].contains("RUN 2") && screen[0].contains("INPUT 2") && screen[0].contains("DONE 2"));
         assert!(text.contains("proj-t0") && text.contains("proj-t1"), "{text}");
         assert!(has_braille(&text), "scenes drawn: {text}");
-        assert!(screen.last().unwrap().contains("Enter/Space 포커스"), "{}", screen.last().unwrap());
+        assert!(screen.last().unwrap().contains("Enter 포커스"), "{}", screen.last().unwrap());
         assert_eq!(app.cols, 3, "(120 + 2) / (29 + 2)");
         // the cards keep their size from the left: the selected (first) card
         // has the blue border, the second does not

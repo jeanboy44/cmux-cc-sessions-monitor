@@ -79,6 +79,13 @@ pub struct Config {
     /// A subagent counts as running while its transcript was written within
     /// this many seconds (and it is not marked finished).
     pub subagent_active_seconds: u64,
+    /// Timezone for timestamps in memory, executions and conversations (default "KST").
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
+}
+
+fn default_timezone() -> String {
+    "KST".to_string()
 }
 
 impl Default for Extras {
@@ -106,6 +113,7 @@ impl Default for Config {
             ctx_fresh_seconds: 300,
             card_layout: CardLayout::default(),
             subagent_active_seconds: 30,
+            timezone: default_timezone(),
         }
     }
 }
@@ -299,6 +307,7 @@ mod tests {
         assert!(c.guess_worktree);
         assert_eq!(c.context_limit_tokens, 0, "0 = auto (window inferred)");
         assert_eq!(c.ctx_fresh_seconds, 300);
+        assert_eq!(c.timezone, "KST");
     }
 
     #[test]

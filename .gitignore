@@ -2,3 +2,4 @@ target/
 .superpowers/
 .personal-info-patterns
 dist/
+.claude/

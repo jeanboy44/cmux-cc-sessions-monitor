@@ -23,6 +23,7 @@ pub enum SettingsItem {
     Theme,
     /// Spirit element of one model family.
     ModelTheme(ModelFamily),
+    Timezone,
     ExtraBranch,
     ExtraElapsed,
     ExtraLastActivity,
@@ -31,13 +32,14 @@ pub enum SettingsItem {
     GuessWorktree,
 }
 
-pub const ALL_ITEMS: [SettingsItem; 12] = [
+pub const ALL_ITEMS: [SettingsItem; 13] = [
     SettingsItem::CardLayout,
     SettingsItem::Theme,
     SettingsItem::ModelTheme(ModelFamily::Fable),
     SettingsItem::ModelTheme(ModelFamily::Opus),
     SettingsItem::ModelTheme(ModelFamily::Sonnet),
     SettingsItem::ModelTheme(ModelFamily::Haiku),
+    SettingsItem::Timezone,
     SettingsItem::ExtraBranch,
     SettingsItem::ExtraElapsed,
     SettingsItem::ExtraLastActivity,
@@ -62,6 +64,10 @@ pub fn toggle(cfg: &mut Config, item: SettingsItem) {
             let next = cfg.model_theme(f).next();
             cfg.model_themes.insert(f.as_key().to_string(), next);
         }
+        SettingsItem::Timezone => {
+            let next = crate::storage::Timezone::parse(&cfg.timezone).next();
+            cfg.timezone = next.as_code().to_string();
+        }
         SettingsItem::ExtraBranch => cfg.extras.branch = !cfg.extras.branch,
         SettingsItem::ExtraElapsed => cfg.extras.elapsed = !cfg.extras.elapsed,
         SettingsItem::ExtraLastActivity => cfg.extras.last_activity = !cfg.extras.last_activity,
@@ -79,6 +85,7 @@ pub fn item_label(item: SettingsItem) -> &'static str {
         SettingsItem::ModelTheme(ModelFamily::Opus) => "opus 모델",
         SettingsItem::ModelTheme(ModelFamily::Sonnet) => "sonnet 모델",
         SettingsItem::ModelTheme(ModelFamily::Haiku) => "haiku 모델",
+        SettingsItem::Timezone => "표시 시간대",
         SettingsItem::ExtraBranch => "브랜치",
         SettingsItem::ExtraElapsed => "경과 시간",
         SettingsItem::ExtraLastActivity => "마지막 활동",
@@ -91,7 +98,7 @@ pub fn item_label(item: SettingsItem) -> &'static str {
 /// Boolean state of a flag item; `None` for the theme and layout items.
 fn flag(cfg: &Config, item: SettingsItem) -> Option<bool> {
     match item {
-        SettingsItem::CardLayout | SettingsItem::Theme | SettingsItem::ModelTheme(_) => None,
+        SettingsItem::CardLayout | SettingsItem::Theme | SettingsItem::ModelTheme(_) | SettingsItem::Timezone => None,
         SettingsItem::ExtraBranch => Some(cfg.extras.branch),
         SettingsItem::ExtraElapsed => Some(cfg.extras.elapsed),
         SettingsItem::ExtraLastActivity => Some(cfg.extras.last_activity),
@@ -107,6 +114,7 @@ pub fn item_value(cfg: &Config, item: SettingsItem) -> String {
         (_, Some(false)) => "꺼짐".into(),
         (SettingsItem::CardLayout, None) => layout_label(cfg.card_layout).into(),
         (SettingsItem::ModelTheme(f), None) => theme_label(cfg.model_theme(f)).into(),
+        (SettingsItem::Timezone, None) => crate::storage::Timezone::parse(&cfg.timezone).label().into(),
         (_, None) => theme_label(cfg.theme).into(),
     }
 }
@@ -208,6 +216,16 @@ mod tests {
     }
 
     #[test]
+    fn toggle_timezone_cycles() {
+        let mut c = Config::default();
+        assert_eq!(c.timezone, "KST");
+        assert_eq!(item_value(&c, SettingsItem::Timezone), "KST (UTC+9)");
+        toggle(&mut c, SettingsItem::Timezone);
+        assert_eq!(c.timezone, "UTC");
+        assert_eq!(item_value(&c, SettingsItem::Timezone), "UTC");
+    }
+
+    #[test]
     fn toggle_extra_flips_flag() {
         let mut c = Config::default();
         for item in ALL_ITEMS.into_iter().filter(|i| flag(&Config::default(), *i).is_some()) {
@@ -236,7 +254,7 @@ mod tests {
     }
 
     fn screen(cfg: &Config, cursor: usize, tick: u64, note: Option<&str>) -> Vec<String> {
-        rows(&draw(60, 16, |f| render_settings(f, f.area(), cfg, cursor, tick, note)))
+        rows(&draw(60, 18, |f| render_settings(f, f.area(), cfg, cursor, tick, note)))
     }
 
     #[test]

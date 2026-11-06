@@ -103,7 +103,11 @@ impl App {
                 let item = ALL_ITEMS[self.settings_cursor.min(ALL_ITEMS.len() - 1)];
                 self.apply_setting(item, now);
             }
-            KeyCode::Esc | KeyCode::Char('i' | 'q' | 'Q') => self.mode = Mode::Tiles,
+            KeyCode::Esc | KeyCode::Char('i' | 'q' | 'Q' | 's' | 'S') => self.mode = Mode::Tiles,
+            KeyCode::Char('m' | 'M') => {
+                self.mode = Mode::Memory;
+                self.memory_view.refresh(&self.db);
+            }
             _ => {}
         }
     }

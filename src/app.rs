@@ -60,6 +60,9 @@ pub enum Action {
     TogglePreview,
     ToggleLayout,
     OpenSettings,
+    SelectStatus,
+    ToggleMemory,
+    OpenSessionMemory,
     Quit,
     None,
 }
@@ -69,10 +72,11 @@ pub enum Action {
 pub enum Mode {
     Tiles,
     Settings,
+    Memory,
 }
 
 /// Maps a key press to an action: `h j k l` / arrows, Enter / Space, `p`/`P`,
-/// `v`/`V`, `i`, `q`/`Q`, Ctrl-C.
+/// `v`/`V`, `s`/`S`, `m`/`M`, `i`, `q`/`Q`, Ctrl-C.
 /// Release and repeat events map to [`Action::None`].
 pub fn key_to_action(key: KeyEvent) -> Action {
     if key.kind != KeyEventKind::Press {
@@ -93,6 +97,9 @@ pub fn key_to_action(key: KeyEvent) -> Action {
         KeyCode::Enter | KeyCode::Char(' ') => Action::Focus,
         KeyCode::Char('p' | 'P') => Action::TogglePreview,
         KeyCode::Char('v' | 'V') => Action::ToggleLayout,
+        KeyCode::Char('s' | 'S') => Action::SelectStatus,
+        KeyCode::Char('m' | 'M') => Action::ToggleMemory,
+        KeyCode::Char('o' | 'O') => Action::OpenSessionMemory,
         KeyCode::Char('i') => Action::OpenSettings,
         KeyCode::Char('q' | 'Q') => Action::Quit,
         _ => Action::None,
@@ -152,10 +159,22 @@ pub struct App {
     pub window_order: Vec<String>,
     /// The window holding the monitor itself, if known.
     pub current_window: Option<String>,
+    /// SQLite storage for Claude memories, conversations, and executions.
+    pub db: Arc<crate::storage::Db>,
+    /// View state for the memory and history explorer.
+    pub memory_view: crate::ui::memory::MemoryView,
+    /// Background collector stop flag.
+    pub collector_stop: Option<Arc<AtomicBool>>,
 }
 
 impl App {
     pub fn new(config: Config) -> Self {
+        let db = Arc::new(crate::storage::Db::open_in_memory().unwrap_or_else(|_| {
+            crate::storage::Db::open(&crate::storage::default_db_path()).expect("failed to open db")
+        }));
+        let mut memory_view = crate::ui::memory::MemoryView::new();
+        memory_view.refresh(&db);
+
         Self {
             sessions: Vec::new(),
             selected: 0,
@@ -185,6 +204,9 @@ impl App {
             spirits_visible: false,
             window_order: Vec::new(),
             current_window: None,
+            db,
+            memory_view,
+            collector_stop: None,
         }
     }
 
@@ -205,6 +227,13 @@ impl App {
         app
     }
 
+    /// Connects a shared database instance and refreshes memory view.
+    pub fn with_db(mut self, db: Arc<crate::storage::Db>) -> Self {
+        self.memory_view.refresh(&db);
+        self.db = db;
+        self
+    }
+
     /// Starts the PR poller if PR info is enabled (call once at startup).
     pub fn start_pr_poller_if_enabled(&mut self) {
         self.sync_pr_poller();
@@ -214,6 +243,9 @@ impl App {
     pub fn shutdown(&mut self) {
         if let Some(p) = &mut self.pr_poller {
             p.stop();
+        }
+        if let Some(stop) = &self.collector_stop {
+            stop.store(true, Ordering::Relaxed);
         }
     }
 
@@ -249,6 +281,16 @@ impl App {
     pub fn toggle_preview(&mut self) {
         self.preview = !self.preview;
         self.sync_preview_target();
+    }
+
+    /// `m`: shows or hides the memory explorer screen.
+    pub fn toggle_memory(&mut self) {
+        if self.mode == Mode::Memory {
+            self.mode = Mode::Tiles;
+        } else {
+            self.mode = Mode::Memory;
+            self.memory_view.refresh(&self.db);
+        }
     }
 
     /// What the preview thread should read now: the selected session while
@@ -392,9 +434,97 @@ impl App {
         }
     }
 
+    pub fn handle_memory_key(&mut self, key: KeyEvent, _now: Instant) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if self.memory_view.is_searching {
+            match key.code {
+                KeyCode::Esc => {
+                    self.memory_view.is_searching = false;
+                }
+                KeyCode::Enter => {
+                    self.memory_view.is_searching = false;
+                    self.memory_view.refresh(&self.db);
+                }
+                KeyCode::Backspace => {
+                    self.memory_view.search_query.pop();
+                    self.memory_view.refresh(&self.db);
+                }
+                KeyCode::Char(c) => {
+                    self.memory_view.search_query.push(c);
+                    self.memory_view.refresh(&self.db);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.memory_view.session_packet.is_some() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q' | 'Q') | KeyCode::Enter => {
+                    self.memory_view.session_packet = None;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.memory_view.scroll_packet_down(2);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.memory_view.scroll_packet_up(2);
+                }
+                KeyCode::Char('d') | KeyCode::PageDown => {
+                    self.memory_view.scroll_packet_down(10);
+                }
+                KeyCode::Char('u') | KeyCode::PageUp => {
+                    self.memory_view.scroll_packet_up(10);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 's' | 'S' | 'm' | 'M') => {
+                self.mode = Mode::Tiles;
+            }
+            KeyCode::Tab => {
+                self.memory_view.switch_tab(true);
+            }
+            KeyCode::BackTab => {
+                self.memory_view.switch_tab(false);
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.memory_view.move_cursor_down();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.memory_view.move_cursor_up();
+            }
+            KeyCode::Char('d') | KeyCode::PageDown => {
+                self.memory_view.scroll_detail_down();
+            }
+            KeyCode::Char('u') | KeyCode::PageUp => {
+                self.memory_view.scroll_detail_up();
+            }
+            KeyCode::Enter | KeyCode::Char('o' | 'O') => {
+                self.memory_view.open_selected_session_packet(&self.db);
+            }
+            KeyCode::Char('/') => {
+                self.memory_view.is_searching = true;
+            }
+            KeyCode::Char('r' | 'R') => {
+                let _ = crate::storage::sync_once(&self.db, &crate::storage::default_projects_dir());
+                self.memory_view.refresh(&self.db);
+            }
+            _ => {}
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, cmux: &BackgroundFocus, now: Instant) {
         if self.mode == Mode::Settings {
             self.handle_settings_key(key, now);
+            return;
+        }
+        if self.mode == Mode::Memory {
+            self.handle_memory_key(key, now);
             return;
         }
         let action = key_to_action(key);
@@ -404,6 +534,14 @@ impl App {
                 self.sync_preview_target();
             }
             Action::TogglePreview => self.toggle_preview(),
+            Action::SelectStatus => self.mode = Mode::Tiles,
+            Action::ToggleMemory => self.toggle_memory(),
+            Action::OpenSessionMemory => {
+                if let Some(sid) = self.selected_session().map(|s| s.id.clone()) {
+                    self.mode = Mode::Memory;
+                    self.memory_view.open_session(&sid, &self.db);
+                }
+            }
             // The same change as the settings row: saved and shared at once.
             Action::ToggleLayout => self.apply_setting(SettingsItem::CardLayout, now),
             // While a focus is in flight further Enter/Space presses are ignored.
@@ -488,8 +626,14 @@ pub fn run(
         stop.clone(),
     ));
 
+    let db = Arc::new(crate::storage::Db::open(&crate::storage::default_db_path())?);
+    let collector_stop = Arc::new(AtomicBool::new(false));
+    drop(crate::storage::spawn_collector(db.clone(), None, Duration::from_secs(2), collector_stop.clone()));
+
     let cmux = BackgroundFocus::new(Arc::new(CmuxCli::new()));
-    let mut app = App::with_settings(config, crate::config::default_path(), shared_config, poller, cache);
+    let mut app = App::with_settings(config, crate::config::default_path(), shared_config, poller, cache)
+        .with_db(db);
+    app.collector_stop = Some(collector_stop);
     app.start_pr_poller_if_enabled();
     // Screen reads for the preview never run on the UI or refresh thread.
     let (preview_cache, preview_slot) = app.preview_shared();
@@ -821,6 +965,84 @@ mod tests {
         app.handle_key(key(KeyCode::Char('p')), &cmux, Instant::now());
         assert!(!app.preview);
         assert_eq!(app.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn key_m_toggles_memory_mode() {
+        let mut app = app_with(3, 3);
+        let (cmux, _) = bg(FakeCmux::new(vec![]));
+        assert_eq!(app.mode, Mode::Tiles);
+
+        app.handle_key(key(KeyCode::Char('m')), &cmux, Instant::now());
+        assert_eq!(app.mode, Mode::Memory);
+
+        // In memory mode, navigation keys move memory cursor, not session selection
+        app.handle_key(key(KeyCode::Char('j')), &cmux, Instant::now());
+        assert_eq!(app.selected, 0);
+
+        // Tab switches tab
+        app.handle_key(key(KeyCode::Tab), &cmux, Instant::now());
+        assert_eq!(app.memory_view.tab, crate::ui::memory::MemoryTab::Timeline);
+
+        // Esc or m returns to Tiles
+        app.handle_key(key(KeyCode::Esc), &cmux, Instant::now());
+        assert_eq!(app.mode, Mode::Tiles);
+
+        // M (uppercase) also toggles
+        app.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT), &cmux, Instant::now());
+        assert_eq!(app.mode, Mode::Memory);
+        app.handle_key(key(KeyCode::Char('m')), &cmux, Instant::now());
+        assert_eq!(app.mode, Mode::Tiles);
+
+        // 'm' enters Memory, 's' returns to Status (Tiles)
+        app.handle_key(key(KeyCode::Char('m')), &cmux, Instant::now());
+        assert_eq!(app.mode, Mode::Memory);
+        app.handle_key(key(KeyCode::Char('s')), &cmux, Instant::now());
+        assert_eq!(app.mode, Mode::Tiles);
+
+        // 's' while in Tiles stays in Tiles
+        app.handle_key(key(KeyCode::Char('s')), &cmux, Instant::now());
+        assert_eq!(app.mode, Mode::Tiles);
+    }
+
+    #[test]
+    fn key_o_opens_session_memory() {
+        let mut app = app_with(2, 2);
+        let (cmux, _) = bg(FakeCmux::new(vec![]));
+
+        // Insert mock data for session "s0" into app.db
+        app.db
+            .insert_conversation(
+                "s0",
+                "test-project",
+                "user",
+                Some("aaaaaaaa-0001-0000-0000-000000000001"),
+                None,
+                1_700_000_000_000,
+                None,
+                "User message in s0",
+            )
+            .unwrap();
+
+        assert_eq!(app.mode, Mode::Tiles);
+
+        // Press 'o' on selected session 's0'
+        app.handle_key(key(KeyCode::Char('o')), &cmux, Instant::now());
+        assert_eq!(app.mode, Mode::Memory);
+        assert!(app.memory_view.session_packet.is_some());
+        assert_eq!(app.memory_view.session_packet.as_ref().unwrap().session_id, "s0");
+
+        // Inside session packet view, pressing j scrolls down, Esc closes packet overlay
+        app.handle_key(key(KeyCode::Char('j')), &cmux, Instant::now());
+        assert_eq!(app.memory_view.session_packet_scroll, 2);
+
+        app.handle_key(key(KeyCode::Esc), &cmux, Instant::now());
+        assert!(app.memory_view.session_packet.is_none());
+        assert_eq!(app.mode, Mode::Memory);
+
+        // Pressing Esc again returns to Tiles
+        app.handle_key(key(KeyCode::Esc), &cmux, Instant::now());
+        assert_eq!(app.mode, Mode::Tiles);
     }
 
     #[test]

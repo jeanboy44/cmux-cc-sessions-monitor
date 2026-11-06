@@ -4,6 +4,7 @@ pub mod card;
 pub mod grid;
 pub mod groups;
 pub mod hud;
+pub mod memory;
 pub mod preview;
 pub mod scene;
 pub mod screen;

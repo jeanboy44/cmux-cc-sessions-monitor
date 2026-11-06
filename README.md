@@ -36,6 +36,8 @@ Then run `cmux-magigent` in a cmux pane. Requires a Rust toolchain (1.89 or newe
 | `Enter` / `Space` | Focus the selected session's cmux workspace and pane |
 | `v` | Switch the card layout: standard (29x9) or large (46x10, stretched to fill the row); saved as `card_layout` |
 | `p` | Toggle preview (a column of cards of the current layout plus the session's screen) |
+| `s` | Switch to **Status** tab (real-time Claude Code session tiles) |
+| `m` | Switch to **Memory** tab (Claude memories, timeline, executions, conversations) |
 | `i` | Open settings |
 | `q` / `Ctrl-C` | Quit |
 
@@ -56,6 +58,7 @@ The config file is `~/.config/cmux-magigent/config.toml` (if it does not exist y
 | `done_retention_minutes` | `10` | How long finished sessions stay on screen |
 | `card_layout` | `"standard"` | `"standard"`: 29x9 cards (spirit, name, badge, branch or PR, summary on up to four lines); `"large"`: 46x10 cards (stretched to fill the row) with a bigger spirit and more text (model, branch, PR, summary on up to three lines). Any other value loads as `"standard"`. Also switched with `v` and in settings |
 | `subagent_active_seconds` | `30` | A subagent counts as running while its transcript was written within this many seconds (see [Subagents](#subagents)) |
+| `timezone` | `"KST"` | Timezone for timestamps in Memory and history viewer and CLI (`"KST"`, `"UTC"`, `"JST"`, `"EST"`, `"PST"` or `+09:00`) |
 | `[extras]` | `branch`, `elapsed`, `summary` on; `last_activity`, `pr` off | Extra info shown on cards |
 
 ## Remote sessions
@@ -116,6 +119,67 @@ Detection limits, chosen to undercount rather than overcount:
 - The hook file's `hadPendingBackgroundWorkAtStop` is only a yes/no flag at the moment a turn stopped, so it is not used.
 - A pending call of an Idle session older than 120 seconds is ignored (an interrupted or crashed call); a session waiting for permission (`INPUT`) keeps showing the call it asks about. Done sessions show nothing.
 - Background tasks started by subagents belong to the subagent and are not counted, and a task launched before the first 2 MiB window is unknown until it ends.
+
+## Memory & History Storage
+
+cmux-magigent embeds an SQLite engine (with WAL mode and progressive disclosure indexing inspired by `claude-mem`) to collect and query Claude's long-term memory, execution history, and transcripts in real time.
+
+Database location: `~/.local/share/cmux-magigent/records.db` (overrideable with `CMUX_MAGIGENT_DB`).
+
+### TUI Viewer (`m`)
+
+Press `m` in the session monitor to enter the interactive Memory & History explorer, or press `o` on any session card in the Status view to open its complete memory bundle:
+- `Tab` / `BackTab` (or `Shift+Tab`): switch between tabs:
+  1. **1. 메모리 (Memories)**: Project-level memories (`~/.claude/projects/<project>/memory/`), categorised with YAML frontmatter.
+  2. **2. 타임라인 / 관찰 (Timeline / Observations)**: Chronological observation narrative (`change`, `discovery`, `execution`, `memory`).
+  3. **3. 실행 이력 (Executions)**: Detailed tool and command executions with parameters and outputs.
+  4. **4. 대화 기록 (Conversations)**: User/assistant dialogue history and context snippets.
+- `Enter` / `o`: open the full consolidated Session Memory Report overlay for the selected item.
+- `j` / `k` (or `↓` / `↑`): navigate list items (or scroll report).
+- `d` / `u` (or `PageDown` / `PageUp`): scroll 10 lines in detail or session report.
+- `/`: live filter query.
+- `r`: trigger instant synchronization from disk.
+- `s`: switch back to Status tab (`Status [s] | Memory [m]`).
+- `Esc` / `q`: close overlay / return to session tiles.
+
+### CLI Query Tool
+
+Query past sessions and memories directly from your terminal:
+
+```sh
+# Show database statistics
+cmux-magigent memory stats
+
+# Dump complete session memory bundle (Markdown report)
+cmux-magigent memory session <SESSION_ID>
+
+# Dump session memory as JSON (for AI pipelines / prompt injection)
+cmux-magigent memory session <SESSION_ID> --json
+
+# Save session bundle directly to a file
+cmux-magigent memory session <SESSION_ID> -o session_dump.md
+
+# List recent memories across all projects
+cmux-magigent memory list --limit 10
+
+# Search memories and transcripts
+cmux-magigent memory search "auth"
+
+# View observation timeline
+cmux-magigent memory timeline --limit 20
+
+# View structured observations
+cmux-magigent memory obs --type change
+
+# Inspect recent tool executions
+cmux-magigent memory exec --limit 10
+
+# View recent conversation messages
+cmux-magigent memory conv --limit 10
+
+# Manually trigger disk sync
+cmux-magigent memory sync
+```
 
 ## How status is detected
 

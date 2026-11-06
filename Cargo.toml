@@ -19,6 +19,7 @@ toml = "0.9"
 anyhow = "1"
 dirs = "6"
 unicode-width = "0.2"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
